@@ -191,7 +191,8 @@ enum ToolRegistry {
 
     static func install(_ tool: String, line: @escaping (String) -> Void, done: @escaping (Bool) -> Void) {
         guard let s = spec(tool) else {
-            line("tool non catalogato: \(tool) — cerco su Sileo")
+            line("tool non catalogato: \(tool) — apro la ricerca Sileo")
+            DispatchQueue.main.async { openSileo(tool, search: true) }
             done(false)
             return
         }
@@ -230,8 +231,8 @@ enum ToolRegistry {
         }
     }
 
-    static func openSileo(_ pkg: String) {
-        guard let url = URL(string: "sileo://package/\(pkg)") else { return }
+    static func openSileo(_ pkg: String, search: Bool = false) {
+        guard let url = URL(string: search ? "sileo://search/\(pkg)" : "sileo://package/\(pkg)") else { return }
         UIApplication.shared.open(url, options: [:], completionHandler: nil)
     }
 }
