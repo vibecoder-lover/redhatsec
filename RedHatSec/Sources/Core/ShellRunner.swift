@@ -20,7 +20,7 @@ final class ShellRunner {
     }()
 
     private var pathEnv: String {
-        var parts: [String] = []
+        var parts: [String] = ["/var/mobile/RedHatSec/bin"]
         for root in bootstrapRoots {
             let p = root.isEmpty ? "/usr/bin:/bin:/usr/sbin:/sbin" : "\(root)/usr/bin:\(root)/bin"
             parts.append(p)
@@ -30,13 +30,16 @@ final class ShellRunner {
 
     func resolve(_ bin: String) -> String? {
         let fm = FileManager.default
+        // app-installed binari prima
+        let appBin = "/var/mobile/RedHatSec/bin"
+        if fm.fileExists(atPath: appBin + "/" + bin) { return appBin + "/" + bin }
         for root in bootstrapRoots {
             let prefix = root.isEmpty ? "" : root
             let dirs = root.isEmpty ? ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
                                     : ["\(root)/usr/bin", "\(root)/bin"]
             for d in dirs {
                 let full = prefix + d + "/" + bin
-                if fm.isExecutableFile(atPath: full) { return full }
+                if fm.isExecutableFile(atPath: full) || fm.fileExists(atPath: full) { return full }
             }
         }
         return nil
