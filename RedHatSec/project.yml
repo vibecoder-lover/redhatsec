@@ -1,0 +1,49 @@
+name: RedHatSec
+options:
+  bundleIdPrefix: com.he
+  deploymentTarget:
+    iOS: "16.1"
+  createIntermediateGroups: true
+
+targets:
+  RedHatSec:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: RedHat Sec
+        UILaunchScreen: {}
+        NSBluetoothAlwaysUsageDescription: "BLE/BT device discovery, enumeration and assessment."
+        NSBluetoothPeripheralUsageDescription: "BLE/BT device discovery and assessment."
+        NFCReaderUsageDescription: "NFC/RFID tag reading and analysis for assessment."
+        NSLocalNetworkUsageDescription: "Local IoT discovery (mDNS/SSDP/port probing) for assessment."
+        NSLocationWhenInUseUsageDescription: "Needed to read nearby Wi-Fi metadata during assessment."
+        NSBonjourServices:
+          - _hap._tcp
+          - _ipp._tcp
+          - _airplay._tcp
+          - _googlecast._tcp
+          - _esphomelib._tcp
+          - _http._tcp
+          - _mqtt._tcp
+          - _coap._tcp
+          - _workstation._tcp
+        UIBackgroundModes: [bluetooth-central]
+        UIUserInterfaceStyle: Dark
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+    entitlements:
+      path: RedHatSec.entitlements
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.9"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.1"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGN_IDENTITY: ""
+        ENABLE_BITCODE: "NO"
+        ARCHS: arm64
+        GCC_OPTIMIZATION_LEVEL: "3"
+        SWIFT_OPTIMIZATION_LEVEL: "-O"

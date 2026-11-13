@@ -1,0 +1,41 @@
+name: Build RedHatSec (unsigned, TrollStore)
+
+on:
+  push:
+    paths: ["RedHatSec/**", ".github/workflows/build.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: brew install xcodegen ldid
+
+      - name: Generate Xcode project
+        run: cd RedHatSec && xcodegen
+
+      - name: Build unsigned (arm64, iphoneos)
+        run: |
+          cd RedHatSec
+          xcodebuild -project RedHatSec.xcodeproj -scheme RedHatSec \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED="NO" CODE_SIGNING_ALLOWED="NO" \
+            ARCHS=arm64 build | tail -20
+
+      - name: Fake-sign with entitlements
+        run: |
+          APP=RedHatSec/build/Build/Products/Release-iphoneos/RedHatSec.app
+          ldid -SRedHatSec.entitlements "$APP/RedHatSec"
+
+      - name: Package .app
+        run: |
+          cd RedHatSec/build/Build/Products/Release-iphoneos
+          zip -qr RedHatSec.tipa RedHatSec.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RedHatSec-app
+          path: RedHatSec/build/Build/Products/Release-iphoneos/RedHatSec.tipa
