@@ -62,6 +62,10 @@ struct TargetDevice: Identifiable, Codable, Hashable {
     var extra: [String: String] = [:]
 }
 
+enum ProofType: String, Codable {
+    case bannerOnly, responseConfirmed, exploitConfirmed
+}
+
 struct Finding: Identifiable, Codable {
     var id = UUID()
     var vectorID: String
@@ -75,6 +79,9 @@ struct Finding: Identifiable, Codable {
     var repro: [String]
     var impact: String
     var remediation: String
+    var proof: ProofType = .bannerOnly
+    var evidenceHash: String = ""
+    var utc: String = ""
 }
 
 struct Report: Identifiable, Codable {

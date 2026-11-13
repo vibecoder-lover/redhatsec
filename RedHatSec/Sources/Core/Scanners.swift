@@ -276,8 +276,8 @@ final class WiFiScanner {
     func availableNetworks() -> [WiFiNet] {
         diagLines = []
         var nets: [WiFiNet] = []
-        if let n = probeHotspotHelper() { nets = n }
-        else if let n = probeMobileWiFi() { nets = n }
+        if let n = probeMobileWiFi() { nets = n }
+        else if let n = probeHotspotHelper() { nets = n }
         else if let n = probeCurrentNetworkInfo() { nets = n }
         else if let n = probeHotspotCurrent() { nets = n }
         else { nets = probeKnownNetworksPlist() }

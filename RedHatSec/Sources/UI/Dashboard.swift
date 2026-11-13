@@ -32,6 +32,13 @@ struct DashboardView: View {
                     }
                     .disabled(o.prepBusy || o.phase == .execute || o.phase == .scan || o.phase == .enumerate)
                 }
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(role: .destructive) {
+                        o.panicWipe()
+                    } label: {
+                        Image(systemName: "xmark.shield.fill")
+                    }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button { showConsole = true } label: {
                         Image(systemName: "terminal")

@@ -27,16 +27,20 @@ struct NFCAttackView: View {
                               sev: .high, needsConfig: false, executable: true)
         switch t.family {
         case "Mifare Classic":
+            // CoreNFC non espone l'auth Mifare Classic (0x60) in modo affidabile: keys/dump/clone = PoC fisico richiesto
             return [
-                NFCTactic(id: "mifare_keys", name: "Default Keys Probe",
-                          brief: "Auth probe con chiavi di fabbrica — hit = dump pieno possibile.",
-                          sev: .high, needsConfig: false, executable: true),
-                clone, inject,
+                NFCTactic(id: "mifare_keys", name: "Default Keys Probe (PoC)",
+                          brief: "CoreNFC non garantisce l'auth 0x60 su Classic — eseguibile solo come PoC su tag fisico.",
+                          sev: .medium, needsConfig: false, executable: true),
+                NFCTactic(id: "clone_plan", name: "Clone (PLAN — hardware)",
+                          brief: "Dump+clone Classic richiedono Proxmark/PN532 via bridge BLE.",
+                          sev: .info, needsConfig: false, executable: false),
+                inject,
             ]
         case "NTAG/Ultralight":
             return [
-                NFCTactic(id: "ntag_pwd", name: "PWD Dictionary Probe",
-                          brief: "PWD di fabbrica NTAG — hit = CFG scrivibile dopo auth.",
+                NFCTactic(id: "ntag_pwd", name: "PWD Dictionary Probe (PoC)",
+                          brief: "PWD di fabbrica NTAG21x — comando 0x1B ISO14443-A da verificare su tag fisico.",
                           sev: .high, needsConfig: false, executable: true),
                 inject, clone,
             ]

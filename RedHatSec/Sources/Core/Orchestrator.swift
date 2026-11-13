@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import SwiftUI
+import CryptoKit
 
 struct PlanEntry: Identifiable {
     var id = UUID()
@@ -28,6 +29,7 @@ final class Orchestrator: ObservableObject {
     let nfc = NFCScanner()
     let net = NetScanner()
     let shell = ShellRunner.shared
+    let bridge = BridgeManager()
 
     init() {
         loadDumps()
@@ -225,9 +227,11 @@ final class Orchestrator: ObservableObject {
                     if let v = vec("net_hnap") { entries.append(PlanEntry(vector: v, target: t)) }
                 }
             case .nfc:
-                if let v = vec("nfc_mifare1k") { entries.append(PlanEntry(vector: v, target: t)) }
-                if let v = vec("nfc_clone") { entries.append(PlanEntry(vector: v, target: t)) }
+                // Mifare Classic keys/dump declassati a PLAN (PoC fisico richiesto — CoreNFC non espone l'auth)
                 if let v = vec("nfc_ndef_inject") { entries.append(PlanEntry(vector: v, target: t)) }
+                if let v = vec("nfc_clone"), t.extra["dump"] != nil {
+                    entries.append(PlanEntry(vector: v, target: t))
+                }
             default: break
             }
         }
@@ -263,17 +267,21 @@ final class Orchestrator: ObservableObject {
             currentStep = entry.vector.name
             log("→ \(entry.vector.name) (\(entry.vector.ref))", .exec)
             let evidence = await runVector(entry)
+            let proof = proofFor(entry, evidence)
             let f = Finding(vectorID: entry.vector.id,
                             title: entry.vector.name,
                             target: entry.target.map { "\($0.name)" } ?? "global",
-                            sev: entry.vector.sev,
-                            cvss: entry.vector.cvss,
+                            sev: proof == .bannerOnly ? .info : entry.vector.sev,
+                            cvss: proof == .bannerOnly ? 0 : entry.vector.cvss,
                             cvssVec: entry.vector.cvssVec,
                             attack: entry.vector.attack,
                             evidence: String(evidence.prefix(1500)),
                             repro: [entry.vector.prereq, entry.vector.hint],
                             impact: entry.vector.brief,
-                            remediation: entry.vector.remediation)
+                            remediation: entry.vector.remediation,
+                            proof: proof,
+                            evidenceHash: sha256Hex(String(evidence.prefix(1500))),
+                            utc: isoUTC())
             findings.append(f)
             attackLog.append(AttackRecord(vectorID: entry.vector.id, vector: entry.vector.name,
                                           target: f.target, outcome: outcomeLabel(entry, evidence),
@@ -398,6 +406,83 @@ final class Orchestrator: ObservableObject {
         }
     }
 
+    // no-PoC-no-finding: solo exploit_confirmed/response_confirmed portano severità piena
+    static let proofMap: [String: ProofType] = [
+        "ble_enum": .responseConfirmed,
+        "ble_write": .exploitConfirmed,
+        "ble_connectflood": .responseConfirmed,
+        "ble_sweyntooth": .bannerOnly,
+        "net_mqtt": .exploitConfirmed,
+        "net_telnet": .exploitConfirmed,
+        "net_snmp": .responseConfirmed,
+        "net_coap": .responseConfirmed,
+        "net_modbus": .responseConfirmed,
+        "net_rtsp": .bannerOnly,
+        "net_upnp": .responseConfirmed,
+        "net_hnap": .bannerOnly,
+        "nfc_ndef_inject": .exploitConfirmed,
+        "nfc_clone": .exploitConfirmed,
+    ]
+
+    private func proofFor(_ e: PlanEntry, _ evidence: String) -> ProofType {
+        if e.vector.cap == .plan { return .bannerOnly }
+        guard let expected = Self.proofMap[e.vector.id] else { return .bannerOnly }
+        switch expected {
+        case .exploitConfirmed:
+            let hit = evidence.contains("✓") || evidence.contains("SUCCESS") ||
+                      evidence.contains("KEY FOUND") || evidence.contains("PWD FOUND")
+            return hit ? .exploitConfirmed : .responseConfirmed
+        case .responseConfirmed:
+            let weak = evidence.contains("muto") || evidence.contains("nessuna risposta") ||
+                       evidence.contains("PLAN") || evidence.contains("non implementato")
+            return weak ? .bannerOnly : .responseConfirmed
+        case .bannerOnly:
+            return .bannerOnly
+        }
+    }
+
+    private func sha256Hex(_ s: String) -> String {
+        SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func isoUTC() -> String {
+        ISO8601DateFormatter().string(from: Date())
+    }
+
+    // OPSEC: wipe totale di stato, journal e dump — gesture di panico
+    func panicWipe() {
+        bridge.stopAll()
+        plan = []; findings = []; attackLog = []; nfcDumps = []; logs = []
+        try? FileManager.default.removeItem(at: journalPath)
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.removeItem(at: docs.appendingPathComponent("nfc_dumps"))
+        loadDumps()
+        phase = .idle
+        Haptics.heavy()
+        log("PANIC WIPE — stato operativo e journal cancellati", .bad)
+    }
+
+    // vettori PLAN eseguibili via bridge radio (ESP32) quando connesso
+    private func runViaBridge(_ e: PlanEntry) async -> String? {
+        guard bridge.connected else { return nil }
+        guard let t = e.target, let mac = t.mac, mac.count > 10 else { return nil }
+        let ch = Int(t.extra["ch"] ?? "") ?? 6
+        switch e.vector.id {
+        case "wifi_deauth":
+            let ok = await bridge.deauth(mac: mac, ch: ch)
+            return ok ? "deauth via bridge ✓ (\(mac) ch\(ch))" : "deauth via bridge FALLITA"
+        case "wifi_pmkid":
+            let ok = await bridge.pmkid(mac: mac, ch: ch)
+            return ok ? "pmkid capture via bridge ✓ (\(mac))" : "pmkid via bridge FALLITA"
+        case "wifi_beaconflood":
+            let names = targets.filter { $0.proto == .wifi }.compactMap { $0.extra["rawName"] }
+            let ok = await bridge.beaconSpam(ssids: names.isEmpty ? ["FreeWiFi", "RedHatSec"] : names)
+            return ok ? "beacon spam via bridge ✓ (\(max(1, names.count)) SSID)" : "beacon spam FALLITO"
+        default:
+            return nil
+        }
+    }
+
     func recordAttack(vectorID: String, vector: String, target: String, outcome: String, evidence: String) {
         attackLog.append(AttackRecord(vectorID: vectorID, vector: vector, target: target,
                                       outcome: outcome, evidence: String(evidence.prefix(200))))
@@ -456,6 +541,7 @@ final class Orchestrator: ObservableObject {
             let r = await Task.detached { sh.run(tool, args: args, timeout: 30) }.value
             return "tool \(tool) exit=\(r.exitCode)\nstdout: \(r.stdout.prefix(1000))\nstderr: \(r.stderr.prefix(400))"
         case .plan:
+            if let via = await runViaBridge(e) { return via }
             return "PLAN — richiede hardware/radio esterna.\nPrereq: \(e.vector.prereq)\nExec: \(e.vector.hint)"
         case .native:
             return await runNative(e)
