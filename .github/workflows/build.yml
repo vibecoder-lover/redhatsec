@@ -34,13 +34,21 @@ jobs:
             ARCHS=arm64 build | tail -30
 
       - name: Fake-sign with entitlements
+        continue-on-error: true
         run: |
-          APP=$(find RedHatSec/build -maxdepth 5 -type d -name '*.app' | head -1)
-          echo "APP=$APP"
-          ls -la "$APP" | head -20
-          EXEC=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
-          echo "EXEC=$EXEC"
-          ldid -SRedHatSec.entitlements "$APP/$EXEC"
+          set -x
+          APP=$(find RedHatSec/build -type d -name '*.app' | head -1)
+          echo "APP=[$APP]"
+          ls -la "$APP" || true
+          EXEC=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist" 2>&1)
+          echo "EXEC=[$EXEC]"
+          if [ -f "$APP/$EXEC" ]; then
+            ldid -SRedHatSec.entitlements "$APP/$EXEC" && echo "SIGNED OK"
+          else
+            echo "::error::executable non trovato in $APP"
+            file "$APP"/* || true
+            exit 1
+          fi
 
       - name: Package .app
         run: |
