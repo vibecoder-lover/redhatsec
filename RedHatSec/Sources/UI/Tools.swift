@@ -181,10 +181,9 @@ extension TerminalModel {
         let cmd = raw.trimmingCharacters(in: .whitespaces)
         guard !cmd.isEmpty, !running else { return }
         let parts = cmd.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-        guard let head = parts.first, head != "install" else {
-            if head == "install", parts.count > 1 {
-                installTool(parts[1])
-            }
+        guard let head = parts.first else { return }
+        if head == "install" {
+            if parts.count > 1 { installTool(parts[1]) }
             return
         }
         if ShellRunner.shared.resolve(head) == nil {
