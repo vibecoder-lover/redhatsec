@@ -150,7 +150,7 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         guard central.state == .poweredOn,
               let per = peripherals[target.mac ?? ""] else { return "peripheral not in range/cache" }
         return await withCheckedContinuation { cont in
-            writeCont = { cont.resume($0) }
+            writeCont = { cont.resume(returning: $0) }
             per.delegate = self
             writeTarget = (service, characteristic, payload)
             central.connect(per, options: nil)
