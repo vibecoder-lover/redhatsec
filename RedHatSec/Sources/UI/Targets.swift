@@ -1,5 +1,17 @@
 import SwiftUI
 
+func outcomeColor(_ outcome: String) -> Color {
+    if outcome.contains("executed") || outcome.contains("tool:") { return .ok }
+    if outcome == "plan" { return .warn }
+    return .bad
+}
+
+func outcomeMark(_ outcome: String) -> String {
+    if outcome.contains("executed") || outcome.contains("tool:") { return "✓" }
+    if outcome == "plan" { return "◌" }
+    return "✕"
+}
+
 struct TargetsView: View {
     @EnvironmentObject var o: Orchestrator
     @State private var filter: Proto?
@@ -94,7 +106,7 @@ struct TargetsView: View {
                 ForEach(o.attackLog.reversed().prefix(20)) { a in
                     HStack(alignment: .top, spacing: 10) {
                         Circle()
-                            .fill(a.outcome.contains("executed") || a.outcome.contains("tool:") ? .ok : (a.outcome == "plan" ? .warn : .bad))
+                            .fill(outcomeColor(a.outcome))
                             .frame(width: 8, height: 8)
                             .padding(.top, 5)
                         VStack(alignment: .leading, spacing: 2) {
@@ -410,9 +422,9 @@ struct TargetDetailView: View {
             Text("ATTACCHI SU QUESTO TARGET").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.redHat)
             ForEach(relatedAttacks) { a in
                 HStack(spacing: 8) {
-                    Text(a.outcome.contains("executed") || a.outcome.contains("tool:") ? "✓" : (a.outcome == "plan" ? "◌" : "✕"))
+                    Text(outcomeMark(a.outcome))
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(a.outcome.contains("executed") || a.outcome.contains("tool:") ? .ok : (a.outcome == "plan" ? .warn : .bad))
+                        .foregroundColor(outcomeColor(a.outcome))
                     Text(a.vector).font(.system(size: 12)).foregroundColor(.white)
                     Spacer()
                     Text(DateFormatter.localizedString(from: a.date, dateStyle: .none, timeStyle: .short))

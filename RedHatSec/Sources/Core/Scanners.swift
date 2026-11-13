@@ -437,11 +437,10 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
                 finishScan(dump)
                 return
             }
-            m.sendMiFareCommand(commandPacket: Data([0x30, page])) { resp, err in
-                if let err, err.code != 0 {
-                    dump.pages.append("ERR(\(err.code))")
-                } else {
-                    dump.pages.append(resp.hexPreview)
+            m.sendMiFareCommand(commandPacket: Data([0x30, page])) { result in
+                switch result {
+                case .success(let data): dump.pages.append(data.hexPreview)
+                case .failure(let e): dump.pages.append("ERR(\((e as NSError).code))")
                 }
                 page += 1
                 readNext()
@@ -464,9 +463,10 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
                 self.finishReplay(self.replayBuffer)
                 return
             }
-            let records: [NFCNDEFRecord] = dump.ndefHex.compactMap { hex in
+            let records: [CoreNFC.NFCNDEFRecord] = dump.ndefHex.compactMap { hex in
                 guard let d = Data(hexString: hex), !d.isEmpty else { return nil }
-                return NFCNDEFRecord(typeNameFormat: .unknown, type: Data(), identifier: Data(), payload: d)
+                return CoreNFC.NFCNDEFRecord(typeNameFormat: CoreNFC.NFCTypeNameFormat.unknown,
+                                             type: Data(), identifier: Data(), payload: d)
             }
             if records.isEmpty {
                 self.replayBuffer.append("nessun NDEF nel dump — write pages NTAG:")
@@ -484,11 +484,10 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
                         writeNext()
                         return
                     }
-                    m.sendMiFareCommand(commandPacket: Data([0xA2, pg]) + d) { _, err in
-                        if let err, err.code != 0 {
-                            self.replayBuffer.append("write p\(pg) ERR(\(err.code))")
-                        } else {
-                            wrote += 1
+                    m.sendMiFareCommand(commandPacket: Data([0xA2, pg]) + d) { result in
+                        switch result {
+                        case .success: wrote += 1
+                        case .failure(let e): self.replayBuffer.append("write p\(pg) ERR(\((e as NSError).code))")
                         }
                         pg += 1
                         writeNext()
