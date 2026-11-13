@@ -339,7 +339,7 @@ final class TCPBridge: NSObject, ObservableObject {
 
     // l'iPhone entra nell'AP dell'ESP8266 (path "AP dell'ESP")
     func joinAP(ssid: String, pass: String) {
-        let cfg = NEHotspotConfiguration(ssidName: ssid, passphrase: pass, isWEP: false)
+        let cfg = NEHotspotConfiguration(ssidName: ssid, passphrase: pass)
         NEHotspotConfigurationManager.shared.apply(cfg) { [weak self] err in
             DispatchQueue.main.async {
                 if let err { self?.log("join AP fallito: \(err.localizedDescription)") }
