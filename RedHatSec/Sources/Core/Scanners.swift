@@ -606,6 +606,7 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
     }
 
     private func handleDump(_ tags: [NFCTag], _ session: NFCTagReaderSession) {
+        guard let t = tags.first, case let .miFare(m) = t else {
             session.alertMessage = "Tag non supportato"
             session.invalidate()
             finishScan(nil)
