@@ -65,7 +65,6 @@ struct ToolsTab: View {
                     Text("Builder").tag(1)
                     Text("Forge").tag(2)
                     Text("NFC").tag(3)
-                    Text("Bridge").tag(4)
                 }
                 .pickerStyle(.segmented)
                 .padding(10)
@@ -73,8 +72,7 @@ struct ToolsTab: View {
                 case 0: TerminalView().environmentObject(tm)
                 case 1: BuilderView().environmentObject(tm)
                 case 2: ForgeView()
-                case 3: NFCAttackView()
-                default: BridgeView()
+                default: NFCAttackView()
                 }
             }
             .background(Color.bg.ignoresSafeArea())

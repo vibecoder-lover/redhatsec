@@ -3,6 +3,7 @@ import SwiftUI
 struct DashboardView: View {
     @EnvironmentObject var o: Orchestrator
     @State private var showConsole = false
+    @State private var showSettings = false
     @State private var confirmExec = false
 
     var body: some View {
@@ -40,11 +41,17 @@ struct DashboardView: View {
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { showSettings = true } label: {
+                        Image(systemName: "gearshape")
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button { showConsole = true } label: {
                         Image(systemName: "terminal")
                     }
                 }
             }
+            .sheet(isPresented: $showSettings) { SettingsView().environmentObject(o) }
             .sheet(isPresented: $showConsole) { ConsoleView() }
             .confirmationDialog("Eseguire il piano?", isPresented: $confirmExec, titleVisibility: .visible) {
                 Button("Esegui (\(o.plan.count) step)", role: .destructive) { o.execute() }

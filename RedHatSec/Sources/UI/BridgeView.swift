@@ -1,136 +1,55 @@
 import SwiftUI
 
 struct BridgeView: View {
-    @EnvironmentObject var o: Orchestrator
-    @State private var transport = 0 // 0 BLE, 1 TCP
+    @ObservedObject var ble: BridgeManager
+    @ObservedObject var tcp: TCPBridge
     @State private var spamText = "FreeWiFi,Hotel_Guest"
     @State private var scanning = false
     @State private var manualIP = ""
     @State private var rawHex = ""
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                Picker("transport", selection: $transport) {
-                    Text("BLE ESP32").tag(0)
-                    Text("TCP ESP8266").tag(1)
-                }
-                .pickerStyle(.segmented)
-                if transport == 0 { bleSection }
-                else { tcpSection }
-                actionsSection
-                netsSection
-                rawSection
-                logSection
-            }
-            .padding(16)
+        VStack(alignment: .leading, spacing: 14) {
+            tcpSection
+            actionsSection
+            netsSection
+            rawSection
+            logSection
         }
-        .background(Color.bg.ignoresSafeArea())
-    }
-
-    private var bleSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("ESP32 BLE BRIDGE").font(.system(size: 16, weight: .heavy, design: .rounded)).foregroundColor(.white)
-                Spacer()
-                Pill(text: o.bridge.connected ? "ONLINE" : "OFFLINE", color: o.bridge.connected ? .ok : .bad)
-            }
-            KV(k: "stato", val: o.bridge.state)
-            KV(k: "device", val: o.bridge.deviceName ?? "—")
-            Button {
-                Haptics.heavy()
-                o.bridge.start()
-            } label: {
-                Label("CONNETTI BRIDGE", systemImage: "antenna.radiowaves.left.and.right")
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .frame(maxWidth: .infinity).padding(.vertical, 12)
-            }
-            .background(RoundedRectangle(cornerRadius: 12).fill(Color.redHat))
-            .foregroundColor(.white)
-            .buttonStyle(ScaleButton())
-        }
-        .padding(14).card()
+        .onAppear { tcp.startAutoConnect() }
     }
 
     private var tcpSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("ESP8266 TCP BRIDGE").font(.system(size: 16, weight: .heavy, design: .rounded)).foregroundColor(.white)
+                Text("ESP8266 BRIDGE").font(.system(size: 16, weight: .heavy, design: .rounded)).foregroundColor(.white)
                 Spacer()
-                Pill(text: o.tcpBridge.connected ? "ONLINE" : "OFFLINE", color: o.tcpBridge.connected ? .ok : .bad)
+                Pill(text: tcp.connected ? "ONLINE" : (tcp.state.hasPrefix("auto") ? "RICERCA…" : "OFFLINE"),
+                     color: tcp.connected ? .ok : (tcp.state.hasPrefix("auto") ? .warn : .bad))
             }
-            KV(k: "stato", val: o.tcpBridge.state)
-            KV(k: "dispositivo", val: o.tcpBridge.deviceName)
-            HStack(spacing: 8) {
-                Button {
-                    Haptics.tap()
-                    o.tcpBridge.sweep()
-                } label: {
-                    Label("CERCA IP (sweep)", systemImage: "dot.scope")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(maxWidth: .infinity).padding(.vertical, 10)
-                }
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.redHat.opacity(0.85)))
-                .foregroundColor(.white)
-                .buttonStyle(ScaleButton())
-
-                Button {
-                    Haptics.tap()
-                    o.tcpBridge.browse()
-                } label: {
-                    Label("mDNS", systemImage: "magnifyingglass")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(maxWidth: .infinity).padding(.vertical, 10)
-                }
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.surfaceHi))
-                .foregroundColor(.white)
-                .buttonStyle(ScaleButton())
-                .disabled(o.tcpBridge.browsing)
-
-                Button {
-                    Haptics.tap()
-                    o.tcpBridge.joinAP()
-                } label: {
-                    Label("AP 192.168.4.1", systemImage: "wifi.router")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(maxWidth: .infinity).padding(.vertical, 10)
-                }
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.surfaceHi))
-                .foregroundColor(.white)
-                .buttonStyle(ScaleButton())
+            KV(k: "stato", val: tcp.state)
+            KV(k: "rete", val: "AP 'RHS-Bridge' (pass redhatsec) → 192.168.4.1:3333")
+            if tcp.connected {
+                KV(k: "stato radio", val: "i vettori PLAN (deauth/PMKID/beacon) sono eseguibili")
             }
-            ForEach(o.tcpBridge.foundHosts, id: \.self) { h in
-                Button {
-                    Haptics.heavy()
-                    o.tcpBridge.connect(host: h)
-                } label: {
-                    HStack {
-                        Image(systemName: "link.circle.fill").foregroundColor(.ok)
-                        Text(h).font(.system(size: 12, design: .monospaced)).foregroundColor(.white)
-                        Spacer()
-                        Text("connect").font(.system(size: 11, weight: .bold)).foregroundColor(.ok)
-                    }.padding(10)
-                }
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.surface))
-                .buttonStyle(ScaleButton())
+            if !tcp.connected {
+                Text("Una sola volta: Impostazioni iOS › Wi-Fi › unisciti a 'RHS-Bridge'. Poi l'app si riconnette da sola.")
+                    .font(.caption2).foregroundColor(.dim)
             }
             HStack(spacing: 8) {
-                TextField("IP manuale (es. 172.20.10.14)", text: $manualIP)
+                TextField("IP manuale (default 192.168.4.1)", text: $manualIP)
                     .textFieldStyle(.plain).font(.system(size: 12, design: .monospaced))
                     .padding(10)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
                 Button {
                     Haptics.heavy()
-                    o.tcpBridge.connect(host: manualIP.trimmingCharacters(in: .whitespaces))
+                    tcp.connect(host: manualIP.trimmingCharacters(in: .whitespaces).isEmpty ? "192.168.4.1" : manualIP)
                 } label: {
                     Image(systemName: "arrow.right.circle.fill").foregroundColor(.redHat)
                 }
                 .buttonStyle(ScaleButton())
-                .disabled(manualIP.isEmpty)
             }
-            Text("STA: ESP su hotspot iPhone → mDNS lo trova da solo. AP: entra in \"RHS-Bridge\" dalle Impostazioni, poi AP 192.168.4.1.")
-                .font(.caption2).foregroundColor(.dim)
         }
         .padding(14).card()
     }
@@ -141,8 +60,7 @@ struct BridgeView: View {
             Button {
                 Haptics.heavy(); scanning = true
                 Task {
-                    if transport == 0 { _ = await o.bridge.wifiScan() }
-                    else { _ = await o.tcpBridge.wifiScan() }
+                    if ble.connected { _ = await ble.wifiScan() } else { _ = await tcp.wifiScan() }
                     scanning = false
                 }
             } label: {
@@ -153,7 +71,7 @@ struct BridgeView: View {
             .background(RoundedRectangle(cornerRadius: 12).fill(Color.surfaceHi))
             .foregroundColor(.white)
             .buttonStyle(ScaleButton())
-            .disabled(scanning || (transport == 0 ? !o.bridge.connected : !o.tcpBridge.connected))
+            .disabled(scanning || (!ble.connected && !tcp.connected))
 
             TextField("SSID spam (virgole)", text: $spamText)
                 .textFieldStyle(.plain).font(.system(size: 12, design: .monospaced))
@@ -164,8 +82,7 @@ struct BridgeView: View {
                 Haptics.heavy()
                 let ssids = spamText.split(separator: ",").map { String($0.trimmingCharacters(in: .whitespaces)) }
                 Task {
-                    if transport == 0 { _ = await o.bridge.beaconSpam(ssids: ssids) }
-                    else { _ = await o.tcpBridge.beaconSpam(ssids: ssids) }
+                    if ble.connected { _ = await ble.beaconSpam(ssids: ssids) } else { _ = await tcp.beaconSpam(ssids: ssids) }
                 }
             } label: {
                 Label("BEACON SPAM", systemImage: "tower.broadcast")
@@ -175,11 +92,12 @@ struct BridgeView: View {
             .background(RoundedRectangle(cornerRadius: 12).fill(Color.warn.opacity(0.25)))
             .foregroundColor(.warn)
             .buttonStyle(ScaleButton())
-            .disabled(transport == 0 ? !o.bridge.connected : !o.tcpBridge.connected)
+            .disabled(!ble.connected && !tcp.connected)
 
             Button {
                 Haptics.tap()
-                if transport == 0 { o.bridge.stopAll() } else { o.tcpBridge.stopAll() }
+                ble.stopAll()
+                tcp.stopAll()
             } label: {
                 Label("STOP TUTTO", systemImage: "stop.circle")
                     .frame(maxWidth: .infinity).padding(.vertical, 10)
@@ -192,9 +110,12 @@ struct BridgeView: View {
         .padding(14).card()
     }
 
+    private var nets: [BridgeManager.BridgeNet] {
+        !tcp.scanNets.isEmpty ? tcp.scanNets : ble.scanNets
+    }
+
     private var netsSection: some View {
-        let nets = transport == 0 ? o.bridge.scanNets : o.tcpBridge.scanNets
-        return Group {
+        Group {
             if !nets.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("RETI VISIBILI DALLA RADIO — \(nets.count)").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
@@ -207,10 +128,10 @@ struct BridgeView: View {
                             Spacer()
                             Button {
                                 Haptics.heavy()
-                                if transport == 0 {
-                                    Task { _ = await o.bridge.deauth(mac: n.bssid, ch: n.ch) }
+                                if ble.connected {
+                                    Task { _ = await ble.deauth(mac: n.bssid, ch: n.ch) }
                                 } else {
-                                    Task { _ = await o.tcpBridge.deauth(mac: n.bssid, ch: n.ch) }
+                                    Task { _ = await tcp.deauth(mac: n.bssid, ch: n.ch) }
                                 }
                             } label: {
                                 Image(systemName: "bolt.slash.fill")
@@ -243,7 +164,7 @@ struct BridgeView: View {
                 Haptics.tap()
                 let clean = rawHex.replacingOccurrences(of: " ", with: "")
                 if let bytes = clean.hexBytes {
-                    o.tcpBridge.rawSend(bytes)
+                    tcp.rawSend(bytes)
                     rawHex = ""
                 }
             } label: {
@@ -254,15 +175,15 @@ struct BridgeView: View {
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.info.opacity(0.25)))
             .foregroundColor(.info)
             .buttonStyle(ScaleButton())
-            .disabled(!o.tcpBridge.connected || rawHex.isEmpty)
-            Text("Byte grezzi sulla UART0 dell'ESP8266 — bridge trasparente verso l'hardware attaccato.")
+            .disabled(!tcp.connected || rawHex.isEmpty)
+            Text("Byte grezzi sulla UART0 dell'ESP8266 (TX GPIO1 → RX target, RX GPIO3 → TX target, GND comune).")
                 .font(.caption2).foregroundColor(.dim)
         }
         .padding(14).card()
     }
 
     private var logSection: some View {
-        let lines = transport == 0 ? o.bridge.bridgeLog : o.tcpBridge.bridgeLog
+        let lines = tcp.bridgeLog
         return Group {
             if !lines.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
@@ -274,5 +195,30 @@ struct BridgeView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+}
+
+struct SettingsView: View {
+    @EnvironmentObject var o: Orchestrator
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    BridgeView(ble: o.bridge, tcp: o.tcpBridge)
+                }
+                .padding(16)
+            }
+            .background(Color.bg.ignoresSafeArea())
+            .navigationTitle("Impostazioni")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("chiudi") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
     }
 }

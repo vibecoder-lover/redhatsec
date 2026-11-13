@@ -1,7 +1,6 @@
 import Foundation
 import CoreBluetooth
 import Network
-import NetworkExtension
 
 // Bridge radio remota (ESP32/ESP8266) via BLE — sblocca i vettori PLAN
 // (deauth, beacon spam, PMKID) senza uscire dall'app.
@@ -301,12 +300,34 @@ final class TCPBridge: NSObject, ObservableObject {
     private var browser: NWBrowser?
     private var rx = [UInt8]()
     private var seq: UInt8 = 0
+    private var retryTimer: Timer?
     private var responseCont: CheckedContinuation<(UInt8, Data)?, Never>?
     private var scanCont: CheckedContinuation<[BridgeManager.BridgeNet], Never>?
 
     func log(_ s: String) {
-        bridgeLog.append("[tcp] \(s)")
-        if bridgeLog.count > 200 { bridgeLog.removeFirst(bridgeLog.count - 200) }
+        DispatchQueue.main.async {
+            self.bridgeLog.append("[tcp] \(s)")
+            if self.bridgeLog.count > 200 { self.bridgeLog.removeFirst(self.bridgeLog.count - 200) }
+        }
+    }
+
+    // MARK: auto-connect (AP-only firmware: l'iPhone deve avere "RHS-Bridge" salvato)
+
+    func startAutoConnect() {
+        guard !connected else { return }
+        DispatchQueue.main.async {
+            self.state = "auto-connect 192.168.4.1…"
+            self.retryTimer?.invalidate()
+            self.retryTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { _ in
+                guard !self.connected else {
+                    self.retryTimer?.invalidate()
+                    self.retryTimer = nil
+                    return
+                }
+                self.connect(host: "192.168.4.1")
+            }
+        }
+        connect(host: "192.168.4.1")
     }
 
     // MARK: scoperta
@@ -442,7 +463,10 @@ final class TCPBridge: NSObject, ObservableObject {
             }
             if err == nil { self.pump() }
             else {
-                DispatchQueue.main.async { self.connected = false; self.state = "disconnesso" }
+                DispatchQueue.main.async {
+                    self.connected = false
+                    self.state = "disconnesso"
+                }
             }
         }
     }
@@ -513,22 +537,24 @@ final class TCPBridge: NSObject, ObservableObject {
     }
 
     private func handle(_ f: (status: UInt8, cmdEcho: UInt8, payload: [UInt8])) {
-        guard f.status == 0x00 else {
-            log("RX status err \(f.status)")
-            responseCont?.resume(returning: (f.status, Data()))
-            responseCont = nil
-            return
-        }
-        switch f.cmdEcho {
-        case 0x03: // wifiResults
-            let nets = parseNets(f.payload)
-            scanCont?.resume(returning: nets)
-            scanCont = nil
-            responseCont?.resume(returning: (0, Data()))
-            responseCont = nil
-        default:
-            responseCont?.resume(returning: (0, Data(f.payload)))
-            responseCont = nil
+        DispatchQueue.main.async {
+            guard f.status == 0x00 else {
+                self.log("RX status err \(f.status)")
+                self.responseCont?.resume(returning: (f.status, Data()))
+                self.responseCont = nil
+                return
+            }
+            switch f.cmdEcho {
+            case 0x03: // wifiResults
+                let nets = self.parseNets(f.payload)
+                self.scanCont?.resume(returning: nets)
+                self.scanCont = nil
+                self.responseCont?.resume(returning: (0, Data()))
+                self.responseCont = nil
+            default:
+                self.responseCont?.resume(returning: (0, Data(f.payload)))
+                self.responseCont = nil
+            }
         }
     }
 
