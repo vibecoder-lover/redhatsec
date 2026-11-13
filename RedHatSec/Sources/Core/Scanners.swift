@@ -290,25 +290,16 @@ final class WiFiScanner {
         var done = false
         let sem = DispatchSemaphore(value: 0)
         let q = DispatchQueue(label: "rhs.hotspothelper")
-        let ok = NEHotspotHelper.register(type: .filter, queue: q) { cmd in
+        let ok = NEHotspotHelper.register(queue: q) { cmd in
             guard !done else { return }
-            switch cmd.commandType {
-            case .list, .evaluate:
-                guard let list = cmd.networkList, !list.isEmpty else {
-                    cmd.createResponse(.list, networkList: [])
-                    return
-                }
-                for n in list {
-                    let dbm = Int(-100 + n.signalStrength * 60)
-                    nets.append(WiFiNet(ssid: n.ssid, bssid: "?",
-                                        rssi: dbm, sec: n.isSecure ? "WPA2/WPA3" : "OPEN"))
-                }
-                cmd.createResponse(.list, networkList: Array(list))
-                done = true
-                sem.signal()
-            default:
-                break
+            guard let list = cmd.networkList, !list.isEmpty else { return }
+            for n in list {
+                let dbm = Int(-100 + n.signalStrength * 60)
+                nets.append(WiFiNet(ssid: n.ssid, bssid: "?",
+                                    rssi: dbm, sec: n.isSecure ? "WPA2/WPA3" : "OPEN"))
             }
+            done = true
+            sem.signal()
         }
         guard ok else {
             mobileWiFiDiag = "NEHotspotHelper register NEGATO (entitlement non onorato)"
