@@ -5,9 +5,17 @@ on:
     paths: ["RedHatSec/**", ".github/workflows/build.yml"]
   workflow_dispatch:
 
+concurrency:
+  group: redhatsec-build
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: macos-13
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -23,7 +31,7 @@ jobs:
           xcodebuild -project RedHatSec.xcodeproj -scheme RedHatSec \
             -configuration Release -sdk iphoneos -derivedDataPath build \
             CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED="NO" CODE_SIGNING_ALLOWED="NO" \
-            ARCHS=arm64 build | tail -20
+            ARCHS=arm64 build | tail -30
 
       - name: Fake-sign with entitlements
         run: |
@@ -41,5 +49,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: RedHatSec-app
+          name: RedHatSec-${{ matrix.os }}
           path: RedHatSec/build/Build/Products/Release-iphoneos/RedHatSec.tipa
