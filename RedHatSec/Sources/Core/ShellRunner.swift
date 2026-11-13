@@ -50,31 +50,51 @@ final class ShellRunner {
         FileManager.default.fileExists(atPath: "/var/jb/.installed_trollstore_helper")
     }
 
+    private func buildEnvp() -> [UnsafeMutablePointer<CChar>?] {
+        var envp: [UnsafeMutablePointer<CChar>?] = []
+        envp.append(strdup("PATH=\(pathEnv)"))
+        envp.append(strdup("HOME=/var/mobile"))
+        envp.append(strdup("TERM=xterm"))
+        envp.append(nil)
+        return envp
+    }
+
+    private func buildArgv(bin: String, args: [String]) -> [UnsafeMutablePointer<CChar>?] {
+        var argv: [UnsafeMutablePointer<CChar>?] = []
+        argv.append(strdup(bin))
+        for a in args { argv.append(strdup(a)) }
+        argv.append(nil)
+        return argv
+    }
+
     func run(_ cmd: String, args: [String], timeout: TimeInterval = 15) -> ShellResult {
         guard let bin = resolve(cmd) else {
             return ShellResult(exitCode: 127, stdout: "", stderr: "tool not found: \(cmd)")
         }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: bin)
-        p.arguments = args
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = pathEnv
-        env["HOME"] = "/var/mobile"
-        env["TERM"] = "xterm"
-        p.environment = env
         let outPipe = Pipe()
         let errPipe = Pipe()
-        p.standardOutput = outPipe
-        p.standardError = errPipe
-        do { try p.run() } catch {
-            return ShellResult(exitCode: 126, stdout: "", stderr: "spawn failed: \(error)")
-        }
+        var attr: posix_spawnattr_t? = nil
+        posix_spawnattr_init(&attr)
+        var fileActions: posix_spawn_file_actions_t? = nil
+        posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 1)
+        posix_spawn_file_actions_adddup2(&fileActions, errPipe.fileHandleForWriting.fileDescriptor, 2)
 
-        var timedOut = false
-        let watchdog = DispatchWorkItem {
-            if p.isRunning { timedOut = true; p.terminate() }
+        var argv = buildArgv(bin: bin, args: args)
+        var envp = buildEnvp()
+        var pid: pid_t = 0
+        let rc = posix_spawn(&pid, bin, &fileActions, &attr, &argv, &envp)
+
+        posix_spawnattr_destroy(&attr)
+        posix_spawn_file_actions_destroy(&fileActions)
+        for p in argv { if let p { free(p) } }
+        for p in envp { if let p { free(p) } }
+
+        guard rc == 0 else {
+            return ShellResult(exitCode: Int32(rc), stdout: "", stderr: "spawn failed rc=\(rc)")
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+        try? outPipe.fileHandleForWriting.close()
+        try? errPipe.fileHandleForWriting.close()
 
         let grp = DispatchGroup()
         var outData = Data()
@@ -83,20 +103,22 @@ final class ShellRunner {
         DispatchQueue.global().async { outData = outPipe.fileHandleForReading.readDataToEndOfFile(); grp.leave() }
         grp.enter()
         DispatchQueue.global().async { errData = errPipe.fileHandleForReading.readDataToEndOfFile(); grp.leave() }
-        _ = grp.wait(timeout: .now() + timeout + 2)
-        if p.isRunning {
-            p.terminate()
-            p.waitUntilExit()
-        }
-        watchdog.cancel()
 
+        var timedOut = false
+        if grp.wait(timeout: .now() + timeout) == .timedOut {
+            timedOut = true
+            kill(pid, SIGKILL)
+            _ = grp.wait(timeout: .now() + 3)
+        }
+
+        var status: Int32 = 0
+        waitpid(pid, &status, 0)
         let so = String(data: outData, encoding: .utf8)
             ?? String(data: outData, encoding: .isoLatin1) ?? ""
         let se = String(data: errData, encoding: .utf8)
             ?? String(data: errData, encoding: .isoLatin1) ?? ""
-        let suffix = timedOut ? "\n[timeout \(timeout)s — terminated]" : ""
-        return ShellResult(exitCode: p.terminationStatus,
-                           stdout: so, stderr: se + suffix)
+        let suffix = timedOut ? "\n[timeout \(timeout)s — killed]" : ""
+        return ShellResult(exitCode: status, stdout: so, stderr: se + suffix)
     }
 
     func stream(_ cmd: String, args: [String], line: @escaping (String) -> Void,
@@ -106,40 +128,37 @@ final class ShellRunner {
             onExit(127)
             return
         }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: bin)
-        p.arguments = args
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = pathEnv
-        env["HOME"] = "/var/mobile"
-        env["TERM"] = "xterm"
-        p.environment = env
         let outPipe = Pipe()
-        p.standardOutput = outPipe
-        p.standardError = outPipe
+        var attr: posix_spawnattr_t? = nil
+        posix_spawnattr_init(&attr)
+        var fileActions: posix_spawn_file_actions_t? = nil
+        posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 1)
+        posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 2)
 
-        var buffer = ""
-        outPipe.fileHandleForReading.readabilityHandler = { fh in
-            let d = fh.availableData
-            if d.isEmpty {
-                fh.readabilityHandler = nil
-                return
+        var argv = buildArgv(bin: bin, args: args)
+        var envp = buildEnvp()
+        var pid: pid_t = 0
+        let rc = posix_spawn(&pid, bin, &fileActions, &attr, &argv, &envp)
+
+        posix_spawnattr_destroy(&attr)
+        posix_spawn_file_actions_destroy(&fileActions)
+        for p in argv { if let p { free(p) } }
+        for p in envp { if let p { free(p) } }
+
+        guard rc == 0 else { line("spawn failed rc=\(rc)"); onExit(Int32(rc)); return }
+        try? outPipe.fileHandleForWriting.close()
+
+        DispatchQueue.global(qos: .utility).async {
+            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+            let s = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1) ?? ""
+            for l in s.split(separator: "\n", omittingEmptySubsequences: false) {
+                line(String(l))
             }
-            if let s = String(data: d, encoding: .utf8) ?? String(data: d, encoding: .isoLatin1) {
-                buffer += s
-                let lines = buffer.components(separatedBy: "\n")
-                guard lines.count > 1 else { return }
-                buffer = lines.last ?? ""
-                for l in lines.dropLast() { line(l) }
-            }
-        }
-        p.terminationHandler = { proc in
-            if !buffer.isEmpty { line(buffer) }
-            onExit(proc.terminationStatus)
-        }
-        do { try p.run() } catch {
-            line("spawn failed: \(error)")
-            onExit(126)
+            var status: Int32 = 0
+            waitpid(pid, &status, 0)
+            onExit(status)
         }
     }
 }

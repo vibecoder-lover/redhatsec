@@ -254,15 +254,15 @@ final class WiFiScanner {
 
     private func probeMobileWiFi() -> [WiFiNet]? {
         guard dlopen("/System/Library/PrivateFrameworks/MobileWiFi.framework/MobileWiFi", RTLD_NOW) != nil,
-              let cls = NSClassFromString("WiFiManager") else { return nil }
+              let cls = NSClassFromString("WiFiManager") as? NSObject.Type else { return nil }
         let sharedSel = NSSelectorFromString("sharedInstance")
-        guard let shared = cls.perform(sharedSel)?.takeUnretainedValue() else { return nil }
-        var raw: AnyObject?
+        guard let shared = cls.perform(sharedSel)?.takeUnretainedValue() as? NSObject else { return nil }
+        var raw: NSArray?
         for sel in ["copyNetworkList", "networks", "allNetworks"] {
             if let r = shared.perform(NSSelectorFromString(sel))?.takeUnretainedValue() as? NSArray,
                r.count > 0 { raw = r; break }
         }
-        guard let arr = raw as? [AnyObject] else { return nil }
+        guard let arr = raw as? [NSObject] else { return nil }
         var out: [WiFiNet] = []
         for n in arr {
             let ssid = n.perform(NSSelectorFromString("ssidName"))?.takeUnretainedValue() as? String ?? "?"
