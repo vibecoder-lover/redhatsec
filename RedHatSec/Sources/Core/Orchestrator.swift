@@ -30,6 +30,7 @@ final class Orchestrator: ObservableObject {
     let net = NetScanner()
     let shell = ShellRunner.shared
     let bridge = BridgeManager()
+    let tcpBridge = TCPBridge()
 
     init() {
         loadDumps()
@@ -452,6 +453,8 @@ final class Orchestrator: ObservableObject {
     // OPSEC: wipe totale di stato, journal e dump — gesture di panico
     func panicWipe() {
         bridge.stopAll()
+        tcpBridge.stopAll()
+        tcpBridge.disconnect()
         plan = []; findings = []; attackLog = []; nfcDumps = []; logs = []
         try? FileManager.default.removeItem(at: journalPath)
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -462,22 +465,29 @@ final class Orchestrator: ObservableObject {
         log("PANIC WIPE — stato operativo e journal cancellati", .bad)
     }
 
-    // vettori PLAN eseguibili via bridge radio (ESP32) quando connesso
+    // vettori PLAN eseguibili via bridge radio (BLE ESP32 o TCP ESP8266) quando connesso
     private func runViaBridge(_ e: PlanEntry) async -> String? {
-        guard bridge.connected else { return nil }
+        guard bridge.connected || tcpBridge.connected else { return nil }
         guard let t = e.target, let mac = t.mac, mac.count > 10 else { return nil }
         let ch = Int(t.extra["ch"] ?? "") ?? 6
         switch e.vector.id {
         case "wifi_deauth":
-            let ok = await bridge.deauth(mac: mac, ch: ch)
+            var ok = false
+            if bridge.connected { ok = await bridge.deauth(mac: mac, ch: ch) }
+            if !ok && tcpBridge.connected { ok = await tcpBridge.deauth(mac: mac, ch: ch) }
             return ok ? "deauth via bridge ✓ (\(mac) ch\(ch))" : "deauth via bridge FALLITA"
         case "wifi_pmkid":
-            let ok = await bridge.pmkid(mac: mac, ch: ch)
+            var ok = false
+            if bridge.connected { ok = await bridge.pmkid(mac: mac, ch: ch) }
+            if !ok && tcpBridge.connected { ok = await tcpBridge.pmkid(mac: mac, ch: ch) }
             return ok ? "pmkid capture via bridge ✓ (\(mac))" : "pmkid via bridge FALLITA"
         case "wifi_beaconflood":
             let names = targets.filter { $0.proto == .wifi }.compactMap { $0.extra["rawName"] }
-            let ok = await bridge.beaconSpam(ssids: names.isEmpty ? ["FreeWiFi", "RedHatSec"] : names)
-            return ok ? "beacon spam via bridge ✓ (\(max(1, names.count)) SSID)" : "beacon spam FALLITO"
+            let list = names.isEmpty ? ["FreeWiFi", "RedHatSec"] : names
+            var ok = false
+            if bridge.connected { ok = await bridge.beaconSpam(ssids: list) }
+            if !ok && tcpBridge.connected { ok = await tcpBridge.beaconSpam(ssids: list) }
+            return ok ? "beacon spam via bridge ✓ (\(list.count) SSID)" : "beacon spam FALLITO"
         default:
             return nil
         }

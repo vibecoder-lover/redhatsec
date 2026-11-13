@@ -1,5 +1,7 @@
 import Foundation
 import CoreBluetooth
+import Network
+import NetworkExtension
 
 // Bridge radio remota (ESP32/ESP8266) via BLE — sblocca i vettori PLAN
 // (deauth, beacon spam, PMKID) senza uscire dall'app.
@@ -280,5 +282,278 @@ extension String {
             out.append(x << 4 | y)
         }
         return out.count == count / 2 ? out : nil
+    }
+}
+
+// ===== Bridge TCP (ESP8266 transparent TCP<->UART) =====
+// Scoperta: mDNS _rhsbridge._tcp (hotspot iPhone) o AP "RHS-Bridge" (192.168.4.1).
+// Stesso protocollo framed RHS; rawSend per passthrough Proxmark/PN532 su UART.
+final class TCPBridge: NSObject, ObservableObject {
+    @Published var connected = false
+    @Published var state = "off"
+    @Published var deviceName = "ESP8266"
+    @Published var bridgeLog: [String] = []
+    @Published var scanNets: [BridgeManager.BridgeNet] = []
+    @Published var foundHosts: [String] = []
+    @Published var browsing = false
+
+    private var conn: NWConnection?
+    private var browser: NWBrowser?
+    private var rx = [UInt8]()
+    private var seq: UInt8 = 0
+    private var responseCont: CheckedContinuation<(UInt8, Data)?, Never>?
+    private var scanCont: CheckedContinuation<[BridgeManager.BridgeNet], Never>?
+
+    func log(_ s: String) {
+        bridgeLog.append("[tcp] \(s)")
+        if bridgeLog.count > 200 { bridgeLog.removeFirst(bridgeLog.count - 200) }
+    }
+
+    // MARK: scoperta
+
+    func browse() {
+        browsing = true
+        foundHosts = []
+        let params = NWParameters()
+        params.includePeerToPeer = true
+        let b = NWBrowser(for: .bonjour(type: "_rhsbridge._tcp.", domain: nil), using: params)
+        browser = b
+        b.browseResultsChangedHandler = { [weak self] results, _ in
+            var hosts: [String] = []
+            for r in results {
+                if case let .service(name, _, _, _) = r.endpoint {
+                    hosts.append(String(name))
+                } else if case let .hostPort(h, p) = r.endpoint {
+                    hosts.append("\(h):\(p)")
+                }
+            }
+            DispatchQueue.main.async {
+                self?.foundHosts = Array(Set(hosts)).sorted()
+                self?.browsing = false
+                self?.log("mDNS: \(self?.foundHosts.count ?? 0) bridge trovati")
+            }
+        }
+        b.start(queue: .global(qos: .utility))
+        log("browse _rhsbridge._tcp…")
+    }
+
+    // l'iPhone entra nell'AP dell'ESP8266 (path "AP dell'ESP")
+    func joinAP(ssid: String, pass: String) {
+        let cfg = NEHotspotConfiguration(ssidName: ssid, passphrase: pass, isWEP: false)
+        NEHotspotConfigurationManager.shared.apply(cfg) { [weak self] err in
+            DispatchQueue.main.async {
+                if let err { self?.log("join AP fallito: \(err.localizedDescription)") }
+                else { self?.log("AP \(ssid) joinato — connect 192.168.4.1") }
+            }
+        }
+    }
+
+    // MARK: connessione
+
+    func connect(host: String, port: UInt16 = 3333) {
+        disconnect()
+        state = "connessione a \(host)…"
+        log("connect \(host):\(port)")
+        let c = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!,
+                             using: .tcp)
+        conn = c
+        c.stateUpdateHandler = { [weak self] s in
+            DispatchQueue.main.async {
+                switch s {
+                case .ready:
+                    self?.connected = true
+                    self?.state = "connesso (\(host))"
+                    self?.log("TCP connesso ✓")
+                case .failed(let e):
+                    self?.connected = false
+                    self?.state = "fallito: \(e.localizedDescription)"
+                case .cancelled:
+                    self?.connected = false
+                    self?.state = "off"
+                default: break
+                }
+            }
+        }
+        c.start(queue: .global(qos: .utility))
+        pump()
+    }
+
+    func disconnect() {
+        conn?.cancel()
+        conn = nil
+        connected = false
+        state = "off"
+    }
+
+    private func pump() {
+        conn?.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, _, err in
+            guard let self else { return }
+            if let data, !data.isEmpty {
+                self.rx += [UInt8](data)
+                while let frame = self.popFrame() {
+                    self.handle(frame)
+                }
+            }
+            if err == nil { self.pump() }
+            else {
+                DispatchQueue.main.async { self.connected = false; self.state = "disconnesso" }
+            }
+        }
+    }
+
+    // MARK: framing (spec RHS, identica al firmware)
+
+    private func crc8(_ data: [UInt8]) -> UInt8 {
+        var crc: UInt8 = 0
+        for b in data {
+            crc ^= b
+            for _ in 0..<8 {
+                crc = (crc & 0x80) != 0 ? (crc << 1) ^ 0x07 : (crc << 1)
+            }
+        }
+        return crc
+    }
+
+    private func send(_ cmd: UInt8, payload: [UInt8]) {
+        guard let c = conn, c.state == .ready else { return }
+        seq &+= 1
+        var f: [UInt8] = [0xA5, 0, 0, seq, cmd]
+        f[1] = UInt8(payload.count & 0xFF)
+        f[2] = UInt8((payload.count >> 8) & 0xFF)
+        f += payload
+        f.append(crc8(Array(f.dropFirst())))
+        c.send(content: Data(f), completion: .contentProcessed { _ in })
+    }
+
+    // passthrough UART: byte grezzi verso Proxmark/PN532
+    func rawSend(_ bytes: [UInt8]) {
+        guard let c = conn, c.state == .ready else { return }
+        c.send(content: Data(bytes), completion: .contentProcessed { _ in })
+        log("raw → UART (\(bytes.count)B)")
+    }
+
+    private func sendAwait(_ cmd: UInt8, payload: [UInt8], timeout: TimeInterval = 10) async -> (UInt8, Data)? {
+        guard connected else { return nil }
+        return await withCheckedContinuation { c in
+            responseCont = c
+            send(cmd, payload: payload)
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard let self, self.responseCont != nil else { return }
+                self.responseCont = nil
+                c.resume(returning: nil)
+            }
+        }
+    }
+
+    private func popFrame() -> (status: UInt8, cmdEcho: UInt8, payload: [UInt8])? {
+        while rx.count >= 6 {
+            guard rx[0] == 0x5A else { rx.removeFirst(); continue }
+            let len = Int(rx[1]) | (Int(rx[2]) << 8)
+            guard rx.count >= len + 6 else { return nil }
+            let body = Array(rx[1..<(len + 5)])
+            let crc = rx[5 + len]
+            guard crc8(body) == crc else {
+                log("crc err — scarto")
+                rx.removeFirst(6 + len)
+                continue
+            }
+            let cmdEcho = rx[3]
+            let status = rx[4]
+            let payload = Array(rx[5..<(5 + len)])
+            rx.removeFirst(6 + len)
+            return (status, cmdEcho, payload)
+        }
+        return nil
+    }
+
+    private func handle(_ f: (status: UInt8, cmdEcho: UInt8, payload: [UInt8])) {
+        guard f.status == 0x00 else {
+            log("RX status err \(f.status)")
+            responseCont?.resume(returning: (f.status, Data()))
+            responseCont = nil
+            return
+        }
+        switch f.cmdEcho {
+        case 0x03: // wifiResults
+            let nets = parseNets(f.payload)
+            scanCont?.resume(returning: nets)
+            scanCont = nil
+            responseCont?.resume(returning: (0, Data()))
+            responseCont = nil
+        default:
+            responseCont?.resume(returning: (0, Data(f.payload)))
+            responseCont = nil
+        }
+    }
+
+    private func parseNets(_ p: [UInt8]) -> [BridgeManager.BridgeNet] {
+        var out: [BridgeManager.BridgeNet] = []
+        var i = 0
+        while i + 10 <= p.count {
+            let rssi = Int(Int8(bitPattern: p[i])); i += 1
+            let ch = Int(p[i]); i += 1
+            let bssid = p[i..<(i + 6)].map { String(format: "%02X", $0) }.joined(separator: ":"); i += 6
+            let sec = p[i] == 0 ? "OPEN" : "WPA2"; i += 1
+            let sl = Int(p[i]); i += 1
+            guard i + sl <= p.count else { break }
+            let ssid = String(decoding: p[i..<(i + sl)], as: UTF8.self); i += sl
+            out.append(.init(bssid: bssid, ssid: ssid.isEmpty ? "(hidden)" : ssid, ch: ch, rssi: rssi, sec: sec))
+        }
+        return out
+    }
+
+    // MARK: API alta
+
+    func ping() async -> Bool {
+        await sendAwait(0x01, payload: []) != nil
+    }
+
+    func wifiScan(seconds: Int = 8) async -> [BridgeManager.BridgeNet] {
+        guard connected else { return [] }
+        let nets = await withCheckedContinuation { (c: CheckedContinuation<[BridgeManager.BridgeNet], Never>) in
+            scanCont = c
+            send(0x02, payload: [UInt8(seconds)])
+            DispatchQueue.global().asyncAfter(deadline: .now() + Double(seconds) + 6) { [weak self] in
+                guard let self, self.scanCont != nil else { return }
+                self.scanCont = nil
+                c.resume(returning: [])
+            }
+        }
+        scanNets = nets
+        log("wifi scan: \(nets.count) rete(e)")
+        return nets
+    }
+
+    func deauth(mac: String, ch: Int, count: Int = 10) async -> Bool {
+        guard var m = mac.replacingOccurrences(of: ":", with: "").hexBytes, m.count == 6 else { return false }
+        m.append(UInt8(ch))
+        m.append(UInt8(count))
+        let r = await sendAwait(0x04, payload: m)
+        log(r?.0 == 0 ? "deauth \(mac) ✓" : "deauth fallita")
+        return r?.0 == 0
+    }
+
+    func beaconSpam(ssids: [String]) async -> Bool {
+        guard !ssids.isEmpty else { return false }
+        var pl: [UInt8] = [UInt8(min(16, ssids.count))]
+        for s in ssids.prefix(16) {
+            let b = Array(s.utf8.prefix(32))
+            pl.append(UInt8(b.count))
+            pl += b
+        }
+        let r = await sendAwait(0x05, payload: pl, timeout: 12)
+        log(r?.0 == 0 ? "beacon spam ✓" : "beacon fallito")
+        return r?.0 == 0
+    }
+
+    func pmkid(mac: String, ch: Int) async -> Bool {
+        guard var m = mac.replacingOccurrences(of: ":", with: "").hexBytes, m.count == 6 else { return false }
+        m.append(UInt8(ch))
+        let r = await sendAwait(0x06, payload: m, timeout: 30)
+        return r?.0 == 0
+    }
+
+    func stopAll() {
+        send(0x07, payload: [])
     }
 }
