@@ -3,6 +3,7 @@ import CoreBluetooth
 import CoreNFC
 import Network
 import SystemConfiguration.CaptiveNetwork
+import CoreLocation
 
 // MARK: - BLE
 
@@ -265,13 +266,57 @@ final class WiFiScanner {
 
     func availableNetworks() -> [WiFiNet] {
         lastDiag = ""
+        if let nets = probeHotspotHelper() { lastDiag = "NEHotspotHelper LIVE SCAN (\(nets.count))"; return nets }
         if let nets = probeMobileWiFi() { lastDiag = "mobilewifi ok (\(nets.count))"; return nets }
         if let nets = probeCurrentNetworkInfo() { lastDiag = "CNCopyCurrentNetworkInfo ok"; return nets }
         if let nets = probeHotspotCurrent() { lastDiag = "NEHotspotNetwork ok"; return nets }
         let known = probeKnownNetworksPlist()
         if !known.isEmpty { lastDiag = "known-networks plist (\(known.count))"; return known }
-        lastDiag = "tutte le sonde fallite: \(mobileWiFiDiag) — nessuna rete cache leggibile"
+        lastDiag = "tutte le sonde fallite: \(mobileWiFiDiag)"
         return []
+    }
+
+    static func requestLocationPermission() {
+        let lm = CLLocationManager()
+        if lm.authorizationStatus == .notDetermined {
+            lm.requestWhenInUseAuthorization()
+        }
+    }
+
+    // NEHotspotHelper: l'UNICO canale live-scan su iOS — l'handler riceve le
+    // reti visibili al chip a ogni scan di sistema (serve entitlement HotspotHelper)
+    private func probeHotspotHelper() -> [WiFiNet]? {
+        var nets: [WiFiNet] = []
+        var done = false
+        let sem = DispatchSemaphore(value: 0)
+        let q = DispatchQueue(label: "rhs.hotspothelper")
+        let ok = NEHotspotHelper.register(type: .filter, queue: q) { cmd in
+            guard !done else { return }
+            switch cmd.commandType {
+            case .list, .evaluate:
+                guard let list = cmd.networkList, !list.isEmpty else {
+                    cmd.createResponse(.list, networkList: [])
+                    return
+                }
+                for n in list {
+                    let dbm = Int(-100 + n.signalStrength * 60)
+                    nets.append(WiFiNet(ssid: n.ssid, bssid: "?",
+                                        rssi: dbm, sec: n.isSecure ? "WPA2/WPA3" : "OPEN"))
+                }
+                cmd.createResponse(.list, networkList: Array(list))
+                done = true
+                sem.signal()
+            default:
+                break
+            }
+        }
+        guard ok else {
+            mobileWiFiDiag = "NEHotspotHelper register NEGATO (entitlement non onorato)"
+            return nil
+        }
+        _ = sem.wait(timeout: .now() + 12)
+        done = true
+        return nets.isEmpty ? nil : nets
     }
 
     private var mobileWiFiDiag = "dlopen fallito"

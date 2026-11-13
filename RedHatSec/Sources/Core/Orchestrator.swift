@@ -73,6 +73,7 @@ final class Orchestrator: ObservableObject {
         phase = .scan
         targets = []; plan = []; findings = []; report = nil; progress = 0
         log("=== session start — journal rehydrated ===", .exec)
+        WiFiScanner.requestLocationPermission()
         log("jailbreak: \(shell.isJailbroken ? "detected" : "NOT detected") — tools: \(shell.availableTools.joined(separator: ", ").isEmpty ? "none" : shell.availableTools.joined(separator: ", "))", .exec)
 
         Task {
@@ -295,6 +296,17 @@ final class Orchestrator: ObservableObject {
         plan = [entry]
         findings = []
         execute()
+    }
+
+    func addVectorToPlan(_ id: String, target: TargetDevice) {
+        guard let v = vec(id) else { return }
+        guard !plan.contains(where: { $0.vector.id == id && $0.target?.id == target.id }) else { return }
+        plan.append(PlanEntry(vector: v, target: target))
+        log("plan add: \(v.name) → \(target.name)", .info)
+    }
+
+    func removePlanEntry(_ e: PlanEntry) {
+        plan.removeAll { $0.id == e.id }
     }
 
     // MARK: - Auto-prepare (config derivata, zero input manuale)

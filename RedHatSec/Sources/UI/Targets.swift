@@ -288,6 +288,7 @@ struct TargetDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     header
+                    reconSection
                     autoSection
                     if target.proto == .ble { bleConfig }
                     if target.proto == .net { netInfo }
@@ -321,7 +322,9 @@ struct TargetDetailView: View {
                 if let v = target.vendor { Pill(text: v, color: .info) }
             }
             ForEach(Array(target.extra.keys.sorted()), id: \.self) { k in
-                if !["payload", "svcUUID", "chrUUID"].contains(k) {
+                if !["payload", "svcUUID", "chrUUID", "autoArm", "gatt", "banners", "mqtt",
+                     "rtsp", "snmp", "telnet", "sec", "ch", "armNote", "uid", "family",
+                     "dump", "open", "host"].contains(k) {
                     KV(k: k, val: target.extra[k] ?? "")
                 }
             }
@@ -406,38 +409,124 @@ struct TargetDetailView: View {
         .padding(16).card()
     }
 
-    private var planSection: some View {
+    private var reconSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("PLAN — \(relatedPlan.count) vector").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.dim)
-            ForEach(relatedPlan) { e in
-                HStack(spacing: 10) {
-                    Circle().fill(e.vector.sev.color).frame(width: 8, height: 8)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(e.vector.name).font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
-                        Text(capLabel(e.vector)).font(.system(size: 10, design: .monospaced)).foregroundColor(.dim)
-                    }
-                    Spacer()
-                    Button {
-                        Haptics.heavy()
-                        o.executeOnly(e)
-                    } label: {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 12, weight: .bold))
-                            .padding(9)
-                            .background(Circle().fill(e.vector.sev.color.opacity(0.2)))
-                            .overlay(Circle().strokeBorder(e.vector.sev.color.opacity(0.6), lineWidth: 1))
-                            .foregroundColor(e.vector.sev.color)
-                    }
-                    .buttonStyle(ScaleButton())
+            Text("RECON — Cosa posso fare davvero").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.info)
+            switch target.proto {
+            case .ble:
+                if target.extra["autoArm"] == "1" {
+                    KV(k: "write chr", val: target.extra["chrUUID"]?.prefix(12).description ?? "?")
+                    KV(k: "service", val: target.extra["svcUUID"]?.prefix(12).description ?? "?")
+                    KV(k: "payload", val: target.extra["payload"] ?? "0100")
+                } else {
+                    KV(k: "gatt", val: target.extra["gatt"]?.isEmpty == false ? target.extra["gatt"]! : "non enumerato — AUTO-PREPARE")
                 }
-                .padding(12)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color.surfaceHi))
-            }
-            if relatedPlan.isEmpty {
-                Text("nessun vector matchato per questo target").font(.caption).foregroundColor(.dim)
+                KV(k: "posso", val: "enum GATT · write · flood · malformed ATT (on-device)")
+            case .net:
+                let open = target.extra["open"]?.isEmpty == false ? target.extra["open"]! : "nessuna porta nota"
+                KV(k: "porte aperte", val: open)
+                if let b = target.extra["banners"], !b.isEmpty { KV(k: "banners", val: b) }
+                KV(k: "posso", val: "probe MQTT/CoAP/SNMP/Modbus/RTSP/telnet-creds/UPnP (on-device)")
+            case .wifi:
+                KV(k: "bssid", val: target.mac ?? "?")
+                KV(k: "security", val: target.extra["sec"] ?? "?")
+                KV(k: "posso", val: "scan live · join open · args pronti per radio esterna")
+            case .nfc:
+                KV(k: "uid", val: target.extra["uid"] ?? "?")
+                KV(k: "family", val: target.extra["family"] ?? "?")
+                KV(k: "posso", val: "fingerprint · keys/PWD probe · NDEF inject · clone")
+            default:
+                KV(k: "proto", val: target.proto.rawValue)
             }
         }
         .padding(16).card()
+    }
+
+    private var planSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("ATTACCHI — \(relatedPlan.count) vettore(i)").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.dim)
+                Spacer()
+                Menu {
+                    ForEach(addableVectors) { v in
+                        Button(v.name) { o.addVectorToPlan(v.id, target: target) }
+                    }
+                } label: {
+                    Label("aggiungi", systemImage: "plus.circle.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.redHat)
+                }
+            }
+            ForEach(relatedPlan) { e in
+                planRow(e)
+            }
+            if relatedPlan.isEmpty {
+                Text("nessun vettore — tocca \"aggiungi\" o AUTO-PREPARE").font(.caption).foregroundColor(.dim)
+            }
+        }
+        .padding(16).card()
+    }
+
+    private var addableVectors: [AttackVector] {
+        VectorDB.all().filter { $0.proto == target.proto }
+            .filter { v in !relatedPlan.contains { $0.vector.id == v.id } }
+    }
+
+    private func planRow(_ e: PlanEntry) -> some View {
+        HStack(spacing: 10) {
+            Circle().fill(e.vector.sev.color).frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(e.vector.name).font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
+                Text(capLabel(e.vector)).font(.system(size: 10, design: .monospaced)).foregroundColor(.dim)
+            }
+            Spacer()
+            Pill(text: statusLabel(e), color: statusColor(e))
+            Button {
+                Haptics.heavy()
+                o.executeOnly(e)
+            } label: {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .padding(9)
+                    .background(Circle().fill(e.vector.sev.color.opacity(0.2)))
+                    .overlay(Circle().strokeBorder(e.vector.sev.color.opacity(0.6), lineWidth: 1))
+                    .foregroundColor(e.vector.sev.color)
+            }
+            .buttonStyle(ScaleButton())
+            Button {
+                Haptics.tap()
+                o.removePlanEntry(e)
+            } label: {
+                Image(systemName: "minus.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundColor(.dim)
+            }
+            .buttonStyle(ScaleButton())
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.surfaceHi))
+    }
+
+    private func statusLabel(_ e: PlanEntry) -> String {
+        switch e.vector.cap {
+        case .plan: return "PLAN"
+        case .shellTool(let t): return ShellRunner.shared.resolve(t) != nil ? "TOOL ✓" : "TOOL ✗"
+        case .native:
+            if e.vector.id == "ble_write" {
+                return target.extra["chrUUID"]?.isEmpty == false ? "AUTO-ARMED" : "SERVE CONFIG"
+            }
+            return "READY"
+        }
+    }
+
+    private func statusColor(_ e: PlanEntry) -> Color {
+        switch e.vector.cap {
+        case .plan: return .warn
+        case .shellTool(let t): return ShellRunner.shared.resolve(t) != nil ? .ok : .bad
+        case .native:
+            if e.vector.id == "ble_write" && target.extra["chrUUID"]?.isEmpty != false { return .warn }
+            return .ok
+        }
     }
 
     private var attacksSection: some View {
