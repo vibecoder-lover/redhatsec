@@ -411,9 +411,9 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
         let fam = m.mifareFamily == .ultralight ? "NTAG/Ultralight" : "Mifare Classic"
         var dump = NFCDump(uid: m.identifier.hexPreview, family: fam,
                            pages: [], ndefHex: [], ndefText: [], kind: fam)
-        m.queryNDEFStatus { [weak self] st, _, _ in
+        m.queryNDEFStatus { [weak self] (st: CoreNFC.NFCNDEFStatus, _: UInt, _: (any Error)?) in
             guard let self else { return }
-            if st == .readWrite || st == .readOnly {
+            if st == CoreNFC.NFCNDEFStatus.readWrite || st == CoreNFC.NFCNDEFStatus.readOnly {
                 m.readNDEF { msg, _ in
                     if let msg {
                         for r in msg.records {
@@ -456,17 +456,17 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
             finishReplay(replayBuffer + ["tag non riconosciuto"])
             return
         }
-        m.queryNDEFStatus { [weak self] st, _, _ in
+        m.queryNDEFStatus { [weak self] (st: CoreNFC.NFCNDEFStatus, _: UInt, _: (any Error)?) in
             guard let self else { return }
-            if st != .readWrite {
+            if st != CoreNFC.NFCNDEFStatus.readWrite {
                 self.replayBuffer.append("tag read-only — replay impossibile")
                 self.finishReplay(self.replayBuffer)
                 return
             }
-            let records: [CoreNFC.NFCNDEFRecord] = dump.ndefHex.compactMap { hex in
+            let records: [CoreNFC.NFCNDEFPayload] = dump.ndefHex.compactMap { hex in
                 guard let d = Data(hexString: hex), !d.isEmpty else { return nil }
-                return CoreNFC.NFCNDEFRecord(typeNameFormat: CoreNFC.NFCTypeNameFormat.unknown,
-                                             type: Data(), identifier: Data(), payload: d)
+                return CoreNFC.NFCNDEFPayload(format: CoreNFC.NFCTypeNameFormat.unknown,
+                                              type: Data(), identifier: Data(), payload: d)
             }
             if records.isEmpty {
                 self.replayBuffer.append("nessun NDEF nel dump — write pages NTAG:")
