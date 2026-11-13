@@ -64,13 +64,15 @@ struct ToolsTab: View {
                     Text("Terminal").tag(0)
                     Text("Builder").tag(1)
                     Text("Forge").tag(2)
+                    Text("NFC").tag(3)
                 }
                 .pickerStyle(.segmented)
                 .padding(10)
                 switch mode {
                 case 0: TerminalView().environmentObject(tm)
                 case 1: BuilderView().environmentObject(tm)
-                default: ForgeView()
+                case 2: ForgeView()
+                default: NFCAttackView()
                 }
             }
             .background(Color.bg.ignoresSafeArea())
