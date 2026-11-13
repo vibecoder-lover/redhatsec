@@ -23,6 +23,15 @@ struct DashboardView: View {
             .background(Color.bg.ignoresSafeArea())
             .navigationTitle("RedHat Sec")
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        Haptics.heavy()
+                        Task { await o.autoPrepareAll() }
+                    } label: {
+                        Image(systemName: "wand.and.stars")
+                    }
+                    .disabled(o.prepBusy || o.phase == .execute || o.phase == .scan || o.phase == .enumerate)
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button { showConsole = true } label: {
                         Image(systemName: "terminal")

@@ -102,8 +102,9 @@ final class Orchestrator: ObservableObject {
             log("Wi-Fi metadata probe (MobileWiFi)…", .exec)
             let nets = await Task.detached { [wifi] in wifi.availableNetworks() }.value
             if nets.isEmpty {
-                log("Wi-Fi: no networks readable (fw probe fallita) — vettori Wi-Fi restano PLAN", .warn)
+                log("Wi-Fi: sonde fallite — diag: \(self.wifi.lastDiag) — vettori Wi-Fi restano PLAN", .warn)
             } else {
+                log("Wi-Fi: \(nets.count) rete(e) — \(self.wifi.lastDiag)", .good)
                 for n in nets {
                     var t = TargetDevice(name: n.ssid, proto: .wifi, rssi: n.rssi, mac: n.bssid, via: "Wi-Fi")
                     t.extra["sec"] = n.sec
@@ -294,6 +295,84 @@ final class Orchestrator: ObservableObject {
         plan = [entry]
         findings = []
         execute()
+    }
+
+    // MARK: - Auto-prepare (config derivata, zero input manuale)
+
+    @Published var prepBusy = false
+
+    func autoPrepareTarget(_ t: TargetDevice) async {
+        prepBusy = true
+        log("AUTO-PREPARE \(t.name)…", .exec)
+        await autoPrepare(t)
+        buildPlan()
+        log("AUTO-PREPARE \(t.name) completato", .good)
+        prepBusy = false
+        phase = .armed
+    }
+
+    func autoPrepareAll() async {
+        prepBusy = true
+        log("AUTO-PREPARE: calibrazione per-target (\(targets.count))…", .exec)
+        for t in targets { await autoPrepare(t) }
+        buildPlan()
+        log("AUTO-PREPARE completato — \(plan.count) vector(s) con config derivata", .good)
+        prepBusy = false
+        phase = .armed
+    }
+
+    private func autoPrepare(_ t0: TargetDevice) async {
+        var t = t0
+        switch t.proto {
+        case .ble:
+            let rep = await ble.enumerate(t)
+            if let w = rep.writable.first {
+                t.extra["svcUUID"] = w.svc
+                t.extra["chrUUID"] = w.chr
+                if (t.extra["payload"] ?? "").isEmpty { t.extra["payload"] = "0100" }
+                t.extra["autoArm"] = "1"
+                log("auto-arm BLE \(t.name): chr=\(w.chr.prefix(12)) payload=\(t.extra["payload"] ?? "0100")", .good)
+            } else {
+                t.extra["gatt"] = String(rep.lines.joined(separator: " | ").prefix(300))
+                log("BLE \(t.name): nessuna chr scrivibile — flood/sweyntooth armati senza config", .warn)
+            }
+        case .net:
+            guard let host = t.extra["host"], isNumericHost(host) else { break }
+            let found = await collectPorts(host: host)
+            t.extra["open"] = found.ports.joined(separator: ",")
+            t.extra["banners"] = found.banners
+            if found.ports.contains("1883") {
+                let r = await netMQTT(host)
+                t.extra["mqtt"] = r.contains("APERTO") ? "open" : "auth"
+            }
+            if found.ports.contains("554") {
+                let req = "OPTIONS rtsp://\(host):554/ RTSP/1.0\r\nCSeq: 1\r\n\r\n"
+                let r = await tcpRoundTrip(host: host, port: 554, payload: req.data(using: .ascii) ?? Data(), timeout: 3)
+                t.extra["rtsp"] = r.isEmpty ? "muto" : "risponde"
+            }
+            if found.ports.contains("161") {
+                let r = await udpRoundTrip(host: host, port: 161, payload: snmpGetSysDescr(), timeout: 3)
+                t.extra["snmp"] = r.isEmpty ? "muto" : "community public valida"
+            }
+            if found.ports.contains("23") {
+                let b = await tcpRoundTrip(host: host, port: 23, payload: Data(), timeout: 2, maxRecv: 1)
+                t.extra["telnet"] = b.isEmpty ? "muto" : String(b.prefix(80))
+            }
+            log("net prep \(host): open=[\(found.ports.joined(separator: ","))]", found.ports.isEmpty ? .warn : .good)
+        case .wifi:
+            t.extra["ch"] = t.extra["ch"] ?? "auto"
+            t.extra["armNote"] = "BSSID \(t.mac ?? "?") — attacco radio richiede monitor-mode esterna: args auto-configurati"
+            log("wifi prep \(t.name): BSSID=\(t.mac ?? "?") sec=\(t.extra["sec"] ?? "?") — args pronti", .info)
+        case .nfc:
+            if let uid = t.extra["uid"], let d = nfcDumps.first(where: { uid.hasPrefix($0.uid) }) {
+                t.extra["dump"] = d.uid
+                log("nfc prep \(t.name): dump locale (\(d.pages.count) pagine) — clone armato", .good)
+            } else {
+                log("nfc prep \(t.name): serve dump — usa Tools › NFC › fingerprint", .warn)
+            }
+        default: break
+        }
+        if let idx = targets.firstIndex(where: { $0.id == t.id }) { targets[idx] = t }
     }
 
     private func outcomeLabel(_ e: PlanEntry, _ evidence: String) -> String {

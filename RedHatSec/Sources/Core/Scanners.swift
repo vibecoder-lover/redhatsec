@@ -2,6 +2,7 @@ import Foundation
 import CoreBluetooth
 import CoreNFC
 import Network
+import SystemConfiguration.CaptiveNetwork
 
 // MARK: - BLE
 
@@ -260,22 +261,44 @@ final class WiFiScanner {
         var sec: String
     }
 
+    var lastDiag: String = ""
+
     func availableNetworks() -> [WiFiNet] {
-        if let nets = probeMobileWiFi() { return nets }
-        return probeHotspotCurrent()
+        lastDiag = ""
+        if let nets = probeMobileWiFi() { lastDiag = "mobilewifi ok (\(nets.count))"; return nets }
+        if let nets = probeCurrentNetworkInfo() { lastDiag = "CNCopyCurrentNetworkInfo ok"; return nets }
+        if let nets = probeHotspotCurrent() { lastDiag = "NEHotspotNetwork ok"; return nets }
+        let known = probeKnownNetworksPlist()
+        if !known.isEmpty { lastDiag = "known-networks plist (\(known.count))"; return known }
+        lastDiag = "tutte le sonde fallite: \(mobileWiFiDiag) — nessuna rete cache leggibile"
+        return []
     }
 
+    private var mobileWiFiDiag = "dlopen fallito"
+
     private func probeMobileWiFi() -> [WiFiNet]? {
-        guard dlopen("/System/Library/PrivateFrameworks/MobileWiFi.framework/MobileWiFi", RTLD_NOW) != nil,
-              let cls = NSClassFromString("WiFiManager") as? NSObject.Type else { return nil }
+        guard dlopen("/System/Library/PrivateFrameworks/MobileWiFi.framework/MobileWiFi", RTLD_NOW) != nil else {
+            mobileWiFiDiag = "dlopen MobileWiFi fallito"
+            return nil
+        }
+        guard let cls = NSClassFromString("WiFiManager") as? NSObject.Type else {
+            mobileWiFiDiag = "classe WiFiManager assente"
+            return nil
+        }
         let sharedSel = NSSelectorFromString("sharedInstance")
-        guard let shared = cls.perform(sharedSel)?.takeUnretainedValue() as? NSObject else { return nil }
+        guard let shared = cls.perform(sharedSel)?.takeUnretainedValue() as? NSObject else {
+            mobileWiFiDiag = "sharedInstance nil"
+            return nil
+        }
         var raw: NSArray?
         for sel in ["copyNetworkList", "networks", "allNetworks"] {
             if let r = shared.perform(NSSelectorFromString(sel))?.takeUnretainedValue() as? NSArray,
                r.count > 0 { raw = r; break }
         }
-        guard let arr = raw as? [NSObject] else { return nil }
+        guard let arr = raw as? [NSObject] else {
+            mobileWiFiDiag = "WiFiManager istanza ok ma lista vuota (probe fw negata su questo JB)"
+            return nil
+        }
         var out: [WiFiNet] = []
         for n in arr {
             let ssid = n.perform(NSSelectorFromString("ssidName"))?.takeUnretainedValue() as? String ?? "?"
@@ -287,8 +310,20 @@ final class WiFiScanner {
         return out.isEmpty ? nil : out
     }
 
-    private func probeHotspotCurrent() -> [WiFiNet] {
-        var result: [WiFiNet] = []
+    private func probeCurrentNetworkInfo() -> [WiFiNet]? {
+        guard let ifa = CNCopySupportedInterfaces() as? [String], !ifa.isEmpty else { return nil }
+        for iface in ifa {
+            guard let d = CNCopyCurrentNetworkInfo(iface as CFString) as? [String: Any] else { continue }
+            let ssid = (d[kCNNetworkInfoKeySSID as String] as? String) ?? "?"
+            let bssid = (d[kCNNetworkInfoKeyBSSID as String] as? String) ?? "?"
+            guard ssid != "?" else { continue }
+            return [WiFiNet(ssid: ssid, bssid: bssid, rssi: -55, sec: "connesso")]
+        }
+        return nil
+    }
+
+    private func probeHotspotCurrent() -> [WiFiNet]? {
+        var result: [WiFiNet]?
         let sem = DispatchSemaphore(value: 0)
         NEHotspotNetwork.fetchCurrent { net in
             if let n = net {
@@ -298,6 +333,32 @@ final class WiFiScanner {
         }
         _ = sem.wait(timeout: .now() + 4)
         return result
+    }
+
+    // iOS 16+: cache delle reti conosciute — leggibile con entitlement no-sandbox
+    private func probeKnownNetworksPlist() -> [WiFiNet] {
+        var out: [WiFiNet] = []
+        let paths = [
+            "/var/mobile/Library/Preferences/com.apple.wifi.known-networks.plist",
+            "/private/var/mobile/Library/Preferences/com.apple.wifi.known-networks.plist",
+        ]
+        for p in paths where FileManager.default.fileExists(atPath: p) {
+            guard let dict = NSDictionary(contentsOfFile: p) as? [String: Any] else { continue }
+            for (key, val) in dict where key.hasPrefix("wifi.network.") {
+                guard let net = val as? [String: Any] else { continue }
+                let ssid = (net["SSID"] as? String)
+                    ?? (net["SSID"] as? Data).flatMap { String(data: $0, encoding: .utf8) }
+                    ?? (net["ssid"] as? String) ?? "?"
+                guard ssid != "?" else { continue }
+                let bssid = (net["BSSID"] as? String) ?? (net["bssid"] as? String) ?? "?"
+                let sec = (net["securityType"] as? String) ?? (net["security_type"] as? String) ?? "cached"
+                if !out.contains(where: { $0.ssid == ssid }) {
+                    out.append(WiFiNet(ssid: ssid, bssid: bssid, rssi: -70, sec: sec))
+                }
+            }
+            if !out.isEmpty { break }
+        }
+        return out
     }
 }
 

@@ -288,6 +288,7 @@ struct TargetDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     header
+                    autoSection
                     if target.proto == .ble { bleConfig }
                     if target.proto == .net { netInfo }
                     planSection
@@ -326,6 +327,28 @@ struct TargetDetailView: View {
             }
         }
         .padding(16).card()
+    }
+
+    private var autoSection: some View {
+        Button {
+            Haptics.heavy()
+            Task { await o.autoPrepareTarget(target) }
+        } label: {
+            HStack(spacing: 8) {
+                if o.prepBusy {
+                    ProgressView().tint(.white)
+                    Text("PREPARAZIONE…").font(.system(size: 13, weight: .bold, design: .rounded))
+                } else {
+                    Image(systemName: "wand.and.stars").font(.system(size: 13, weight: .bold))
+                    Text("AUTO-PREPARE — CONFIG DA SOLO").font(.system(size: 13, weight: .bold, design: .rounded))
+                }
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 12)
+        }
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.redHat))
+        .foregroundColor(.white)
+        .buttonStyle(ScaleButton())
+        .disabled(o.prepBusy)
     }
 
     private var bleConfig: some View {
