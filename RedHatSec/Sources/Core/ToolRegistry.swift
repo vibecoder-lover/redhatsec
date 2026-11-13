@@ -85,7 +85,9 @@ enum BuiltinExec {
                 let total = UInt64(s.f_blocks) * block / 1024 / 1024
                 let free = UInt64(s.f_bavail) * block / 1024 / 1024
                 let cap = Double(total - free) * 100.0 / Double(max(1, total))
-                let name = String(cString: s.f_mntonname)
+                let name = withUnsafeBytes(of: &s.f_mntonname) { p in
+                    String(cString: p.baseAddress!.assumingMemoryBound(to: CChar.self))
+                }
                     .padding(toLength: 16, withPad: " ", startingAt: 0)
                 out.append("\(name) \(total)M \(free)M \(Int(cap))%  \(url)")
             }
