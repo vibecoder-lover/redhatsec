@@ -7,6 +7,9 @@ struct ToolSpec {
     let bins: [String]
 }
 
+@_silgen_name("proc_pidpath")
+func proc_pidpath_c(_ pid: pid_t, _ buf: UnsafeMutablePointer<CChar>, _ size: UInt32) -> Int32
+
 enum BuiltinExec {
     static let names: Set<String> = ["ls", "cat", "echo", "whoami", "id", "uname",
                                      "env", "df", "ps", "ifconfig", "pwd", "help", "clear"]
@@ -52,19 +55,21 @@ enum BuiltinExec {
         let euid = geteuid()
         var gids = [gid_t](repeating: 0, count: 16)
         let n = getgroups(16, &gids)
-        let glist = (0..<max(0, n)).map { String(gids[$0]) }.joined(separator: ",")
+        let glist = (0..<max(0, Int(n))).map { String(gids[$0]) }.joined(separator: ",")
         return "uid=\(ruid) euid=\(euid) gid=\(getgid()) groups=\(glist)"
     }
 
     static func unameLine(_ full: Bool) -> String {
         var u = utsname()
         uname(&u)
-        func cstr(_ s: CChar) -> String { String(UnicodeScalar(UInt8(s < 0 ? 0 : s))) }
-        let sys = withUnsafeBytes(of: &u.sysname) { $0.split(separator: 0).map { cstr(CChar($0)) }.joined() }
-        let node = withUnsafeBytes(of: &u.nodename) { $0.split(separator: 0).map { cstr(CChar($0)) }.joined() }
-        let rel = withUnsafeBytes(of: &u.release) { $0.split(separator: 0).map { cstr(CChar($0)) }.joined() }
-        let ver = withUnsafeBytes(of: &u.version) { $0.split(separator: 0).map { cstr(CChar($0)) }.joined() }
-        let mach = withUnsafeBytes(of: &u.machine) { $0.split(separator: 0).map { cstr(CChar($0)) }.joined() }
+        func cstr(_ ptr: UnsafeRawBufferPointer) -> String {
+            String(cString: ptr.baseAddress!.assumingMemoryBound(to: CChar.self))
+        }
+        let sys = withUnsafeBytes(of: &u.sysname) { cstr($0) }
+        let node = withUnsafeBytes(of: &u.nodename) { cstr($0) }
+        let rel = withUnsafeBytes(of: &u.release) { cstr($0) }
+        let ver = withUnsafeBytes(of: &u.version) { cstr($0) }
+        let mach = withUnsafeBytes(of: &u.machine) { cstr($0) }
         if full {
             return "\(sys) \(node) \(rel) \(ver) \(mach)"
         }
@@ -80,8 +85,9 @@ enum BuiltinExec {
                 let total = UInt64(s.f_blocks) * block / 1024 / 1024
                 let free = UInt64(s.f_bavail) * block / 1024 / 1024
                 let cap = Double(total - free) * 100.0 / Double(max(1, total))
-                out.append(String(format: "%-16s %7llu %8llu %3.0f%%  %@",
-                                  String(cString: s.f_mntonname), total, free, cap, url))
+                let name = String(cString: s.f_mntonname)
+                    .padding(toLength: 16, withPad: " ", startingAt: 0)
+                out.append("\(name) \(total)M \(free)M \(Int(cap))%  \(url)")
             }
         }
         return out
@@ -98,7 +104,7 @@ enum BuiltinExec {
             let name = String(cString: ifa.ifa_name)
             if let sa = ifa.ifa_addr {
                 var host = [CChar](repeating: 0, count: 128)
-                if getnameinfo(sa, sa.pointee.sa_len, &host, socklen_t(128), nil, 0, NI_NUMERICHOST) == 0 {
+                if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(128), nil, 0, NI_NUMERICHOST) == 0 {
                     out.append("\(name): \(String(cString: host))")
                 } else {
                     out.append("\(name): ?")
@@ -151,7 +157,7 @@ enum BuiltinExec {
         }
         return buffer.map { p -> String in
             var pathbuf = [CChar](repeating: 0, count: 2048)
-            let r = proc_pidpath(p.kp_proc.p_pid, &pathbuf, 2048)
+            let r = proc_pidpath_c(p.kp_proc.p_pid, &pathbuf, 2048)
             let path = r > 0 ? String(cString: pathbuf) : "(hidden)"
             return String(format: "%6d  %@", p.kp_proc.p_pid, path)
         }
