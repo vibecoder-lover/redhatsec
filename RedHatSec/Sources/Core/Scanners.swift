@@ -340,7 +340,7 @@ final class WiFiScanner {
             let name = String(cString: class_getName(list[i]))
             if prefixes.contains(where: name.hasPrefix) { wifiClasses.append(name) }
         }
-        free(list)
+        free(UnsafeMutableRawPointer(list))
         diag("\(label) classi: \(wifiClasses.prefix(20).joined(separator: ", "))"
              + (wifiClasses.count > 20 ? " +\(wifiClasses.count - 20)" : ""))
         let candidates = wifiClasses.filter { $0.contains("Manager") || $0.contains("Client") || $0.contains("Controller") }
@@ -357,11 +357,10 @@ final class WiFiScanner {
             for j in 0..<Int(mcount) {
                 let m = methods[j]
                 guard method_getNumberOfArguments(m) == 2 else { continue }
-                if let rt = method_copyReturnType(m) {
-                    let isObj = rt[0] == UInt8(ascii: "@")
-                    free(rt)
-                    guard isObj else { continue }
-                }
+                let rt = method_copyReturnType(m)
+                let isObj = rt[0] == UInt8(ascii: "@")
+                free(rt)
+                guard isObj else { continue }
                 let sn = String(cString: sel_getName(method_getName(m)))
                 let low = sn.lowercased()
                 if low.contains("network") || low.contains("scan") || low.contains("list") || low.contains("ssid") {
