@@ -34,11 +34,10 @@ final class ShellRunner {
         let appBin = "/var/mobile/RedHatSec/bin"
         if fm.fileExists(atPath: appBin + "/" + bin) { return appBin + "/" + bin }
         for root in bootstrapRoots {
-            let prefix = root.isEmpty ? "" : root
             let dirs = root.isEmpty ? ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
                                     : ["\(root)/usr/bin", "\(root)/bin"]
             for d in dirs {
-                let full = prefix + d + "/" + bin
+                let full = d + "/" + bin
                 if fm.isExecutableFile(atPath: full) || fm.fileExists(atPath: full) { return full }
             }
         }
