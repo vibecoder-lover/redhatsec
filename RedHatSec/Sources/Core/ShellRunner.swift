@@ -93,7 +93,9 @@ final class ShellRunner {
         for p in envp { if let p { free(p) } }
 
         guard rc == 0 else {
-            return ShellResult(exitCode: Int32(rc), stdout: "", stderr: "spawn failed rc=\(rc)")
+            let msg = String(cString: strerror(rc))
+            return ShellResult(exitCode: Int32(rc), stdout: "",
+                               stderr: "spawn failed rc=\(rc): \(msg) — bin: \(bin)")
         }
         try? outPipe.fileHandleForWriting.close()
         try? errPipe.fileHandleForWriting.close()

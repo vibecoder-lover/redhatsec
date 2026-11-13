@@ -93,10 +93,11 @@ struct TerminalView: View {
         ("uname", "uname -a"),
         ("jb", "ls /var/jb/usr/bin"),
         ("apps bin", "ls /var/jb/Applications"),
-        ("procs", "ps aux"),
-        ("ports", "netstat -an"),
-        ("disk", "df -h"),
-        ("curl me", "curl -s ifconfig.me"),
+        ("procs", "ps"),
+        ("disk", "df"),
+        ("net", "ifconfig"),
+        ("env", "env"),
+        ("help", "help"),
     ]
 
     var body: some View {
@@ -182,8 +183,15 @@ extension TerminalModel {
         guard !cmd.isEmpty, !running else { return }
         let parts = cmd.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         guard let head = parts.first else { return }
-        if head == "install" {
-            if parts.count > 1 { installTool(parts[1]) }
+        if head == "clear" { lines.removeAll(); return }
+        if head == "install", parts.count > 1 {
+            installTool(parts[1])
+            return
+        }
+        if BuiltinExec.names.contains(head) {
+            append("$ \(cmd)", .exec)
+            let out = BuiltinExec.exec(parts) ?? []
+            for l in out { append(l) }
             return
         }
         if ShellRunner.shared.resolve(head) == nil {

@@ -7,6 +7,157 @@ struct ToolSpec {
     let bins: [String]
 }
 
+enum BuiltinExec {
+    static let names: Set<String> = ["ls", "cat", "echo", "whoami", "id", "uname",
+                                     "env", "df", "ps", "ifconfig", "pwd", "help", "clear"]
+
+    static func exec(_ parts: [String]) -> [String]? {
+        guard let head = parts.first, names.contains(head), head != "clear" else { return nil }
+        let args = Array(parts.dropFirst())
+        switch head {
+        case "help": return helpLines
+        case "pwd": return [FileManager.default.currentDirectoryPath]
+        case "echo": return [args.joined(separator: " ")]
+        case "whoami": return [userLine]
+        case "id": return [idLine]
+        case "uname": return [unameLine(args.contains("-a"))]
+        case "env": return ProcessInfo.processInfo.environment.map { "\($0)=\($1)" }.sorted()
+        case "df": return dfLines
+        case "ifconfig": return ifconfigLines
+        case "ls": return lsLines(args)
+        case "cat": return catLines(args)
+        case "ps": return psLines
+        default: return nil
+        }
+    }
+
+    static let helpLines: [String] = [
+        "builtin nativi (no fork, sempre funzionanti):",
+        "  ls [dir] · cat <file> · pwd · echo · whoami · id · uname [-a]",
+        "  env · df · ifconfig · ps · clear · help",
+        "  install <tool>   → auto-install da repo (fallback Sileo)",
+        "  altri comandi    → exec via posix_spawn (richiede entitlements no-container)",
+    ]
+
+    static var userLine: String {
+        let uid = getuid()
+        if let pw = getpwuid(uid), let name = pw.pointee.pw_name {
+            return String(cString: name)
+        }
+        return "uid=\(uid)"
+    }
+
+    static var idLine: String {
+        let ruid = getuid()
+        let euid = geteuid()
+        var gids = [gid_t](repeating: 0, count: 16)
+        let n = getgroups(16, &gids)
+        let glist = (0..<max(0, n)).map { String(gids[$0]) }.joined(separator: ",")
+        return "uid=\(ruid) euid=\(euid) gid=\(getgid()) groups=\(glist)"
+    }
+
+    static func unameLine(_ full: Bool) -> String {
+        var u = utsname()
+        uname(&u)
+        func cstr(_ s: CChar) -> String { String(UnicodeScalar(UInt8(s < 0 ? 0 : s))) }
+        let sys = withUnsafeBytes(of: &u.sysname) { $0.split(separator: 0).map { cstr(CChar($0)) }.joined() }
+        let node = withUnsafeBytes(of: &u.nodename) { $0.split(separator: 0).map { cstr(CChar($0)) }.joined() }
+        let rel = withUnsafeBytes(of: &u.release) { $0.split(separator: 0).map { cstr(CChar($0)) }.joined() }
+        let ver = withUnsafeBytes(of: &u.version) { $0.split(separator: 0).map { cstr(CChar($0)) }.joined() }
+        let mach = withUnsafeBytes(of: &u.machine) { $0.split(separator: 0).map { cstr(CChar($0)) }.joined() }
+        if full {
+            return "\(sys) \(node) \(rel) \(ver) \(mach)"
+        }
+        return sys
+    }
+
+    static var dfLines: [String] {
+        var out = ["Filesystem       Size(M)  Free(M)  Cap  Mounted"]
+        for url in ["/", "/private/var", "/var/jb"] {
+            var s = statfs()
+            if statfs(url, &s) == 0 {
+                let block = UInt64(s.f_bsize)
+                let total = UInt64(s.f_blocks) * block / 1024 / 1024
+                let free = UInt64(s.f_bavail) * block / 1024 / 1024
+                let cap = Double(total - free) * 100.0 / Double(max(1, total))
+                out.append(String(format: "%-16s %7llu %8llu %3.0f%%  %@",
+                                  String(cString: s.f_mntonname), total, free, cap, url))
+            }
+        }
+        return out
+    }
+
+    static var ifconfigLines: [String] {
+        var addrs: UnsafeMutablePointer<ifaddrs>? = nil
+        guard getifaddrs(&addrs) == 0, let first = addrs else { return ["ifconfig: fallito"] }
+        defer { freeifaddrs(first) }
+        var out: [String] = []
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let p = ptr {
+            let ifa = p.pointee
+            let name = String(cString: ifa.ifa_name)
+            if let sa = ifa.ifa_addr {
+                var host = [CChar](repeating: 0, count: 128)
+                if getnameinfo(sa, sa.pointee.sa_len, &host, socklen_t(128), nil, 0, NI_NUMERICHOST) == 0 {
+                    out.append("\(name): \(String(cString: host))")
+                } else {
+                    out.append("\(name): ?")
+                }
+            } else {
+                out.append("\(name): down")
+            }
+            ptr = ifa.ifa_next
+        }
+        return out
+    }
+
+    static func lsLines(_ args: [String]) -> [String] {
+        let path = args.first(where: { !$0.hasPrefix("-") }) ?? "."
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(atPath: path) else {
+            return ["ls: cannot access '\(path)' — negato o inesistente"]
+        }
+        let out = items.sorted().map { n -> String in
+            let full = path.hasSuffix("/") ? path + n : path + "/" + n
+            var isDir: ObjCBool = false
+            var size = "       -"
+            if fm.fileExists(atPath: full, isDirectory: &isDir),
+               let attr = try? fm.attributesOfItem(atPath: full), let s = attr[.size] as? Int {
+                size = String(format: "%8d", s)
+            }
+            return "\(size)  \(n)\(isDir.boolValue ? "/" : "")"
+        }
+        return out.isEmpty ? ["(vuoto)"] : out
+    }
+
+    static func catLines(_ args: [String]) -> [String] {
+        guard let f = args.first else { return ["cat: manca il file"] }
+        guard let s = try? String(contentsOfFile: f, encoding: .utf8) else {
+            return ["cat: \(f) — permesso negato o inesistente"]
+        }
+        return s.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    }
+
+    static var psLines: [String] {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL]
+        var size = 0
+        guard sysctl(&mib, u_int(mib.count), nil, &size, nil, 0) == 0, size > 0 else {
+            return ["ps: sysctl negato"]
+        }
+        var buffer = [kinfo_proc](repeating: kinfo_proc(), count: size / MemoryLayout<kinfo_proc>.stride)
+        var bsize = size
+        guard sysctl(&mib, u_int(mib.count), &buffer, &bsize, nil, 0) == 0 else {
+            return ["ps: sysctl negato (2)"]
+        }
+        return buffer.map { p -> String in
+            var pathbuf = [CChar](repeating: 0, count: 2048)
+            let r = proc_pidpath(p.kp_proc.p_pid, &pathbuf, 2048)
+            let path = r > 0 ? String(cString: pathbuf) : "(hidden)"
+            return String(format: "%6d  %@", p.kp_proc.p_pid, path)
+        }
+    }
+}
+
 enum ToolRegistry {
     static let appBinDir = "/var/mobile/RedHatSec/bin"
     static let workDir = "/var/mobile/RedHatSec"
@@ -49,7 +200,7 @@ enum ToolRegistry {
             if apt != nil && dpkgDeb != nil {
                 line("[install] fetch \(s.pkg)…")
                 let fetch = sh.run("sh", args: ["-c",
-                    "cd \(workDir)/tmp && apt-get download \(s.pkg) 2>&1"], timeout: 180)
+                    "cd \(workDir)/tmp && apt-get -o Dir::Cache::archives=\(workDir)/tmp download \(s.pkg) 2>&1"], timeout: 180)
                 line(fetch.stdout.isEmpty ? fetch.stderr : fetch.stdout)
                 let extract = sh.run("sh", args: ["-c",
                     "cd \(workDir)/tmp && ls *.deb >/dev/null 2>&1 && for d in *.deb; do dpkg-deb -x \"\(workDir)/tmp/$d\" \(workDir)/extracted; done && cp \(workDir)/extracted/var/jb/usr/bin/* \(appBinDir)/ 2>/dev/null; cp \(workDir)/extracted/usr/bin/* \(appBinDir)/ 2>/dev/null; cp \(workDir)/extracted/usr/local/bin/* \(appBinDir)/ 2>/dev/null; chmod 755 \(appBinDir)/* 2>/dev/null; rm -f \(workDir)/tmp/*.deb; true"], timeout: 120)
