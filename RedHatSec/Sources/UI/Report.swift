@@ -44,7 +44,7 @@ struct ReportView: View {
                 severityBars(rep)
 
                 ForEach(rep.findings.sorted { $0.sev < $1.sev }) { f in
-                    FindingCard(f)
+                    FindingCard(f: f)
                 }
 
                 exportRow(rep)

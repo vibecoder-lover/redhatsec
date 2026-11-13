@@ -28,7 +28,11 @@ jobs:
       - name: Fake-sign with entitlements
         run: |
           APP=RedHatSec/build/Build/Products/Release-iphoneos/RedHatSec.app
-          ldid -SRedHatSec.entitlements "$APP/RedHatSec"
+          if [ -f "$APP/RedHatSec" ]; then
+            ldid -SRedHatSec.entitlements "$APP/RedHatSec"
+          else
+            echo "::error::binario mancante — compilazione fallita"; exit 1
+          fi
 
       - name: Package .app
         run: |

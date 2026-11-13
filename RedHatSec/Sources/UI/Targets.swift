@@ -13,7 +13,7 @@ struct TargetsView: View {
                     ScrollView {
                         VStack(spacing: 10) {
                             ForEach(o.targets) { t in
-                                TargetRow(t) { withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { selected = t } }
+                                TargetRow(t: t) { withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { selected = t } }
                             }
                         }
                         .padding(16)
@@ -138,7 +138,7 @@ struct TargetDetailView: View {
             }
             ForEach(Array(target.extra.keys.sorted()), id: \.self) { k in
                 if !["payload", "svcUUID", "chrUUID"].contains(k) {
-                    KV(k, target.extra[k] ?? "")
+                    KV(k: k, val: target.extra[k] ?? "")
                 }
             }
         }
@@ -151,11 +151,23 @@ struct TargetDetailView: View {
             Text("Payload in hex scritto sulla characteristic (es. 0100 unlock). Campo vuoto = solo enumerazione.")
                 .font(.caption).foregroundColor(.dim)
             TextField("payload hex", text: $payloadHex)
-                .textFieldStyle(.rounded).font(.system(size: 13, design: .monospaced))
+                .textFieldStyle(.plain)
+                .font(.system(size: 13, design: .monospaced))
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
             TextField("service UUID (opz.)", text: $svcUUID)
-                .textFieldStyle(.rounded).font(.system(size: 13, design: .monospaced))
+                .textFieldStyle(.plain)
+                .font(.system(size: 13, design: .monospaced))
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
             TextField("characteristic UUID (opz.)", text: $chrUUID)
-                .textFieldStyle(.rounded).font(.system(size: 13, design: .monospaced))
+                .textFieldStyle(.plain)
+                .font(.system(size: 13, design: .monospaced))
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
             Button {
                 Haptics.tap()
                 if let idx = o.targets.firstIndex(where: { $0.id == target.id }) {
@@ -176,9 +188,9 @@ struct TargetDetailView: View {
     private var netInfo: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("PORTS / BANNERS").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.info)
-            KV("open", target.extra["open"]?.isEmpty == false ? target.extra["open"]! : "nessuna")
+            KV(k: "open", val: target.extra["open"]?.isEmpty == false ? target.extra["open"]! : "nessuna")
             if let b = target.extra["banners"], !b.isEmpty {
-                KV("banners", b)
+                KV(k: "banners", val: b)
             }
         }
         .padding(16).card()

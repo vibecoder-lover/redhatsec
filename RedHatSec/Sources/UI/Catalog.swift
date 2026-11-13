@@ -24,7 +24,7 @@ struct CatalogView: View {
                     chips
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                         ForEach(filtered) { v in
-                            VectorCard(v) { withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { selected = v } }
+                            VectorCard(v: v) { withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { selected = v } }
                         }
                     }
                 }
@@ -33,16 +33,16 @@ struct CatalogView: View {
             .background(Color.bg.ignoresSafeArea())
             .navigationTitle("\(vectors.count) vectors")
             .searchable(text: $query, prompt: "nome, CVE, id…")
-            .sheet(item: $selected) { v in VectorDetailSheet(v) }
+            .sheet(item: $selected) { v in VectorDetailSheet(v: v) }
         }
     }
 
     private var chips: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                Chip("TUTTI", active: filter == nil) { filter = nil }
+                Chip(text: "TUTTI", active: filter == nil) { filter = nil }
                 ForEach(Proto.allCases) { p in
-                    Chip(p.rawValue.uppercased(), active: filter == p) { filter = p }
+                    Chip(text: p.rawValue.uppercased(), active: filter == p) { filter = p }
                 }
             }.padding(.horizontal, 2)
         }
@@ -124,9 +124,9 @@ struct VectorDetailSheet: View {
                         Pill(text: "\(v.year)", color: .dim)
                         Pill(text: "ATT&CK \(v.attack)", color: .info)
                     }
-                    KV("Reference", v.ref)
-                    KV("CVSS", String(format: "%.1f — %@", v.cvss, v.cvssVec))
-                    KV("Prerequisiti", v.prereq)
+                    KV(k: "Reference", val: v.ref)
+                    KV(k: "CVSS", val: String(format: "%.1f — %@", v.cvss, v.cvssVec))
+                    KV(k: "Prerequisiti", val: v.prereq)
                     Text(v.brief).font(.body).foregroundColor(.white.opacity(0.9))
                     Text("EXEC").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
                     Text(v.hint).font(.system(size: 12, design: .monospaced))

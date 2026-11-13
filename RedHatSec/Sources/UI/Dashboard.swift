@@ -126,7 +126,7 @@ struct DashboardView: View {
                 Button("apri console") { showConsole = true }.font(.caption).foregroundColor(.redHat)
             }
             ForEach(o.logs.suffix(5)) { l in
-                LogLine(l)
+                LogLine(l: l)
             }
             if o.logs.isEmpty {
                 Text("journal vuoto — premi SCAN")
@@ -300,7 +300,7 @@ struct ConsoleView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 6) {
-                        ForEach(o.logs) { l in LogLine(l).id(l.id) }
+                        ForEach(o.logs) { l in LogLine(l: l).id(l.id) }
                     }.padding(12)
                 }
                 .background(Color(hex: 0x070709).ignoresSafeArea())
