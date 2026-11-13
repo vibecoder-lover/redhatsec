@@ -5,13 +5,18 @@ import Network
 
 // MARK: - BLE
 
+struct GATTReport {
+    var lines: [String] = []
+    var writable: [(svc: String, chr: String)] = []
+}
+
 final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private var central: CBCentralManager!
     private var peripherals: [String: CBPeripheral] = [:]
     private var onDiscover: ((TargetDevice) -> Void)?
-    private var enumContinuation: CheckedContinuation<[String], Never>?
+    private var enumContinuation: CheckedContinuation<GATTReport, Never>?
     private var enumBuffer: [String] = []
-    private var floodCount = 0
+    private var writableChars: [(svc: String, chr: String)] = []
 
     var isReady: Bool { central?.state == .poweredOn }
 
@@ -101,10 +106,13 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     // Enumerate GATT: connect → discover services/characteristics → dump
-    func enumerate(_ target: TargetDevice, timeout: TimeInterval = 8) async -> [String] {
+    func enumerate(_ target: TargetDevice, timeout: TimeInterval = 8) async -> GATTReport {
         guard central.state == .poweredOn,
-              let per = peripherals[target.mac ?? ""] else { return ["peripheral not in range/cache"] }
+              let per = peripherals[target.mac ?? ""] else {
+            return GATTReport(lines: ["peripheral not in range/cache"])
+        }
         enumBuffer = []
+        writableChars = []
         return await withCheckedContinuation { cont in
             enumContinuation = cont
             per.delegate = self
@@ -136,6 +144,10 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             if c.value != nil { line += " val=\((c.value ?? Data()).hexPreview)" }
             enumBuffer.append(line)
             if c.properties.contains(.read) { peripheral.readValue(for: c) }
+            if c.properties.contains(.write) || c.properties.contains(.writeWithoutResponse) {
+                writableChars.append((service.uuid.uuidString, c.uuid.uuidString))
+                enumBuffer.append("  ↳ WRITABLE → svc=\(service.uuid.uuidString) chr=\(c.uuid.uuidString)")
+            }
         }
         if service == peripheral.services?.last { finishEnum() }
     }
@@ -213,7 +225,7 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private func finishEnum() {
         let c = enumContinuation
         enumContinuation = nil
-        c?.resume(returning: enumBuffer)
+        c?.resume(returning: GATTReport(lines: enumBuffer, writable: writableChars))
     }
 }
 
@@ -330,21 +342,169 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
         session.invalidate()
     }
 
-    func tagReaderSession(_ session: NFCTagReaderSession, didInvalidateWithError error: Error) {}
+    private var scanCont: CheckedContinuation<NFCDump?, Never>?
+    private var replayCont: CheckedContinuation<[String], Never>?
+    private var replayBuffer: [String] = []
+    private var replayDumpRef: NFCDump?
+
+    func fullScan(timeout: TimeInterval = 25) async -> NFCDump? {
+        guard NFCNDEFReaderSession.readingAvailable else { return nil }
+        return await withCheckedContinuation { c in
+            scanCont = c
+            session = NFCTagReaderSession(pollingOption: [.iso14443], delegate: self, queue: nil)
+            session?.alertMessage = "Avvicina il tag — dump completo…"
+            session?.begin()
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard let self, self.scanCont != nil else { return }
+                self.session?.invalidate()
+            }
+        }
+    }
+
+    func replay(_ dump: NFCDump, timeout: TimeInterval = 25) async -> [String] {
+        guard NFCNDEFReaderSession.readingAvailable else { return ["NFC reader unavailable"] }
+        replayBuffer = ["replay \(dump.title) — \(dump.ndefHex.count) NDEF record(s)"]
+        replayDumpRef = dump
+        return await withCheckedContinuation { c in
+            replayCont = c
+            session = NFCTagReaderSession(pollingOption: [.iso14443], delegate: self, queue: nil)
+            session?.alertMessage = "Avvicina il tag target per il replay…"
+            session?.begin()
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard let self, self.replayCont != nil else { return }
+                self.session?.invalidate()
+            }
+        }
+    }
+
+    private func finishScan(_ d: NFCDump?) {
+        session?.invalidate()
+        let c = scanCont
+        scanCont = nil
+        c?.resume(returning: d)
+    }
+
+    private func finishReplay(_ lines: [String]) {
+        session?.invalidate()
+        let c = replayCont
+        replayCont = nil
+        c?.resume(returning: lines)
+    }
+
+    func tagReaderSession(_ session: NFCTagReaderSession, didInvalidateWithError error: Error) {
+        if scanCont != nil {
+            finishScan(buffer.isEmpty ? nil : NFCDump(uid: buffer.first ?? "?", family: "?", pages: [], ndefHex: [], ndefText: [], kind: "Partial"))
+        }
+        if replayCont != nil { finishReplay(replayBuffer) }
+    }
+
     func tagReaderSessionDidBecomeActive(_ session: NFCTagReaderSession) {}
 
     func tagReaderSession(_ session: NFCTagReaderSession, didDetect tags: [NFCTag]) {
-        for t in tags {
-            switch t {
-            case .miFare(let m):
-                buffer.append("MIFARE \(m.mifareFamily) UID=\(m.identifier.hexPreview)")
-                _ = try? m.queryNDEFStatus { st, cap, _ in
-                    self.buffer.append("NDEF status=\(st) cap=\(cap)")
-                    session.invalidate()
+        if replayCont != nil { handleReplay(tags, session); return }
+        guard let t = tags.first, case let .miFare(m) = t else {
+            session.alertMessage = "Tag non supportato"
+            session.invalidate()
+            finishScan(nil)
+            return
+        }
+        let fam = m.mifareFamily == .ultralight ? "NTAG/Ultralight" : "Mifare Classic"
+        var dump = NFCDump(uid: m.identifier.hexPreview, family: fam,
+                           pages: [], ndefHex: [], ndefText: [], kind: fam)
+        m.queryNDEFStatus { [weak self] st, _, _ in
+            guard let self else { return }
+            if st == .readWrite || st == .readOnly {
+                m.readNDEF { msg, _ in
+                    if let msg {
+                        for r in msg.records {
+                            dump.ndefHex.append(r.payload.hexPreview)
+                            dump.ndefText.append(String(data: r.payload, encoding: .utf8) ?? r.payload.hexPreview)
+                        }
+                    }
+                    self.readPages(m, dump)
                 }
-            default:
-                buffer.append("tag \(t)")
-                session.invalidate()
+            } else {
+                self.readPages(m, dump)
+            }
+        }
+    }
+
+    private func readPages(_ m: NFCMiFareTag, _ base: NFCDump) {
+        var dump = base
+        var page: UInt8 = 0
+        func readNext() {
+            if page >= 16 {
+                finishScan(dump)
+                return
+            }
+            m.sendMiFareCommand(commandPacket: Data([0x30, page])) { resp, err in
+                if let err, err.code != 0 {
+                    dump.pages.append("ERR(\(err.code))")
+                } else {
+                    dump.pages.append(resp.hexPreview)
+                }
+                page += 1
+                readNext()
+            }
+        }
+        readNext()
+    }
+
+    private func handleReplay(_ tags: [NFCTag], _ session: NFCTagReaderSession) {
+        guard let t = tags.first, case let .miFare(m) = t, let dump = replayDumpRef else {
+            session.alertMessage = "Tag non riconosciuto"
+            session.invalidate()
+            finishReplay(replayBuffer + ["tag non riconosciuto"])
+            return
+        }
+        m.queryNDEFStatus { [weak self] st, _, _ in
+            guard let self else { return }
+            if st != .readWrite {
+                self.replayBuffer.append("tag read-only — replay impossibile")
+                self.finishReplay(self.replayBuffer)
+                return
+            }
+            let records: [NFCNDEFRecord] = dump.ndefHex.compactMap { hex in
+                guard let d = Data(hexString: hex), !d.isEmpty else { return nil }
+                return NFCNDEFRecord(typeNameFormat: .unknown, type: Data(), identifier: Data(), payload: d)
+            }
+            if records.isEmpty {
+                self.replayBuffer.append("nessun NDEF nel dump — write pages NTAG:")
+                var pg: UInt8 = 4
+                var wrote = 0
+                func writeNext() {
+                    let idx = Int(pg) - 4
+                    guard idx < dump.pages.count else {
+                        self.replayBuffer.append("pages written: \(wrote)")
+                        self.finishReplay(self.replayBuffer)
+                        return
+                    }
+                    guard let d = Data(hexString: dump.pages[idx]), d.count == 4 else {
+                        pg += 1
+                        writeNext()
+                        return
+                    }
+                    m.sendMiFareCommand(commandPacket: Data([0xA2, pg]) + d) { _, err in
+                        if let err, err.code != 0 {
+                            self.replayBuffer.append("write p\(pg) ERR(\(err.code))")
+                        } else {
+                            wrote += 1
+                        }
+                        pg += 1
+                        writeNext()
+                    }
+                }
+                writeNext()
+                return
+            }
+            let msg = NFCNDEFMessage(records: records)
+            m.writeNDEF(msg) { err in
+                if let err {
+                    self.replayBuffer.append("NDEF write err: \(err.localizedDescription)")
+                } else {
+                    self.replayBuffer.append("NDEF rewritten ✓ (\(records.count) record)")
+                }
+                self.finishReplay(self.replayBuffer)
             }
         }
     }

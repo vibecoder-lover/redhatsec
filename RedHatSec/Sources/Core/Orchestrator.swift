@@ -20,12 +20,18 @@ final class Orchestrator: ObservableObject {
     @Published var report: Report?
     @Published var reportURL: URL?
     @Published var radarPing: Int = 0
+    @Published var attackLog: [AttackRecord] = []
+    @Published var nfcDumps: [NFCDump] = []
 
     let ble = BLEScanner()
     let wifi = WiFiScanner()
     let nfc = NFCScanner()
     let net = NetScanner()
     let shell = ShellRunner.shared
+
+    init() {
+        loadDumps()
+    }
 
     private let journalPath: URL = {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -50,12 +56,14 @@ final class Orchestrator: ObservableObject {
     }
 
     private func addTarget(_ t: TargetDevice) {
-        let key = t.proto.rawValue + (t.mac ?? t.name)
-        if !targets.contains(where: { $0.proto == t.proto && ($0.mac ?? $0.name) == (t.mac ?? t.name) }) {
-            targets.append(t)
-            radarPing += 1
-            log("target discovered: \(t.name) [\(t.proto.rawValue)] rssi=\(t.rssi)", .good)
-        }
+        guard !targets.contains(where: { $0.proto == t.proto && ($0.mac ?? $0.name) == (t.mac ?? t.name) }) else { return }
+        var t = t
+        let raw = t.name
+        t.name = TargetNamer.pretty(t, rawName: raw)
+        t.extra["rawName"] = raw
+        targets.append(t)
+        radarPing += 1
+        log("target discovered: \(t.name) [\(t.proto.rawValue)] rssi=\(t.rssi)", .good)
     }
 
     // MARK: - FSM
@@ -74,9 +82,9 @@ final class Orchestrator: ObservableObject {
 
     private func runScanPipeline() async {
         // NFC in parallelo (attende tap)
-        let nfcTask = Task { [weak self] () -> [String] in
-            guard let self else { return [] }
-            return await self.nfc.scan(timeout: 15)
+        let nfcTask = Task { [weak self] () -> NFCDump? in
+            guard let self else { return nil }
+            return await self.nfc.fullScan(timeout: 18)
         }
 
         // BLE
@@ -128,15 +136,15 @@ final class Orchestrator: ObservableObject {
         }
 
         // NFC risultato
-        let nfcOut = await nfcTask.value
-        for line in nfcOut {
-            if line.hasPrefix("MIFARE") || line.hasPrefix("NDEF") {
-                var t = TargetDevice(name: "NFC tag", proto: .nfc, rssi: 0, via: "NFC field")
-                t.extra["raw"] = line
-                addTarget(t)
-            } else {
-                log("NFC: \(line)", .info)
-            }
+        if let dump = await nfcTask.value {
+            var t = TargetDevice(name: dump.title, proto: .nfc, rssi: 0, via: "NFC field")
+            t.extra["uid"] = dump.uid
+            t.extra["family"] = dump.family
+            addTarget(t)
+            saveDump(dump)
+            log("NFC dump: \(dump.title) — \(dump.pages.count) pages, \(dump.ndefHex.count) NDEF", .good)
+        } else {
+            log("NFC: nessun tag letto in sessione", .info)
         }
 
         // ENUMERATE: port probe su host noti
@@ -265,6 +273,9 @@ final class Orchestrator: ObservableObject {
                             impact: entry.vector.brief,
                             remediation: entry.vector.remediation)
             findings.append(f)
+            attackLog.append(AttackRecord(vectorID: entry.vector.id, vector: entry.vector.name,
+                                          target: f.target, outcome: outcomeLabel(entry, evidence),
+                                          evidence: String(evidence.prefix(200))))
             journal("finding[\(f.sev.rawValue)] \(f.title) @ \(f.target) — \(String(evidence.prefix(120)))")
             progress = Double(i + 1) / Double(total)
         }
@@ -285,8 +296,51 @@ final class Orchestrator: ObservableObject {
         execute()
     }
 
-    private func journal(_ line: String) {
-        let l = "[\(timeNow())] \(line)"
+    private func outcomeLabel(_ e: PlanEntry, _ evidence: String) -> String {
+        switch e.vector.cap {
+        case .shellTool(let t):
+            return evidence.hasPrefix("PLAN") ? "tool missing" : "tool:\(t)"
+        case .plan:
+            return "plan"
+        case .native:
+            return evidence.hasPrefix("handler") || evidence.hasPrefix("no ") ? "failed" : "executed"
+        }
+    }
+
+    // MARK: - NFC dumps
+
+    private var dumpsDir: URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return docs.appendingPathComponent("nfc_dumps", isDirectory: true)
+    }
+
+    func saveDump(_ d: NFCDump) {
+        try? FileManager.default.createDirectory(at: dumpsDir, withIntermediateDirectories: true)
+        let f = dumpsDir.appendingPathComponent("\(d.uid.replacingOccurrences(of: ":", with: "")).json")
+        if let data = try? JSONEncoder().encode(d) { try? data.write(to: f) }
+        nfcDumps.append(d)
+    }
+
+    func deleteDump(_ d: NFCDump) {
+        let f = dumpsDir.appendingPathComponent("\(d.uid.replacingOccurrences(of: ":", with: "")).json")
+        try? FileManager.default.removeItem(at: f)
+        nfcDumps.removeAll { $0.id == d.id }
+    }
+
+    func loadDumps() {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dumpsDir, includingPropertiesForKeys: nil) else { return }
+        nfcDumps = files.compactMap { try? JSONDecoder().decode(NFCDump.self, from: try! Data(contentsOf: $0)) }
+    }
+
+    func replayDump(_ d: NFCDump) {
+        log("NFC replay started — avvicina il tag target", .exec)
+        Task {
+            let lines = await nfc.replay(d)
+            for l in lines { log(l, l.contains("✓") ? .good : .warn) }
+        }
+    }
+
+    private func journal(_ line: String) {        let l = "[\(timeNow())] \(line)"
         if let fh = try? FileHandle(forWritingTo: journalPath) {
             _ = try? fh.seekToEnd()
             try? fh.write(contentsOf: Data((l + "\n").utf8))
@@ -329,8 +383,15 @@ final class Orchestrator: ObservableObject {
         switch id {
         case "ble_enum":
             guard let t = e.target else { return "no target" }
-            let lines = await ble.enumerate(t)
-            return lines.isEmpty ? "connect ok, nessun servizio esposto" : lines.joined(separator: "\n")
+            let rep = await ble.enumerate(t)
+            if let w = rep.writable.first, let idx = targets.firstIndex(where: { $0.id == t.id }) {
+                targets[idx].extra["svcUUID"] = w.svc
+                targets[idx].extra["chrUUID"] = w.chr
+                if (targets[idx].extra["payload"] ?? "").isEmpty { targets[idx].extra["payload"] = "0100" }
+                targets[idx].extra["autoArm"] = "1"
+                log("auto-arm \(t.name): svc=\(w.svc) chr=\(w.chr) payload=0100", .good)
+            }
+            return rep.lines.isEmpty ? "connect ok, nessun servizio esposto" : rep.lines.joined(separator: "\n")
         case "ble_write":
             guard let t = e.target else { return "no target" }
             guard let hex = t.extra["payload"], !hex.isEmpty else {

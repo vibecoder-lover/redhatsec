@@ -93,6 +93,29 @@ struct LogEntry: Identifiable {
     enum Level: String { case info, warn, good, bad, exec }
 }
 
+struct AttackRecord: Identifiable, Codable {
+    var id = UUID()
+    var date = Date()
+    var vectorID: String
+    var vector: String
+    var target: String
+    var outcome: String
+    var evidence: String
+}
+
+struct NFCDump: Identifiable, Codable {
+    var id = UUID()
+    var date = Date()
+    var uid: String
+    var family: String
+    var pages: [String]
+    var ndefHex: [String]
+    var ndefText: [String]
+    var kind: String
+
+    var title: String { "\(kind) \(uid.prefix(10))" }
+}
+
 enum Phase: String, CaseIterable, Identifiable {
     case idle, scan, enumerate, match, armed, execute, report
     var id: String { rawValue }

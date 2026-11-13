@@ -2,27 +2,48 @@ import SwiftUI
 
 struct TargetsView: View {
     @EnvironmentObject var o: Orchestrator
+    @State private var filter: Proto?
     @State private var selected: TargetDevice?
+    @State private var dumpDetail: NFCDump?
+
+    var filtered: [TargetDevice] {
+        filter == nil ? o.targets : o.targets.filter { $0.proto == filter }
+    }
 
     var body: some View {
         NavigationStack {
-            Group {
-                if o.targets.isEmpty {
-                    emptyState
-                } else {
-                    ScrollView {
-                        VStack(spacing: 10) {
-                            ForEach(o.targets) { t in
-                                TargetRow(t: t) { withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { selected = t } }
-                            }
+            ScrollView {
+                VStack(spacing: 12) {
+                    filterChips
+                    if o.targets.isEmpty { emptyState }
+                    ForEach(filtered) { t in
+                        TargetRow(t: t) {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { selected = t }
                         }
-                        .padding(16)
                     }
+                    nfcDumpsSection
+                    attackLogSection
                 }
+                .padding(16)
             }
             .background(Color.bg.ignoresSafeArea())
             .navigationTitle("Targets — \(o.targets.count)")
             .sheet(item: $selected) { t in TargetDetailView(target: t) }
+            .sheet(item: $dumpDetail) { d in NFCDumpDetail(dump: d) }
+        }
+    }
+
+    private var filterChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                Chip(text: "TUTTI", active: filter == nil) { filter = nil }
+                ForEach(Proto.allCases) { p in
+                    let n = o.targets.filter { $0.proto == p }.count
+                    if n > 0 {
+                        Chip(text: "\(p.rawValue) (\(n))", active: filter == p) { filter = p }
+                    }
+                }
+            }
         }
     }
 
@@ -33,6 +54,148 @@ struct TargetsView: View {
             Text("Nessun target").font(.headline)
             Text("Esegui uno scan dal tab Orchestrator.").font(.caption).foregroundColor(.dim)
         }
+        .padding(.vertical, 30)
+    }
+
+    @ViewBuilder
+    private var nfcDumpsSection: some View {
+        if !o.nfcDumps.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("NFC DUMPS — \(o.nfcDumps.count)").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.warn)
+                ForEach(o.nfcDumps) { d in
+                    Button {
+                        Haptics.tap()
+                        dumpDetail = d
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "wave.3.right.circle.fill")
+                                .font(.system(size: 22)).foregroundColor(.warn)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(d.title).font(.system(size: 13, weight: .bold, design: .rounded)).foregroundColor(.white)
+                                Text("\(d.pages.count) pages · \(d.ndefHex.count) NDEF · \(DateFormatter.localizedString(from: d.date, dateStyle: .short, timeStyle: .short))")
+                                    .font(.system(size: 10, design: .monospaced)).foregroundColor(.dim)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.caption).foregroundColor(.dim)
+                        }
+                        .padding(12).card()
+                    }
+                    .buttonStyle(ScaleButton())
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var attackLogSection: some View {
+        if !o.attackLog.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("ATTACK LOG — \(o.attackLog.count)").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.redHat)
+                ForEach(o.attackLog.reversed().prefix(20)) { a in
+                    HStack(alignment: .top, spacing: 10) {
+                        Circle()
+                            .fill(a.outcome.contains("executed") || a.outcome.contains("tool:") ? .ok : (a.outcome == "plan" ? .warn : .bad))
+                            .frame(width: 8, height: 8)
+                            .padding(.top, 5)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text(a.vector).font(.system(size: 12, weight: .semibold)).foregroundColor(.white)
+                                Spacer()
+                                Text(DateFormatter.localizedString(from: a.date, dateStyle: .none, timeStyle: .short))
+                                    .font(.system(size: 9, design: .monospaced)).foregroundColor(.dim)
+                            }
+                            Text("\(a.target) · \(a.outcome)").font(.system(size: 10, design: .monospaced)).foregroundColor(.dim)
+                            if !a.evidence.isEmpty {
+                                Text(a.evidence.prefix(110)).font(.system(size: 10, design: .monospaced)).foregroundColor(.ok.opacity(0.8)).lineLimit(2)
+                            }
+                        }
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.surfaceHi))
+                }
+            }
+        }
+    }
+}
+
+struct NFCDumpDetail: View {
+    let dump: NFCDump
+    @EnvironmentObject var o: Orchestrator
+    @Environment(\.dismiss) var dismiss
+    @State private var replaying = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        Pill(text: dump.family, color: .warn)
+                        Pill(text: "UID \(dump.uid)", color: .info)
+                        Spacer()
+                        Pill(text: DateFormatter.localizedString(from: dump.date, dateStyle: .short, timeStyle: .short), color: .dim)
+                    }
+
+                    if !dump.ndefText.isEmpty {
+                        Text("NDEF RECORDS").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
+                        ForEach(Array(dump.ndefText.enumerated()), id: \.offset) { i, t in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("rec \(i) — payload").font(.system(size: 9, design: .monospaced)).foregroundColor(.dim)
+                                Text(t).font(.system(size: 12, design: .monospaced)).foregroundColor(.ok)
+                                    .textSelection(.enabled)
+                                Text("hex: \(dump.ndefHex.indices.contains(i) ? dump.ndefHex[i] : "?")")
+                                    .font(.system(size: 10, design: .monospaced)).foregroundColor(.dim)
+                                    .textSelection(.enabled)
+                            }
+                            .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
+                        }
+                    }
+
+                    Text("PAGES (\(dump.pages.count))").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
+                    ForEach(Array(dump.pages.enumerated()), id: \.offset) { i, p in
+                        HStack(spacing: 8) {
+                            Text(String(format: "%02d", i)).font(.system(size: 10, design: .monospaced)).foregroundColor(.warn)
+                            Text(p).font(.system(size: 10, design: .monospaced)).foregroundColor(.white.opacity(0.85))
+                                .textSelection(.enabled)
+                            Spacer()
+                        }
+                    }
+
+                    HStack(spacing: 10) {
+                        Button {
+                            Haptics.heavy()
+                            replaying = true
+                            o.replayDump(dump)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 25) { replaying = false }
+                        } label: {
+                            Label(replaying ? "AVVICINA TAG…" : "REPLAY SU TAG", systemImage: replaying ? "wave.3.right" : "arrow.uturn.forward")
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                                .frame(maxWidth: .infinity).padding(.vertical, 12)
+                        }
+                        .background(RoundedRectangle(cornerRadius: 12).fill(Color.redHat))
+                        .foregroundColor(.white)
+                        .buttonStyle(ScaleButton())
+                        .disabled(replaying)
+
+                        Button {
+                            o.deleteDump(dump)
+                            dismiss()
+                        } label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 13)).padding(14)
+                        }
+                        .background(RoundedRectangle(cornerRadius: 12).fill(Color.surfaceHi))
+                        .foregroundColor(.bad)
+                        .buttonStyle(ScaleButton())
+                    }
+                }
+                .padding(16)
+            }
+            .background(Color.bg.ignoresSafeArea())
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("chiudi") { dismiss() } } }
+        }
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -52,6 +215,9 @@ struct TargetRow: View {
                         .foregroundColor(.white).lineLimit(1)
                     HStack(spacing: 6) {
                         Text(t.via).font(.system(size: 10)).foregroundColor(.dim)
+                        if t.extra["autoArm"] == "1" {
+                            Pill(text: "AUTO-ARM", color: .ok)
+                        }
                         if let ports = t.extra["open"], !ports.isEmpty {
                             Text(ports).font(.system(size: 10, design: .monospaced)).foregroundColor(.ok)
                         }
@@ -75,7 +241,7 @@ struct RSSIMeter: View {
     let color: Color
     var bars: Int {
         let v = max(-95, min(-30, rssi))
-        return Int(Double(v + 95) / 65.0 * 4 + 0.5) // 1...4
+        return Int(Double(v + 95) / 65.0 * 4 + 0.5)
     }
     var body: some View {
         HStack(alignment: .bottom, spacing: 2) {
@@ -101,6 +267,10 @@ struct TargetDetailView: View {
         o.plan.filter { $0.target?.id == target.id }
     }
 
+    private var relatedAttacks: [AttackRecord] {
+        o.attackLog.filter { $0.target == target.name }
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -109,6 +279,7 @@ struct TargetDetailView: View {
                     if target.proto == .ble { bleConfig }
                     if target.proto == .net { netInfo }
                     planSection
+                    if !relatedAttacks.isEmpty { attacksSection }
                 }
                 .padding(18)
             }
@@ -147,8 +318,12 @@ struct TargetDetailView: View {
 
     private var bleConfig: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("BLE WRITE ARMING").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.warn)
-            Text("Payload in hex scritto sulla characteristic (es. 0100 unlock). Campo vuoto = solo enumerazione.")
+            HStack {
+                Text("BLE WRITE ARMING").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.warn)
+                Spacer()
+                if target.extra["autoArm"] == "1" { Pill(text: "AUTO-DETECTED", color: .ok) }
+            }
+            Text("Payload in hex scritto sulla characteristic. Auto-arm riempie svc/chr dal GATT dump; payload default 0100.")
                 .font(.caption).foregroundColor(.dim)
             TextField("payload hex", text: $payloadHex)
                 .textFieldStyle(.plain)
@@ -156,13 +331,13 @@ struct TargetDetailView: View {
                 .padding(10)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
                 .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
-            TextField("service UUID (opz.)", text: $svcUUID)
+            TextField("service UUID", text: $svcUUID)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13, design: .monospaced))
                 .padding(10)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
                 .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
-            TextField("characteristic UUID (opz.)", text: $chrUUID)
+            TextField("characteristic UUID", text: $chrUUID)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13, design: .monospaced))
                 .padding(10)
@@ -225,6 +400,24 @@ struct TargetDetailView: View {
             }
             if relatedPlan.isEmpty {
                 Text("nessun vector matchato per questo target").font(.caption).foregroundColor(.dim)
+            }
+        }
+        .padding(16).card()
+    }
+
+    private var attacksSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("ATTACCHI SU QUESTO TARGET").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.redHat)
+            ForEach(relatedAttacks) { a in
+                HStack(spacing: 8) {
+                    Text(a.outcome.contains("executed") || a.outcome.contains("tool:") ? "✓" : (a.outcome == "plan" ? "◌" : "✕"))
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(a.outcome.contains("executed") || a.outcome.contains("tool:") ? .ok : (a.outcome == "plan" ? .warn : .bad))
+                    Text(a.vector).font(.system(size: 12)).foregroundColor(.white)
+                    Spacer()
+                    Text(DateFormatter.localizedString(from: a.date, dateStyle: .none, timeStyle: .short))
+                        .font(.system(size: 9, design: .monospaced)).foregroundColor(.dim)
+                }
             }
         }
         .padding(16).card()
