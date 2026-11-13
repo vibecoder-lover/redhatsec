@@ -305,6 +305,13 @@ import NetworkExtension
 
 // MARK: - NFC
 
+struct NFCTagFingerprint: Identifiable {
+    var id: String { uid }
+    let uid: String
+    let family: String
+    let ndefWritable: Bool
+}
+
 final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSessionDelegate {
     private var session: NFCTagReaderSession?
     private var ndefSession: NFCNDEFReaderSession?
@@ -403,7 +410,7 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
     func tagReaderSessionDidBecomeActive(_ session: NFCTagReaderSession) {}
 
     private var goal: Goal = .none
-    private var detectCont: CheckedContinuation<NFCTagInfo?, Never>?
+    private var detectCont: CheckedContinuation<NFCTagFingerprint?, Never>?
     private var attackCont: CheckedContinuation<[String], Never>?
     private var attackBuffer: [String] = []
 
@@ -412,14 +419,7 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
         case attack(String, [String: String])
     }
 
-    struct NFCTagInfo: Identifiable {
-        var id: String { uid }
-        let uid: String
-        let family: String
-        let ndefWritable: Bool
-    }
-
-    func detect(timeout: TimeInterval = 20) async -> NFCTagInfo? {
+    func detect(timeout: TimeInterval = 20) async -> NFCTagFingerprint? {
         guard NFCNDEFReaderSession.readingAvailable else { return nil }
         goal = .detect
         return await withCheckedContinuation { c in
@@ -450,7 +450,7 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
         }
     }
 
-    private func finishDetect(_ i: NFCTagInfo?) {
+    private func finishDetect(_ i: NFCTagFingerprint?) {
         session?.invalidate()
         let c = detectCont
         detectCont = nil
@@ -553,8 +553,8 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
         let fam = familyName(m.mifareFamily)
         m.queryNDEFStatus { [weak self] (st: CoreNFC.NFCNDEFStatus, _: Int, _: (any Error)?) in
             guard let self else { return }
-            let info = NFCTagInfo(uid: m.identifier.hexPreview, family: fam,
-                                  ndefWritable: st == CoreNFC.NFCNDEFStatus.readWrite)
+            let info = NFCTagFingerprint(uid: m.identifier.hexPreview, family: fam,
+                                         ndefWritable: st == CoreNFC.NFCNDEFStatus.readWrite)
             session.alertMessage = "tag: \(fam)"
             self.finishDetect(info)
         }

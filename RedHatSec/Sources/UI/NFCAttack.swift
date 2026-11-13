@@ -2,7 +2,7 @@ import SwiftUI
 
 struct NFCAttackView: View {
     @EnvironmentObject var o: Orchestrator
-    @State private var tag: NFCTagInfo?
+    @State private var tag: NFCTagFingerprint?
     @State private var armed: NFCTactic?
     @State private var phishURL = "https://example.com/catch?u="
     @State private var log: [LogEntry] = []
@@ -90,7 +90,7 @@ struct NFCAttackView: View {
         .disabled(busy)
     }
 
-    private func tagCard(_ t: NFCTagInfo) -> some View {
+    private func tagCard(_ t: NFCTagFingerprint) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(t.family).font(.system(size: 18, weight: .heavy, design: .rounded)).foregroundColor(.white)
