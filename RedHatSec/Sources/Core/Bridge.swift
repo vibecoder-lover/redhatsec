@@ -338,8 +338,16 @@ final class TCPBridge: NSObject, ObservableObject {
     }
 
     // l'iPhone entra nell'AP dell'ESP8266 (path "AP dell'ESP")
+    // init(ssidName:passphrase:isWEP:) rimosso dall'header SDK26 → chiamato via runtime ObjC
     func joinAP(ssid: String, pass: String) {
-        let cfg = NEHotspotConfiguration(ssidName: ssid, passphrase: pass)
+        guard let cls = NSClassFromString("NEHotspotConfiguration") as? NSObject.Type else {
+            log("NEHotspotConfiguration assente")
+            return
+        }
+        let sel = NSSelectorFromString("initWithSSID:passphrase:isWEP:")
+        typealias InitIMP = @convention(c) (AnyObject, Selector, NSString, NSString, Bool) -> Unmanaged<NEHotspotConfiguration>
+        let imp = unsafeBitCast(cls.method(for: sel), to: InitIMP.self)
+        let cfg = imp(cls.alloc(), sel, ssid as NSString, pass as NSString, false).takeRetainedValue()
         NEHotspotConfigurationManager.shared.apply(cfg) { [weak self] err in
             DispatchQueue.main.async {
                 if let err { self?.log("join AP fallito: \(err.localizedDescription)") }
