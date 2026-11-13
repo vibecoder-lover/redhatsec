@@ -206,27 +206,27 @@ enum ToolRegistry {
             let dpkgDeb = sh.resolve("dpkg-deb")
 
             if apt != nil && dpkgDeb != nil {
-                line("[install] fetch \(s.pkg)…")
+                line("[install] apt fetch \(s.pkg)…")
                 let fetch = sh.run("sh", args: ["-c",
-                    "cd \(workDir)/tmp && apt-get -o Dir::Cache::archives=\(workDir)/tmp download \(s.pkg) 2>&1"], timeout: 180)
+                    "cd \(workDir)/tmp && apt-get -o Dir::Cache::archives=\(workDir)/tmp -o Dir::State::lists=/var/jb/var/lib/apt/lists download \(s.pkg) 2>&1; echo \"fetch-exit=$?\""], timeout: 180)
                 line(fetch.stdout.isEmpty ? fetch.stderr : fetch.stdout)
                 let extract = sh.run("sh", args: ["-c",
                     "cd \(workDir)/tmp && ls *.deb >/dev/null 2>&1 && for d in *.deb; do dpkg-deb -x \"\(workDir)/tmp/$d\" \(workDir)/extracted; done && cp \(workDir)/extracted/var/jb/usr/bin/* \(appBinDir)/ 2>/dev/null; cp \(workDir)/extracted/usr/bin/* \(appBinDir)/ 2>/dev/null; cp \(workDir)/extracted/usr/local/bin/* \(appBinDir)/ 2>/dev/null; chmod 755 \(appBinDir)/* 2>/dev/null; rm -f \(workDir)/tmp/*.deb; true"], timeout: 120)
-                line(extract.stdout + " " + extract.stderr)
                 let found = s.bins.first { sh.resolve($0) != nil } != nil
                 if found {
-                    line("[install] \(tool) pronto ✓")
+                    line("[install] \(tool) estratto in \(appBinDir) ✓ — exec senza root")
                     done(true)
                     return
                 }
-                line("[install] estrazione fallita — fallback Sileo")
+                line("[install] apt path fallito (app=mobile, apt vuole root per lock/index) → Sileo")
             } else {
-                line("[install] apt/dpkg-deb non disponibili — fallback Sileo")
+                line("[install] apt/dpkg-deb non presenti → Sileo")
             }
-            done(false)
+            line("[sileo] tocca GET/INSTALLA su \(s.pkg) — root via helper di Sileo; poi ridigita il comando")
             DispatchQueue.main.async {
                 openSileo(s.pkg)
             }
+            done(false)
         }
     }
 
