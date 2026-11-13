@@ -64,9 +64,21 @@ struct BridgeView: View {
             HStack(spacing: 8) {
                 Button {
                     Haptics.tap()
+                    o.tcpBridge.sweep()
+                } label: {
+                    Label("CERCA IP (sweep)", systemImage: "dot.scope")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 10)
+                }
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.redHat.opacity(0.85)))
+                .foregroundColor(.white)
+                .buttonStyle(ScaleButton())
+
+                Button {
+                    Haptics.tap()
                     o.tcpBridge.browse()
                 } label: {
-                    Label(o.tcpBridge.browsing ? "cerco…" : "CERCA (mDNS)", systemImage: "magnifyingglass")
+                    Label("mDNS", systemImage: "magnifyingglass")
                         .font(.system(size: 12, weight: .bold))
                         .frame(maxWidth: .infinity).padding(.vertical, 10)
                 }

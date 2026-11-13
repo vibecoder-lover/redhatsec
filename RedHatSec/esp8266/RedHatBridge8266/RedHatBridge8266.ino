@@ -16,8 +16,8 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
 
-const char *STA_SSID = "iPhone-hotspot";
-const char *STA_PASS = "hotspot-password";
+const char *STA_SSID = "Hexxeted";
+const char *STA_PASS = "lwae9180";
 const char *AP_SSID  = "RHS-Bridge";
 const char *AP_PASS  = "redhatsec";
 const uint16_t TCP_PORT = 3333;

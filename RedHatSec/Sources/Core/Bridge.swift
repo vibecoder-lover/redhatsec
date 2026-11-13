@@ -311,6 +311,57 @@ final class TCPBridge: NSObject, ObservableObject {
 
     // MARK: scoperta
 
+    // hotspot iOS non inoltra il multicast mDNS → sweep TCP diretto sulla /28
+    func sweep() {
+        let candidates = (2...14).map { "172.20.10.\($0)" } + ["192.168.4.1"]
+        state = "sweep subnet…"
+        log("sweep TCP 3333 su subnet hotspot…")
+        Task {
+            for ip in candidates {
+                DispatchQueue.main.async { self.state = "probe \(ip)…" }
+                if await probe(ip) {
+                    DispatchQueue.main.async {
+                        self.state = "ESP trovato: \(ip)"
+                        self.log("ESP trovato su \(ip) ✓")
+                        self.connect(host: ip)
+                    }
+                    return
+                }
+            }
+            DispatchQueue.main.async { self.state = "nessun ESP sulla subnet — prova AP mode" }
+        }
+    }
+
+    private func probe(_ ip: String) async -> Bool {
+        await withCheckedContinuation { c in
+            var done = false
+            let conn = NWConnection(host: NWEndpoint.Host(ip), port: 3333, using: .tcp)
+            let timer = DispatchWorkItem {
+                guard !done else { return }
+                done = true
+                conn.cancel()
+                c.resume(returning: false)
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.6, execute: timer)
+            conn.stateUpdateHandler = { s in
+                guard !done else { return }
+                switch s {
+                case .ready:
+                    done = true
+                    timer.cancel()
+                    conn.cancel()
+                    c.resume(returning: true)
+                case .failed, .cancelled, .waiting:
+                    done = true
+                    timer.cancel()
+                    c.resume(returning: false)
+                default: break
+                }
+            }
+            conn.start(queue: .global(qos: .utility))
+        }
+    }
+
     func browse() {
         browsing = true
         foundHosts = []
