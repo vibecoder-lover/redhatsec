@@ -78,8 +78,8 @@ final class ShellRunner {
         let rc = posix_spawn(&pid, bin, &fileActions, &attr, &argv, &envp)
 
         defer {
-            for p in argv where p != nil { free(p) }
-            for p in envp where p != nil { free(p) }
+            for p in argv { if let p { free(p) } }
+            for p in envp { if let p { free(p) } }
             posix_spawnattr_destroy(&attr)
             posix_spawn_file_actions_destroy(&fileActions)
         }
@@ -138,8 +138,8 @@ final class ShellRunner {
             var pid: pid_t = 0
             let rc = posix_spawn(&pid, bin, &fileActions, &attr, &argv, &envp)
             defer {
-                for p in argv where p != nil { free(p) }
-                for p in envp where p != nil { free(p) }
+                for p in argv { if let p { free(p) } }
+                for p in envp { if let p { free(p) } }
                 posix_spawnattr_destroy(&attr)
                 posix_spawn_file_actions_destroy(&fileActions)
             }
@@ -148,14 +148,14 @@ final class ShellRunner {
             let fh = outPipe.fileHandleForReading
             fh.waitForDataInBackgroundAndNotify()
             while true {
+                let d = fh.availableData
+                if d.isEmpty {
+                    var status: Int32 = 0
+                    waitpid(pid, &status, 0)
+                    onExit(status)
+                    return
+                }
                 autoreleasepool {
-                    let d = fh.availableData
-                    if d.isEmpty {
-                        var status: Int32 = 0
-                        waitpid(pid, &status, 0)
-                        onExit(status)
-                        return
-                    }
                     if let s = String(data: d, encoding: .utf8) {
                         for l in s.split(separator: "\n", omittingEmptySubsequences: false) {
                             line(String(l))

@@ -108,7 +108,9 @@ final class Orchestrator: ObservableObject {
         log("mDNS/Bonjour sweep (_hap, _googlecast, _esphomelib, _ipp)…", .exec)
         await withCheckedContinuation { c in
             net.bonjour { [weak self] t in
-                DispatchQueue.main.async { self?.addTarget(t) }
+                DispatchQueue.main.async {
+                    Task { @MainActor [weak self] in self?.addTarget(t) }
+                }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + 6) { c.resume() }
         }
@@ -118,7 +120,9 @@ final class Orchestrator: ObservableObject {
         log("SSDP M-SEARCH (ssdp:all)…", .exec)
         await withCheckedContinuation { c in
             net.ssdp(timeout: 6) { [weak self] t in
-                DispatchQueue.main.async { self?.addTarget(t) }
+                DispatchQueue.main.async {
+                    Task { @MainActor [weak self] in self?.addTarget(t) }
+                }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + 7) { c.resume() }
         }

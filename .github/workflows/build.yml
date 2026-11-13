@@ -27,11 +27,18 @@ jobs:
 
       - name: Build unsigned (arm64, iphoneos)
         run: |
+          set -o pipefail
           cd RedHatSec
           xcodebuild -project RedHatSec.xcodeproj -scheme RedHatSec \
             -configuration Release -sdk iphoneos -derivedDataPath build \
             CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED="NO" CODE_SIGNING_ALLOWED="NO" \
-            ARCHS=arm64 build | tail -30
+            ARCHS=arm64 build 2>&1 | tail -40
+
+      - name: Verify built binary
+        run: |
+          APP=$(find RedHatSec/build -type d -name '*.app' | head -1)
+          EXEC=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+          test -f "$APP/$EXEC" && echo "binary OK: $APP/$EXEC"
 
       - name: Fake-sign with entitlements
         continue-on-error: true
