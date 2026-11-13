@@ -411,7 +411,7 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
         let fam = m.mifareFamily == .ultralight ? "NTAG/Ultralight" : "Mifare Classic"
         var dump = NFCDump(uid: m.identifier.hexPreview, family: fam,
                            pages: [], ndefHex: [], ndefText: [], kind: fam)
-        m.queryNDEFStatus { [weak self] (st: CoreNFC.NFCNDEFStatus, _: UInt, _: (any Error)?) in
+        m.queryNDEFStatus { [weak self] (st: CoreNFC.NFCNDEFStatus, _: Int, _: (any Error)?) in
             guard let self else { return }
             if st == CoreNFC.NFCNDEFStatus.readWrite || st == CoreNFC.NFCNDEFStatus.readOnly {
                 m.readNDEF { msg, _ in
@@ -456,7 +456,7 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
             finishReplay(replayBuffer + ["tag non riconosciuto"])
             return
         }
-        m.queryNDEFStatus { [weak self] (st: CoreNFC.NFCNDEFStatus, _: UInt, _: (any Error)?) in
+        m.queryNDEFStatus { [weak self] (st: CoreNFC.NFCNDEFStatus, _: Int, _: (any Error)?) in
             guard let self else { return }
             if st != CoreNFC.NFCNDEFStatus.readWrite {
                 self.replayBuffer.append("tag read-only — replay impossibile")
