@@ -54,7 +54,11 @@ jobs:
         run: |
           APP=$(find RedHatSec/build -maxdepth 5 -type d -name '*.app' | head -1)
           cd "$(dirname "$APP")"
-          zip -qr RedHatSec.tipa "$(basename "$APP")"
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$(basename "$APP")" Payload/
+          zip -qr RedHatSec.tipa Payload
+          ls -la RedHatSec.tipa
 
       - uses: actions/upload-artifact@v4
         with:
