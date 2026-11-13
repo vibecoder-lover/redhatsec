@@ -27,12 +27,19 @@ jobs:
 
       - name: Build unsigned (arm64, iphoneos)
         run: |
-          set -o pipefail
           cd RedHatSec
-          xcodebuild -project RedHatSec.xcodeproj -scheme RedHatSec \
+          if xcodebuild -project RedHatSec.xcodeproj -scheme RedHatSec \
             -configuration Release -sdk iphoneos -derivedDataPath build \
             CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED="NO" CODE_SIGNING_ALLOWED="NO" \
-            ARCHS=arm64 build 2>&1 | tail -40
+            ARCHS=arm64 build > build.log 2>&1; then
+            echo "BUILD OK"
+            grep -E "warning:" build.log | tail -10 || true
+          else
+            echo "===== BUILD FAILED — tutti gli errori ====="
+            grep -E "error:" build.log | head -60
+            tail -6 build.log
+            exit 1
+          fi
 
       - name: Verify built binary
         run: |
