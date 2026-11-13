@@ -57,7 +57,7 @@ jobs:
           EXEC=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist" 2>&1)
           echo "EXEC=[$EXEC]"
           if [ -f "$APP/$EXEC" ]; then
-            ldid -SRedHatSec.entitlements "$APP/$EXEC" && echo "SIGNED OK"
+            ldid -SRedHatSec/RedHatSec.entitlements "$APP/$EXEC" && echo "SIGNED OK"
           else
             echo "::error::executable non trovato in $APP"
             file "$APP"/* || true
