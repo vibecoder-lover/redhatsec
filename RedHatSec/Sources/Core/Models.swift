@@ -27,7 +27,7 @@ enum Proto: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-enum Capability: Codable {
+enum Capability: Codable, Equatable {
     case native            // eseguibile on-device con API pubbliche
     case shellTool(String) // richiede binario JB, es. "nmap"
     case plan              // richiede radio/SDR esterno → va in report come piano

@@ -144,50 +144,10 @@ struct RadarView: View {
     var body: some View {
         TimelineView(.animation) { timeline in
             Canvas { ctx, size in
-                let c = CGPoint(x: size.width / 2, y: size.height / 2)
-                let r = min(size.width, size.height) / 2 - 6
                 let now = timeline.date.timeIntervalSinceReferenceDate
-
-                for i in 1...3 {
-                    let rr = r * CGFloat(i) / 3
-                    ctx.stroke(Path(ellipseIn: CGRect(x: c.x - rr, y: c.y - rr, width: rr * 2, height: rr * 2)),
-                               with: .color(.white.opacity(0.07)), lineWidth: 1)
-                }
-
-                let period = 2.6
-                let frac = now.truncatingRemainder(dividingBy: period) / period
-                for k in 0..<14 {
-                    let a0 = Angle(degrees: Double(frac) * 360 - Double(k) * 3.2)
-                    let a1 = Angle(degrees: Double(frac) * 360 - Double(k - 1) * 3.2)
-                    let alpha = 0.30 * (1 - Double(k) / 14)
-                    var wedge = Path()
-                    wedge.move(to: c)
-                    wedge.addArc(center: c, radius: r,
-                                 startAngle: a0 - 90, endAngle: a1 - 90, clockwise: false)
-                    ctx.fill(wedge, with: .color(.redHat.opacity(alpha)))
-                }
-                let edge = Path()
-                edge.move(to: c)
-                edge.addArc(center: c, radius: r,
-                            startAngle: .degrees(Double(frac) * 360 - 90),
-                            endAngle: .degrees(Double(frac) * 360 - 86), clockwise: false)
-                ctx.stroke(edge, with: .color(.redHat.opacity(0.9)), lineWidth: 2)
-
-                for (i, t) in targets.enumerated() {
-                    let seed = abs(t.id.hashValue)
-                    let angle = Angle(degrees: Double(seed % 360))
-                    let dist = CGFloat(min(90, max(30, -t.rssi))) / 90
-                    let rr = r * (0.25 + 0.65 * dist)
-                    let pos = CGPoint(x: c.x + rr * cos(angle - 90),
-                                      y: c.y + rr * sin(angle - 90))
-                    let pulse = 0.5 + 0.5 * sin(now * 3 + Double(i) * 1.3)
-                    let dot = Path(ellipseIn: CGRect(x: pos.x - 4 - pulse * 2, y: pos.y - 4 - pulse * 2,
-                                                     width: 8 + pulse * 4, height: 8 + pulse * 4))
-                    ctx.fill(dot, with: .color(protoColor(t.proto).opacity(0.85)))
-                    let halo = Path(ellipseIn: CGRect(x: pos.x - 9 - pulse * 6, y: pos.y - 9 - pulse * 6,
-                                                      width: 18 + pulse * 12, height: 18 + pulse * 12))
-                    ctx.stroke(halo, with: .color(protoColor(t.proto).opacity(0.3 * (1 - pulse))), lineWidth: 1)
-                }
+                RadarDrawing.rings(ctx, size)
+                RadarDrawing.sweep(ctx, size, now)
+                RadarDrawing.blips(ctx, size, targets, now)
             }
         }
         .background(
@@ -198,6 +158,64 @@ struct RadarView: View {
         )
         .clipShape(Circle())
         .card()
+    }
+}
+
+enum RadarDrawing {
+    private static func center(_ size: CGSize) -> CGPoint {
+        CGPoint(x: size.width / 2, y: size.height / 2)
+    }
+
+    static func rings(_ ctx: GraphicsContext, _ size: CGSize) {
+        let c = center(size)
+        let r = min(size.width, size.height) / 2 - 6
+        for i in 1...3 {
+            let rr = r * CGFloat(i) / 3
+            let rect = CGRect(x: c.x - rr, y: c.y - rr, width: rr * 2, height: rr * 2)
+            ctx.stroke(Path(ellipseIn: rect), with: .color(.white.opacity(0.07)), lineWidth: 1)
+        }
+    }
+
+    static func sweep(_ ctx: GraphicsContext, _ size: CGSize, _ now: Double) {
+        let c = center(size)
+        let r = min(size.width, size.height) / 2 - 6
+        let frac = now.truncatingRemainder(dividingBy: 2.6) / 2.6
+        for k in 0..<14 {
+            let d0 = Double(frac) * 360 - Double(k) * 3.2
+            let d1 = Double(frac) * 360 - Double(k - 1) * 3.2
+            let alpha = 0.30 * (1 - Double(k) / 14)
+            var wedge = Path()
+            wedge.move(to: c)
+            wedge.addArc(center: c, radius: r,
+                         startAngle: .degrees(d0 - 90), endAngle: .degrees(d1 - 90),
+                         clockwise: false)
+            ctx.fill(wedge, with: .color(.redHat.opacity(alpha)))
+        }
+        var edge = Path()
+        edge.move(to: c)
+        edge.addArc(center: c, radius: r,
+                    startAngle: .degrees(Double(frac) * 360 - 90),
+                    endAngle: .degrees(Double(frac) * 360 - 86), clockwise: false)
+        ctx.stroke(edge, with: .color(.redHat.opacity(0.9)), lineWidth: 2)
+    }
+
+    static func blips(_ ctx: GraphicsContext, _ size: CGSize, _ targets: [TargetDevice], _ now: Double) {
+        let c = center(size)
+        let r = min(size.width, size.height) / 2 - 6
+        for (i, t) in targets.enumerated() {
+            let seed = abs(t.id.hashValue)
+            let aRad = Double(seed % 360) * Double.pi / 180 - Double.pi / 2
+            let dist = CGFloat(min(90, max(30, -t.rssi))) / 90
+            let rr = r * (0.25 + 0.65 * dist)
+            let pos = CGPoint(x: c.x + rr * CGFloat(cos(aRad)), y: c.y + rr * CGFloat(sin(aRad)))
+            let pulse = 0.5 + 0.5 * sin(now * 3 + Double(i) * 1.3)
+            let ds = CGFloat(8 + pulse * 4)
+            let dot = Path(ellipseIn: CGRect(x: pos.x - ds / 2, y: pos.y - ds / 2, width: ds, height: ds))
+            ctx.fill(dot, with: .color(protoColor(t.proto).opacity(0.85)))
+            let hs = CGFloat(18 + pulse * 12)
+            let halo = Path(ellipseIn: CGRect(x: pos.x - hs / 2, y: pos.y - hs / 2, width: hs, height: hs))
+            ctx.stroke(halo, with: .color(protoColor(t.proto).opacity(0.3 * (1 - pulse))), lineWidth: 1)
+        }
     }
 }
 
