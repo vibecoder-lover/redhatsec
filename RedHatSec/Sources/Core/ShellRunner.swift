@@ -54,63 +54,49 @@ final class ShellRunner {
         guard let bin = resolve(cmd) else {
             return ShellResult(exitCode: 127, stdout: "", stderr: "tool not found: \(cmd)")
         }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: bin)
+        p.arguments = args
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = pathEnv
+        env["HOME"] = "/var/mobile"
+        env["TERM"] = "xterm"
+        p.environment = env
         let outPipe = Pipe()
         let errPipe = Pipe()
-        var attr = posix_spawnattr_t()
-        posix_spawnattr_init(&attr)
-        var fileActions = posix_spawn_file_actions_t()
-        posix_spawn_file_actions_init(&fileActions)
-        posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 1)
-        posix_spawn_file_actions_adddup2(&fileActions, errPipe.fileHandleForWriting.fileDescriptor, 2)
-
-        var argv: [UnsafeMutablePointer<CChar>?] = []
-        argv.append(strdup(bin))
-        for a in args { argv.append(strdup(a)) }
-        argv.append(nil)
-
-        var envp: [UnsafeMutablePointer<CChar>?] = []
-        envp.append(strdup("PATH=\(pathEnv)"))
-        envp.append(strdup("HOME=/var/mobile"))
-        envp.append(strdup("TERM=xterm"))
-        envp.append(nil)
-
-        var pid: pid_t = 0
-        let rc = posix_spawn(&pid, bin, &fileActions, &attr, &argv, &envp)
-
-        defer {
-            for p in argv { if let p { free(p) } }
-            for p in envp { if let p { free(p) } }
-            posix_spawnattr_destroy(&attr)
-            posix_spawn_file_actions_destroy(&fileActions)
-        }
-        guard rc == 0 else {
-            return ShellResult(exitCode: Int32(rc), stdout: "", stderr: "spawn failed rc=\(rc)")
+        p.standardOutput = outPipe
+        p.standardError = errPipe
+        do { try p.run() } catch {
+            return ShellResult(exitCode: 126, stdout: "", stderr: "spawn failed: \(error)")
         }
 
-        try? outPipe.fileHandleForWriting.close()
-        try? errPipe.fileHandleForWriting.close()
+        var timedOut = false
+        let watchdog = DispatchWorkItem {
+            if p.isRunning { timedOut = true; p.terminate() }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
 
-        let group = DispatchGroup()
+        let grp = DispatchGroup()
         var outData = Data()
         var errData = Data()
-        group.enter()
-        DispatchQueue.global().async { outData = outPipe.fileHandleForReading.readDataToEndOfFile(); group.leave() }
-        group.enter()
-        DispatchQueue.global().async { errData = errPipe.fileHandleForReading.readDataToEndOfFile(); group.leave() }
-
-        let timedOut = group.wait(timeout: .now() + timeout) == .timedOut
-        var code: Int32 = 0
-        if timedOut {
-            kill(pid, SIGKILL)
-            code = -1
-        } else {
-            var status: Int32 = 0
-            waitpid(pid, &status, 0)
-            code = status
+        grp.enter()
+        DispatchQueue.global().async { outData = outPipe.fileHandleForReading.readDataToEndOfFile(); grp.leave() }
+        grp.enter()
+        DispatchQueue.global().async { errData = errPipe.fileHandleForReading.readDataToEndOfFile(); grp.leave() }
+        _ = grp.wait(timeout: .now() + timeout + 2)
+        if p.isRunning {
+            p.terminate()
+            p.waitUntilExit()
         }
-        let so = String(data: outData, encoding: .utf8) ?? ""
-        let se = String(data: errData, encoding: .utf8) ?? ""
-        return ShellResult(exitCode: code, stdout: so, stderr: se)
+        watchdog.cancel()
+
+        let so = String(data: outData, encoding: .utf8)
+            ?? String(data: outData, encoding: .isoLatin1) ?? ""
+        let se = String(data: errData, encoding: .utf8)
+            ?? String(data: errData, encoding: .isoLatin1) ?? ""
+        let suffix = timedOut ? "\n[timeout \(timeout)s — terminated]" : ""
+        return ShellResult(exitCode: p.terminationStatus,
+                           stdout: so, stderr: se + suffix)
     }
 
     func stream(_ cmd: String, args: [String], line: @escaping (String) -> Void,
@@ -120,49 +106,40 @@ final class ShellRunner {
             onExit(127)
             return
         }
-        DispatchQueue.global(qos: .utility).async {
-            let outPipe = Pipe()
-            var attr = posix_spawnattr_t()
-            posix_spawnattr_init(&attr)
-            var fileActions = posix_spawn_file_actions_t()
-            posix_spawn_file_actions_init(&fileActions)
-            posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 1)
-            posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 2)
-            var argv: [UnsafeMutablePointer<CChar>?] = []
-            argv.append(strdup(bin))
-            for a in args { argv.append(strdup(a)) }
-            argv.append(nil)
-            var envp: [UnsafeMutablePointer<CChar>?] = []
-            envp.append(strdup("PATH=\(self.pathEnv)"))
-            envp.append(nil)
-            var pid: pid_t = 0
-            let rc = posix_spawn(&pid, bin, &fileActions, &attr, &argv, &envp)
-            defer {
-                for p in argv { if let p { free(p) } }
-                for p in envp { if let p { free(p) } }
-                posix_spawnattr_destroy(&attr)
-                posix_spawn_file_actions_destroy(&fileActions)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: bin)
+        p.arguments = args
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = pathEnv
+        env["HOME"] = "/var/mobile"
+        env["TERM"] = "xterm"
+        p.environment = env
+        let outPipe = Pipe()
+        p.standardOutput = outPipe
+        p.standardError = outPipe
+
+        var buffer = ""
+        outPipe.fileHandleForReading.readabilityHandler = { fh in
+            let d = fh.availableData
+            if d.isEmpty {
+                fh.readabilityHandler = nil
+                return
             }
-            if rc != 0 { line("spawn failed rc=\(rc)"); onExit(Int32(rc)); return }
-            try? outPipe.fileHandleForWriting.close()
-            let fh = outPipe.fileHandleForReading
-            fh.waitForDataInBackgroundAndNotify()
-            while true {
-                let d = fh.availableData
-                if d.isEmpty {
-                    var status: Int32 = 0
-                    waitpid(pid, &status, 0)
-                    onExit(status)
-                    return
-                }
-                autoreleasepool {
-                    if let s = String(data: d, encoding: .utf8) {
-                        for l in s.split(separator: "\n", omittingEmptySubsequences: false) {
-                            line(String(l))
-                        }
-                    }
-                }
+            if let s = String(data: d, encoding: .utf8) ?? String(data: d, encoding: .isoLatin1) {
+                buffer += s
+                let lines = buffer.components(separatedBy: "\n")
+                guard lines.count > 1 else { return }
+                buffer = lines.last ?? ""
+                for l in lines.dropLast() { line(l) }
             }
+        }
+        p.terminationHandler = { proc in
+            if !buffer.isEmpty { line(buffer) }
+            onExit(proc.terminationStatus)
+        }
+        do { try p.run() } catch {
+            line("spawn failed: \(error)")
+            onExit(126)
         }
     }
 }

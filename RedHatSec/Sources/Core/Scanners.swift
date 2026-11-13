@@ -363,17 +363,12 @@ final class NetScanner {
             let b = NWBrowser(for: .bonjour(type: svc, domain: "local."), using: params)
             b.browseResultsChangedHandler = { results, _ in
                 for r in results {
-                    let name = r.endpoint.debugDescription
-                        .replacingOccurrences(of: "<NWEndpoint.Service name: ", with: "")
-                        .replacingOccurrences(of: ">", with: "")
-                    if let ep = r.endpoint.bonjourEndpointHostPort() {
-                        var t = TargetDevice(name: name, proto: .net, rssi: -50,
-                                             mac: nil, vendor: nil, services: [svc], via: "mDNS")
-                        t.extra["host"] = ep.0
-                        t.extra["port"] = ep.1
-                        t.extra["svc"] = svc
-                        onResult(t)
-                    }
+                    guard case let .service(name, svcType, _, _) = r.endpoint else { continue }
+                    _ = svcType
+                    var t = TargetDevice(name: name, proto: .net, rssi: -50,
+                                         mac: nil, vendor: nil, services: [svc], via: "mDNS")
+                    t.extra["svc"] = svc
+                    onResult(t)
                 }
             }
             b.start(queue: .global())
@@ -490,14 +485,6 @@ final class NetScanner {
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
             if !done { done = true; c.cancel(); onReply("") }
         }
-    }
-}
-
-extension NWEndpoint {
-    func bonjourEndpointHostPort() -> (String, String)? {
-        guard case let .service(name, type, domain, _) = self else { return nil }
-        _ = (type, domain)
-        return (name, type)
     }
 }
 
