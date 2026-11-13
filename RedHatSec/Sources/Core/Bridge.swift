@@ -166,7 +166,7 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
             responseCont?.resume(returning: (0, Data()))
             responseCont = nil
         default:
-            responseCont?.resume(returning: (0, frame.payload))
+            responseCont?.resume(returning: (0, Data(frame.payload)))
             responseCont = nil
         }
     }
