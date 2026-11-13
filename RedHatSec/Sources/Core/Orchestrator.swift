@@ -142,6 +142,7 @@ final class Orchestrator: ObservableObject {
         // ENUMERATE: port probe su host noti
         phase = .enumerate
         log("TCP enumeration su host scoperti (23,80,161,502,554,1883,5683,8080,9100)…", .exec)
+        var enumerated: [TargetDevice] = []
         for t in targets.filter({ $0.proto == .net && isNumericHost($0.extra["host"]) }) {
             let host = t.extra["host"]!
             let found = await collectPorts(host: host)
@@ -201,12 +202,12 @@ final class Orchestrator: ObservableObject {
                     if let v = vec(id) { entries.append(PlanEntry(vector: v, target: t)) }
                 }
             case .net:
-                let open = (t.extra["open"] ?? "").split(",").compactMap { UInt16($0) }
+                let open = (t.extra["open"] ?? "").split(separator: ",", omittingEmptySubsequences: true).compactMap { UInt16(String($0)) }
                 let map: [UInt16: String] = [23: "net_telnet", 161: "net_snmp", 502: "net_modbus",
                                              554: "net_rtsp", 1883: "net_mqtt", 5683: "net_coap",
                                              80: "net_upnp", 8080: "net_upnp"]
                 for p in open {
-                    if let id = map[p], let v = vec(id), v.cap == .native {
+                    if let id = map[p], let v = vec(id), v.cap == Capability.native {
                         entries.append(PlanEntry(vector: v, target: t))
                     }
                 }
@@ -300,7 +301,8 @@ final class Orchestrator: ObservableObject {
                 return "PLAN (tool '\(tool)' non installato sul device) — prereq: \(e.vector.prereq)"
             }
             let args = templateArgs(e.vector.hint, target: e.target)
-            let r = await Task.detached { shell.run(tool, args: args, timeout: 30) }.value
+            let sh = ShellRunner.shared
+            let r = await Task.detached { sh.run(tool, args: args, timeout: 30) }.value
             return "tool \(tool) exit=\(r.exitCode)\nstdout: \(r.stdout.prefix(1000))\nstderr: \(r.stderr.prefix(400))"
         case .plan:
             return "PLAN — richiede hardware/radio esterna.\nPrereq: \(e.vector.prereq)\nExec: \(e.vector.hint)"
@@ -453,8 +455,10 @@ final class Orchestrator: ObservableObject {
         let path = URL(string: loc)?.path ?? "/"
         let req = "GET \(path) HTTP/1.1\r\nHost: \(host):\(lport)\r\n\r\n"
         let desc = await tcpRoundTrip(host: host, port: lport, payload: req.data(using: .ascii)!, timeout: 4)
-        let friendly = desc.range(of: "<friendlyName>(.*?)</friendlyName>", options: .regularExpression)?
-            .map { String(desc[$0]) } ?? ""
+        var friendly = "?"
+        if let r = desc.range(of: "<friendlyName>(.*?)</friendlyName>", options: .regularExpression) {
+            friendly = String(desc[r])
+        }
         return "UPnP device: \(friendly.isEmpty ? "?" : friendly)\nLOCATION: \(loc)\n\(desc.prefix(400))"
     }
 

@@ -142,7 +142,7 @@ struct RadarView: View {
     let scanning: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 30, paused: !scanning && targets.isEmpty)) { timeline in
+        TimelineView(.animation) { timeline in
             Canvas { ctx, size in
                 let c = CGPoint(x: size.width / 2, y: size.height / 2)
                 let r = min(size.width, size.height) / 2 - 6

@@ -39,9 +39,10 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
-            ?? (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data).map { BLEScanner.guessVendor($0) }
-            ?? peripheral.identifier.uuidString.prefix(8).description
+        let advName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
+        let vendorGuess = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)
+            .flatMap { BLEScanner.guessVendor($0) }
+        let name = advName ?? vendorGuess ?? String(peripheral.identifier.uuidString.prefix(8))
         var services: [String] = []
         if let s = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] {
             services = s.map { BLEScanner.friendlyService($0) }

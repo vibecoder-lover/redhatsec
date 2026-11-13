@@ -83,7 +83,8 @@ enum ReportBuilder {
     static func pdf(_ r: Report) -> URL {
         let pageRect = CGRect(x: 0, y: 0, width: 595, height: 842) // A4
         let margin: CGFloat = 44
-        let renderer = UIGraphicsPDFRenderer(bounds: pageRect, actions: { ctx in
+        let format = UIGraphicsPDFRendererFormat()
+        let renderer = UIGraphicsPDFRenderer(bounds: pageRect, format: format, actions: { (ctx: UIGraphicsPDFRendererContext) in
             ctx.beginPage()
             var y: CGFloat = margin
             func text(_ s: String, font: UIFont, color: UIColor, size: CGFloat = 300) {

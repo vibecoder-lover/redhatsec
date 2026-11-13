@@ -47,7 +47,7 @@ struct ReportView: View {
                     FindingCard(f: f)
                 }
 
-                exportRow(rep)
+                exportRow
             }
             .padding(16)
         }
