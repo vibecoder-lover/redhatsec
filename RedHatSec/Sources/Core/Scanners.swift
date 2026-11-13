@@ -4,6 +4,7 @@ import CoreNFC
 import Network
 import SystemConfiguration.CaptiveNetwork
 import CoreLocation
+import ObjectiveC
 
 // MARK: - BLE
 
@@ -263,17 +264,25 @@ final class WiFiScanner {
     }
 
     var lastDiag: String = ""
+    private var diagLines: [String] = []
+    private func diag(_ s: String) { diagLines.append(s) }
+
+    // NEHotspotHelper persistente: registrato UNA volta per processo,
+    // raccoglie le reti visibili a ogni scan di sistema
+    static var helperActive = false
+    static var helperNets: [WiFiNet] = []
+    static let helperQueue = DispatchQueue(label: "rhs.hotspothelper")
 
     func availableNetworks() -> [WiFiNet] {
-        lastDiag = ""
-        if let nets = probeHotspotHelper() { lastDiag = "NEHotspotHelper LIVE SCAN (\(nets.count))"; return nets }
-        if let nets = probeMobileWiFi() { lastDiag = "mobilewifi ok (\(nets.count))"; return nets }
-        if let nets = probeCurrentNetworkInfo() { lastDiag = "CNCopyCurrentNetworkInfo ok"; return nets }
-        if let nets = probeHotspotCurrent() { lastDiag = "NEHotspotNetwork ok"; return nets }
-        let known = probeKnownNetworksPlist()
-        if !known.isEmpty { lastDiag = "known-networks plist (\(known.count))"; return known }
-        lastDiag = "tutte le sonde fallite: \(mobileWiFiDiag)"
-        return []
+        diagLines = []
+        var nets: [WiFiNet] = []
+        if let n = probeHotspotHelper() { nets = n }
+        else if let n = probeMobileWiFi() { nets = n }
+        else if let n = probeCurrentNetworkInfo() { nets = n }
+        else if let n = probeHotspotCurrent() { nets = n }
+        else { nets = probeKnownNetworksPlist() }
+        lastDiag = diagLines.joined(separator: " || ")
+        return nets
     }
 
     static func requestLocationPermission() {
@@ -283,78 +292,149 @@ final class WiFiScanner {
         }
     }
 
-    // NEHotspotHelper: l'UNICO canale live-scan su iOS — l'handler riceve le
-    // reti visibili al chip a ogni scan di sistema (serve entitlement HotspotHelper)
     private func probeHotspotHelper() -> [WiFiNet]? {
-        var nets: [WiFiNet] = []
-        var done = false
-        let sem = DispatchSemaphore(value: 0)
-        let q = DispatchQueue(label: "rhs.hotspothelper")
-        let ok = NEHotspotHelper.register(queue: q) { cmd in
-            guard !done else { return }
-            guard let list = cmd.networkList, !list.isEmpty else { return }
-            for n in list {
-                let dbm = Int(-100 + n.signalStrength * 60)
-                nets.append(WiFiNet(ssid: n.ssid, bssid: "?",
-                                    rssi: dbm, sec: n.isSecure ? "WPA2/WPA3" : "OPEN"))
+        if !WiFiScanner.helperActive {
+            let ok = NEHotspotHelper.register(queue: WiFiScanner.helperQueue) { cmd in
+                guard let list = cmd.networkList, !list.isEmpty else { return }
+                let nets = list.map { n -> WiFiNet in
+                    WiFiNet(ssid: n.ssid, bssid: "?",
+                            rssi: Int(-100 + n.signalStrength * 60),
+                            sec: n.isSecure ? "WPA2/WPA3" : "OPEN")
+                }
+                WiFiScanner.helperNets = nets
             }
-            done = true
-            sem.signal()
+            if ok {
+                WiFiScanner.helperActive = true
+                diag("helper REGISTRATO — se restano 0 reti: apri Impostazioni › Wi-Fi (forza lo scan di sistema), torna e ri-scanca")
+            } else {
+                diag("helper register NEGATO (entitlement non onorato da questo JB)")
+            }
         }
-        guard ok else {
-            mobileWiFiDiag = "NEHotspotHelper register NEGATO (entitlement non onorato)"
-            return nil
+        if WiFiScanner.helperNets.isEmpty {
+            // primo giro: aspetta un possibile callback immediato
+            for _ in 0..<12 {
+                if !WiFiScanner.helperNets.isEmpty { break }
+                Thread.sleep(forTimeInterval: 0.5)
+            }
         }
-        _ = sem.wait(timeout: .now() + 12)
-        done = true
-        return nets.isEmpty ? nil : nets
+        diag("helper reti raccolte: \(WiFiScanner.helperNets.count)")
+        return WiFiScanner.helperNets.isEmpty ? nil : WiFiScanner.helperNets
     }
-
-    private var mobileWiFiDiag = "dlopen fallito"
 
     private func probeMobileWiFi() -> [WiFiNet]? {
         guard dlopen("/System/Library/PrivateFrameworks/MobileWiFi.framework/MobileWiFi", RTLD_NOW) != nil else {
-            mobileWiFiDiag = "dlopen MobileWiFi fallito"
+            diag("dlopen MobileWiFi fallito")
             return nil
         }
-        guard let cls = NSClassFromString("WiFiManager") as? NSObject.Type else {
-            mobileWiFiDiag = "classe WiFiManager assente"
+        return probeFrameworkIntrospection(prefixes: ["WiFi"], label: "MobileWiFi")
+    }
+
+    private func probeFrameworkIntrospection(prefixes: [String], label: String) -> [WiFiNet]? {
+        var count: UInt32 = 0
+        guard let list = objc_copyClassList(&count) else {
+            diag("\(label): objc_copyClassList nil")
             return nil
         }
-        let sharedSel = NSSelectorFromString("sharedInstance")
-        guard let shared = cls.perform(sharedSel)?.takeUnretainedValue() as? NSObject else {
-            mobileWiFiDiag = "sharedInstance nil"
-            return nil
+        var wifiClasses: [String] = []
+        for i in 0..<Int(count) {
+            let name = String(cString: class_getName(list[i]))
+            if prefixes.contains(where: name.hasPrefix) { wifiClasses.append(name) }
         }
-        var raw: NSArray?
-        for sel in ["copyNetworkList", "networks", "allNetworks"] {
-            if let r = shared.perform(NSSelectorFromString(sel))?.takeUnretainedValue() as? NSArray,
-               r.count > 0 { raw = r; break }
+        free(list)
+        diag("\(label) classi: \(wifiClasses.prefix(20).joined(separator: ", "))"
+             + (wifiClasses.count > 20 ? " +\(wifiClasses.count - 20)" : ""))
+        let candidates = wifiClasses.filter { $0.contains("Manager") || $0.contains("Client") || $0.contains("Controller") }
+        for cname in candidates {
+            guard let cls = NSClassFromString(cname) as? NSObject.Type,
+                  cls.responds(to: NSSelectorFromString("sharedInstance")) else { continue }
+            guard let shared = cls.perform(NSSelectorFromString("sharedInstance"))?.takeUnretainedValue() as? NSObject else {
+                continue
+            }
+            var mcount: UInt32 = 0
+            let klass = object_getClass(shared) ?? cls
+            guard let methods = class_copyMethodList(klass, &mcount) else { continue }
+            var selNames: [String] = []
+            for j in 0..<Int(mcount) {
+                let m = methods[j]
+                guard method_getNumberOfArguments(m) == 2 else { continue }
+                if let rt = method_copyReturnType(m) {
+                    let isObj = rt[0] == UInt8(ascii: "@")
+                    free(rt)
+                    guard isObj else { continue }
+                }
+                let sn = String(cString: sel_getName(method_getName(m)))
+                let low = sn.lowercased()
+                if low.contains("network") || low.contains("scan") || low.contains("list") || low.contains("ssid") {
+                    selNames.append(sn)
+                }
+            }
+            free(methods)
+            diag("\(cname).sharedInstance metodi candidati: \(selNames.joined(separator: ", "))")
+            for sn in selNames {
+                guard let r = shared.perform(NSSelectorFromString(sn))?.takeUnretainedValue() as? NSArray,
+                      r.count > 0 else { continue }
+                diag("\(cname).\(sn) → \(r.count) elementi")
+                var out: [WiFiNet] = []
+                for el in r {
+                    guard let obj = el as? NSObject else { continue }
+                    let ssid = strField(obj, ["ssidName", "ssid", "SSID", "name", "networkName"]) ?? "?"
+                    let bssid = strField(obj, ["bssid", "BSSID", "bssidString"]) ?? "?"
+                    let rssi = intField(obj, ["rssi", "RSSI", "rssiValue"]) ?? -100
+                    let sec = strField(obj, ["security", "securityType", "securityMode", "securityInformation"]) ?? "?"
+                    if ssid != "?" { out.append(WiFiNet(ssid: ssid, bssid: bssid, rssi: rssi, sec: sec)) }
+                }
+                if !out.isEmpty { return out }
+            }
         }
-        guard let arr = raw as? [NSObject] else {
-            mobileWiFiDiag = "WiFiManager istanza ok ma lista vuota (probe fw negata su questo JB)"
-            return nil
+        diag("\(label): nessuna lista reti via introspezione")
+        return nil
+    }
+
+    private func strField(_ obj: NSObject, _ sels: [String]) -> String? {
+        for s in sels {
+            let sel = NSSelectorFromString(s)
+            guard obj.responds(to: sel) else { continue }
+            if let v = obj.perform(sel)?.takeUnretainedValue() as? String, !v.isEmpty { return v }
         }
-        var out: [WiFiNet] = []
-        for n in arr {
-            let ssid = n.perform(NSSelectorFromString("ssidName"))?.takeUnretainedValue() as? String ?? "?"
-            let bssid = n.perform(NSSelectorFromString("bssid"))?.takeUnretainedValue() as? String ?? "?"
-            let rssi = n.perform(NSSelectorFromString("rssi"))?.takeUnretainedValue() as? Int ?? -100
-            let sec = n.perform(NSSelectorFromString("security"))?.takeUnretainedValue() as? String ?? "?"
-            out.append(WiFiNet(ssid: ssid, bssid: bssid, rssi: rssi, sec: sec))
+        return nil
+    }
+
+    private func intField(_ obj: NSObject, _ sels: [String]) -> Int? {
+        for s in sels {
+            let sel = NSSelectorFromString(s)
+            guard let klass = object_getClass(obj), obj.responds(to: sel),
+                  let m = class_getInstanceMethod(klass, sel) else { continue }
+            let imp = method_getImplementation(m)
+            typealias IntIMP = @convention(c) (NSObject, Selector) -> Int
+            let f = unsafeBitCast(imp, to: IntIMP.self)
+            return f(obj, sel)
         }
-        return out.isEmpty ? nil : out
+        return nil
     }
 
     private func probeCurrentNetworkInfo() -> [WiFiNet]? {
-        guard let ifa = CNCopySupportedInterfaces() as? [String], !ifa.isEmpty else { return nil }
+        let st = CLLocationManager().authorizationStatus
+        if st == .notDetermined {
+            diag("CNCopy: permesso location non ancora concesso — accetta il popup e ri-scanca")
+            return nil
+        }
+        if st == .denied {
+            diag("CNCopy: permesso location NEGATO — abilitalo in Impostazioni")
+            return nil
+        }
+        guard let ifa = CNCopySupportedInterfaces() as? [String], !ifa.isEmpty else {
+            diag("CNCopy: nessuna interfaccia supportata")
+            return nil
+        }
         for iface in ifa {
             guard let d = CNCopyCurrentNetworkInfo(iface as CFString) as? [String: Any] else { continue }
             let ssid = (d[kCNNetworkInfoKeySSID as String] as? String) ?? "?"
             let bssid = (d[kCNNetworkInfoKeyBSSID as String] as? String) ?? "?"
             guard ssid != "?" else { continue }
+            diag("CNCopy \(iface): SSID \(ssid)")
             return [WiFiNet(ssid: ssid, bssid: bssid, rssi: -55, sec: "connesso")]
         }
+        diag("CNCopy: interfacce [\(ifa.joined(separator: ","))] ma nessun SSID (non connesso o fw blocca)")
         return nil
     }
 
@@ -368,6 +448,7 @@ final class WiFiScanner {
             sem.signal()
         }
         _ = sem.wait(timeout: .now() + 4)
+        if result == nil { diag("NEHotspotNetwork.fetchCurrent: nil (non configurata dall'app)") }
         return result
     }
 
@@ -377,10 +458,21 @@ final class WiFiScanner {
         let paths = [
             "/var/mobile/Library/Preferences/com.apple.wifi.known-networks.plist",
             "/private/var/mobile/Library/Preferences/com.apple.wifi.known-networks.plist",
+            "/var/wireless/Library/Preferences/com.apple.wifi.known-networks.plist",
         ]
-        for p in paths where FileManager.default.fileExists(atPath: p) {
-            guard let dict = NSDictionary(contentsOfFile: p) as? [String: Any] else { continue }
-            for (key, val) in dict where key.hasPrefix("wifi.network.") {
+        var existing: [String] = []
+        for p in paths where FileManager.default.fileExists(atPath: p) { existing.append(p) }
+        if existing.isEmpty {
+            diag("known-networks: nessun file esistente (3 path provati)")
+            return []
+        }
+        for p in existing {
+            guard let dict = NSDictionary(contentsOfFile: p) as? [String: Any] else {
+                diag("known-networks \(p): non parseabile")
+                continue
+            }
+            diag("known-networks \(p): \(dict.count) key")
+            for (key, val) in dict {
                 guard let net = val as? [String: Any] else { continue }
                 let ssid = (net["SSID"] as? String)
                     ?? (net["SSID"] as? Data).flatMap { String(data: $0, encoding: .utf8) }
@@ -392,8 +484,8 @@ final class WiFiScanner {
                     out.append(WiFiNet(ssid: ssid, bssid: bssid, rssi: -70, sec: sec))
                 }
             }
-            if !out.isEmpty { break }
         }
+        diag("known-networks: \(out.count) ssid estratti (\(existing.count) file)")
         return out
     }
 }
