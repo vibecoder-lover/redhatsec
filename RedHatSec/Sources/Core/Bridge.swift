@@ -2,14 +2,6 @@ import Foundation
 import CoreBluetooth
 import Network
 import NetworkExtension
-import ObjectiveC
-
-@_silgen_name("objc_getClass")
-private func rhs_objcGetClass(_ name: UnsafePointer<CChar>) -> UnsafeMutableRawPointer?
-
-@_silgen_name("objc_msgSend")
-private func rhs_msgSendInit(_ self: UnsafeMutableRawPointer, _ sel: Selector,
-                             _ ssid: NSString, _ pass: NSString, _ wep: Bool) -> Unmanaged<NEHotspotConfiguration>
 
 // Bridge radio remota (ESP32/ESP8266) via BLE — sblocca i vettori PLAN
 // (deauth, beacon spam, PMKID) senza uscire dall'app.
@@ -345,21 +337,10 @@ final class TCPBridge: NSObject, ObservableObject {
         log("browse _rhsbridge._tcp…")
     }
 
-    // l'iPhone entra nell'AP dell'ESP8266 (path "AP dell'ESP")
-    // init(ssidName:passphrase:isWEP:) rimosso dall'header SDK26 → chiamato via runtime ObjC
-    func joinAP(ssid: String, pass: String) {
-        guard let cls = rhs_objcGetClass("NEHotspotConfiguration") else {
-            log("NEHotspotConfiguration assente")
-            return
-        }
-        let sel = NSSelectorFromString("initWithSSID:passphrase:isWEP:")
-        let cfg = rhs_msgSendInit(cls, sel, ssid as NSString, pass as NSString, false).takeRetainedValue()
-        NEHotspotConfigurationManager.shared.apply(cfg) { [weak self] err in
-            DispatchQueue.main.async {
-                if let err { self?.log("join AP fallito: \(err.localizedDescription)") }
-                else { self?.log("AP \(ssid) joinato — connect 192.168.4.1") }
-            }
-        }
+    // path "AP dell'ESP": l'utente entra nell'AP "RHS-Bridge" dalle Impostazioni iOS,
+    // qui si connette al gateway di default dell'ESP8266
+    func joinAP() {
+        connect(host: "192.168.4.1")
     }
 
     // MARK: connessione

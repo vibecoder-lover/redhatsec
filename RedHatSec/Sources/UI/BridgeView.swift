@@ -77,9 +77,9 @@ struct BridgeView: View {
 
                 Button {
                     Haptics.tap()
-                    o.tcpBridge.joinAP(ssid: "RHS-Bridge", pass: "redhatsec")
+                    o.tcpBridge.joinAP()
                 } label: {
-                    Label("JOIN AP ESP", systemImage: "wifi.router")
+                    Label("AP 192.168.4.1", systemImage: "wifi.router")
                         .font(.system(size: 12, weight: .bold))
                         .frame(maxWidth: .infinity).padding(.vertical, 10)
                 }
@@ -117,7 +117,7 @@ struct BridgeView: View {
                 .buttonStyle(ScaleButton())
                 .disabled(manualIP.isEmpty)
             }
-            Text("STA: ESP su hotspot iPhone → mDNS lo trova da solo. AP: JOIN AP ESP poi connect 192.168.4.1.")
+            Text("STA: ESP su hotspot iPhone → mDNS lo trova da solo. AP: entra in \"RHS-Bridge\" dalle Impostazioni, poi AP 192.168.4.1.")
                 .font(.caption2).foregroundColor(.dim)
         }
         .padding(14).card()
