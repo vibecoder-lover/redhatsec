@@ -159,13 +159,22 @@ struct NFCAttackView: View {
         .padding(14).card()
     }
 
+    private func logColor(_ lvl: LogEntry.Level) -> Color {
+        switch lvl {
+        case .good: return .ok
+        case .bad: return .bad
+        case .exec: return .redHat
+        default: return .dim
+        }
+    }
+
     private var logSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !log.isEmpty {
                 Text("SESSION LOG").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
-                ForEach(log.suffix(12)) { l in
+                ForEach(Array(log.suffix(12))) { l in
                     HStack(alignment: .top, spacing: 8) {
-                        Circle().fill(l.level == .good ? .ok : (l.level == .bad ? .bad : (l.level == .exec ? .redHat : .dim)))
+                        Circle().fill(logColor(l.level))
                             .frame(width: 6, height: 6).padding(.top, 5)
                         Text(l.text).font(.system(size: 11, design: .monospaced)).foregroundColor(.white.opacity(0.85))
                     }
