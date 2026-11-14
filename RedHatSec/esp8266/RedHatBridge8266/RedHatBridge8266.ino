@@ -33,6 +33,83 @@ uint8_t pmkidBuf[128];
 int pmkidLen = 0;
 bool pmkidCaptured = false;
 
+// ===== piano B: sniff passivo di beacons (metodo deauther) =====
+#define AP_CH 6
+struct APEntry { uint8_t bssid[6]; uint8_t ch; int8_t rssi; char ssid[33]; uint8_t sec; };
+APEntry aps[24];
+int apCount = 0;
+volatile bool sniffCollect = false;
+volatile uint8_t curCh = AP_CH;
+
+void beaconCb(uint8_t *buf, uint16_t len) {
+  if (!sniffCollect || len < 40) return;
+  uint8_t *d = buf;
+  int lim = (len > 180) ? 180 : len;
+  for (int i = 0; i + 40 <= lim; i++) {
+    // beacon: FC=0x80,00 + duration 00,00 (pattern byte-scan, SDK-agnostico)
+    if (d[i] == 0x80 && d[i + 1] == 0x00 && d[i + 2] == 0x00 && d[i + 3] == 0x00) {
+      uint8_t *bssid = d + i + 10;
+      int found = -1;
+      for (int k = 0; k < apCount; k++)
+        if (memcmp(aps[k].bssid, bssid, 6) == 0) { found = k; break; }
+      int slot = found;
+      if (slot < 0) {
+        if (apCount >= 24) return;
+        slot = apCount++;
+        memset(&aps[slot], 0, sizeof(APEntry));
+        memcpy(aps[slot].bssid, bssid, 6);
+        aps[slot].ch = curCh;
+      }
+      int8_t rssi = (int8_t)d[0];
+      if (rssi < -100) rssi = -100;
+      if (rssi > aps[slot].rssi) aps[slot].rssi = rssi;
+      // SSID IE: standard a payload+36, altrimenti cerca un tag 0x00 plausibile
+      for (int t = i + 36; t + 2 <= lim; t++) {
+        if (d[t] == 0x00 && d[t + 1] <= 32) {
+          uint8_t sl = d[t + 1];
+          if (t + 2 + sl <= lim) {
+            memcpy(aps[slot].ssid, d + t + 2, sl);
+            aps[slot].ssid[sl] = 0;
+          }
+          break;
+        }
+        if (d[t + 1] > 32) continue;
+      }
+      return;
+    }
+  }
+}
+
+void beaconScan(int seconds) {
+  apCount = 0;
+  wifi_promiscuous_enable(0);
+  wifi_set_promiscuous_rx_cb(beaconCb);
+  sniffCollect = true;
+  // hop tollerante al TCP: 3 canali non-AP, poi pausa sul canale AP (il link respira)
+  const uint8_t hops[] = {1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13};
+  int dwell = (seconds * 1000) / (12 + 4);
+  if (dwell < 180) dwell = 180;
+  for (int k = 0; k < 12; k += 3) {
+    for (int j = k; j < k + 3 && j < 12; j++) {
+      curCh = hops[j];
+      wifi_promiscuous_enable(0);
+      wifi_set_channel(curCh);
+      wifi_promiscuous_enable(1);
+      delay(dwell);
+    }
+    // pausa AP: beacon del nostro AP → client resta associato, TCP respira
+    curCh = AP_CH;
+    wifi_promiscuous_enable(0);
+    wifi_set_channel(AP_CH);
+    wifi_promiscuous_enable(1);
+    delay(dwell * 2);
+  }
+  sniffCollect = false;
+  wifi_set_channel(AP_CH);
+  wifi_promiscuous_enable(1);
+  Serial.printf("[scanB] %d AP raccolti\n", apCount);
+}
+
 uint8_t beaconSsids[16][33];
 int beaconSsidLens[16];
 int beaconCount = 0;
@@ -179,37 +256,26 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
     case 0x01:  // ping
       sendFrame(0x01, 0x00, (const uint8_t *)"RHS-8266", 8);
       break;
-    case 0x02: {  // scan — la scan SDK vuole la promiscua OFF
-      wifi_promiscuous_enable(0);
-      WiFi.scanDelete();
-      WiFi.enableSTA(true);
-      int n = WiFi.scanNetworks(false, true);
-      Serial.printf("[scan] n=%d\n", n);
-      if (n <= 0) {
-        // retry: alcuni SDK 3.x servono un warm-up prima della prima scan in AP_STA
-        delay(600);
-        n = WiFi.scanNetworks(false, true);
-        Serial.printf("[scan] retry n=%d\n", n);
-      }
+    case 0x02: {  // scan — piano B: sniff passivo beacon con channel-hop
+      int seconds = plen > 0 ? pl[0] : 8;
+      if (seconds < 3) seconds = 3;
+      if (seconds > 12) seconds = 12;
+      beaconScan(seconds);
       uint8_t payload[900];
       int i = 0;
-      for (int k = 0; k < n && i < 880; k++) {
-        String ssid = WiFi.SSID(k);
-        int32_t rssi = WiFi.RSSI(k);
-        uint8_t ch = WiFi.channel(k);
-        uint8_t *b = WiFi.BSSID(k);
-        uint8_t sec = WiFi.encryptionType(k) == ENC_TYPE_NONE ? 0 : 1;
-        payload[i++] = (uint8_t)(int8_t)constrain(rssi, -100, -30);
-        payload[i++] = ch;
-        memcpy(payload + i, b, 6); i += 6;
-        payload[i++] = sec;
-        int sl = (ssid.length() < 32) ? ssid.length() : 32;
+      for (int k = 0; k < apCount && i < 880; k++) {
+        payload[i++] = (uint8_t)aps[k].rssi;
+        payload[i++] = aps[k].ch;
+        memcpy(payload + i, aps[k].bssid, 6); i += 6;
+        payload[i++] = aps[k].sec;
+        int sl = (int)strlen(aps[k].ssid);
+        if (sl > 32) sl = 32;
         payload[i++] = (uint8_t)sl;
-        memcpy(payload + i, ssid.c_str(), sl); i += sl;
+        memcpy(payload + i, aps[k].ssid, sl); i += sl;
       }
-      WiFi.scanDelete();
+      // pausa di coda: il client si riassocia prima del frame di risposta
+      delay(300);
       sendFrame(0x02, 0x00, payload, i);
-      wifi_promiscuous_enable(1);
       break;
     }
     case 0x04:  // deauth(mac6, ch, count)
@@ -269,7 +335,7 @@ void setup() {
   digitalWrite(2, LOW);
 
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(AP_SSID, AP_PASS);
+  WiFi.softAP(AP_SSID, AP_PASS, AP_CH);   // AP lockato su ch6: il ritorno dal hop è deterministico
   wifi_promiscuous_enable(1);
 
   server.begin();
