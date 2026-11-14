@@ -198,9 +198,10 @@ final class ShellRunner {
         }
 
         // entitlements come li vede AMFI (dal code signing del binario in esecuzione)
-        out.append("— entitlements embedded —")
-        let keys = Self.ownEntitlementKeys()
-        out.append(keys.joined(separator: ", "))
+        out.append("— ents on-disk (verità firma) —")
+        out.append(Self.entsDump())
+        var cSelf: UnsafeRawPointer? = nil
+        out.append("SecCodeCopySelf rc=\(secCodeCopySelf(0, &cSelf))")
 
         // helper nel bundle: spawn in-container sempre permesso anche sandboxed
         let helper = Bundle.main.bundlePath + "/RHSHelper"
@@ -210,6 +211,53 @@ final class ShellRunner {
             out.append("RHSHelper — assente nel bundle")
         }
         return out
+    }
+
+    private static func u32(_ d: Data, _ o: UInt32) -> UInt32 {
+        d.withUnsafeBytes { $0.load(fromByteOffset: Int(o), as: UInt32.self) }
+    }
+
+    // parse della firma embedded: LC_CODE_SIGNATURE → superblob → slot entitlements
+    static func entsDump() -> String {
+        guard let path = Bundle.main.executablePath,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            return "impossibile leggere il binario"
+        }
+        guard data.count >= 32, u32(data, 0) == 0xFEEDFACF else {
+            return "binario non thin arm64"
+        }
+        let ncmds = u32(data, 16)
+        var off: UInt32 = 32
+        var sigOff: UInt32 = 0
+        for _ in 0..<ncmds {
+            guard Int(off) + 8 <= data.count else { break }
+            let cmd = u32(data, off)
+            let cmdsize = u32(data, off + 4)
+            if cmd == 0x1D { sigOff = u32(data, off + 8) } // LC_CODE_SIGNATURE: dataoff a +8
+            if cmdsize == 0 { break }
+            off += cmdsize
+        }
+        guard sigOff > 0 else { return "nessuna LC_CODE_SIGNATURE" }
+        guard u32(data, sigOff) == 0xFADE0B01 else { return "superblob magic err" }
+        let count = u32(data, sigOff + 8)
+        var entsXML = ""
+        var idx = sigOff + 12
+        for _ in 0..<count {
+            guard Int(idx) + 8 <= data.count else { break }
+            let type = u32(data, idx)
+            let o = u32(data, idx + 4)
+            if type == 0x10007 { // CSSLOT_ENTITLEMENTS
+                let blobOff = sigOff + o
+                guard u32(data, blobOff) == 0xFADE7171 else { return "ent blob magic err" }
+                let bLen = Int(u32(data, blobOff + 4))
+                if bLen > 8, Int(blobOff) + bLen <= data.count {
+                    entsXML = String(data: data[(blobOff + 8)..<(Int(blobOff) + bLen)], encoding: .utf8) ?? ""
+                }
+            }
+            idx += 8
+        }
+        guard !entsXML.isEmpty else { return "slot entitlements ASSENTE dalla firma" }
+        return entsXML.replacingOccurrences(of: "\n", with: " ").prefix(600).description
     }
 
     static func ownEntitlementKeys() -> [String] {
