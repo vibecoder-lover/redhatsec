@@ -746,7 +746,7 @@ final class Orchestrator: ObservableObject {
                  0x00, 0x00,                            // UNI pw len
                  0x00, 0x00,                            // Reserved
                  0x50, 0x00, 0x00, 0x00]                // Capabilities
-        let acc = Data("\\"\u{00}Windows 2000 2195\u{00}Windows 2000 5.0\u{00}".utf8)
+        let acc = Data("\\\u{00}Windows 2000 2195\u{00}Windows 2000 5.0\u{00}".utf8)
         sess += withUnsafeBytes(of: UInt16(1 + acc.count).littleEndian) { Data($0) } // ByteCount
         sess += Data([0x00]) + acc
         let nl1 = sess.count - 4
@@ -765,7 +765,7 @@ final class Orchestrator: ObservableObject {
         let nl2 = tree.count - 4
         tree.insert(contentsOf: [0x00, UInt8(nl2 >> 8), UInt8(nl2 & 0xff)], at: 0)
         // TRANS PeekNamedPipe FID 0, \PIPE\
-        var trans = smbHeader(0x25, flags2: 0x2801, uid: 0, tid: 0)
+        var trans = smbHeader(0x25, flags2: 0x2801, tid: 0, uid: 0)
         trans += [0x10,                                 // WordCount 16
                  0x00, 0x00,                            // TotalParam
                  0x00, 0x00,                            // TotalData
@@ -804,7 +804,8 @@ final class Orchestrator: ObservableObject {
         guard let fin = await rawRT(host, 445, transP), fin.count >= 13, fin[4] == 0xff else {
             return "MS17-010: trans2 senza risposta — check non conclusivo"
         }
-        let status = UInt32(fin[9]) | UInt32(fin[10]) << 8 | UInt32(fin[11]) << 16 | UInt32(fin[12]) << 24
+        let st = [UInt32(fin[9]), UInt32(fin[10]) << 8, UInt32(fin[11]) << 16, UInt32(fin[12]) << 24]
+        let status = st[0] | st[1] | st[2] | st[3]
         switch status {
         case 0xC0000205:
             return "MS17-010 VULNERABILE su \(host):445 — PeekNamedPipe FID0 → INSUFF_SERVER_RESOURCES (0xc0000205). EternalBlue precondizioni CONFERMATE (exploit = Metasploit da host esterno)"
