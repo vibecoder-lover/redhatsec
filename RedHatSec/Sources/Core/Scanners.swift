@@ -357,16 +357,22 @@ final class WiFiScanner {
             let name = String(cString: class_getName(list[i]))
             if prefixes.contains(where: name.hasPrefix) { wifiClasses.append(name) }
         }
-        free(UnsafeMutableRawPointer(list))
+        // NOTA: nessun free su list — l'SDK la marca autoreleasing (memoria gestita dal
+        // runtime): liberarla è invalid free → crash. Leak trascurabile a scan manuale.
         diag("\(label) classi: \(wifiClasses.prefix(20).joined(separator: ", "))"
              + (wifiClasses.count > 20 ? " +\(wifiClasses.count - 20)" : ""))
-        let candidates = wifiClasses.filter { $0.contains("Manager") || $0.contains("Client") || $0.contains("Controller") }
+        // sharedInstance SOLO su classi note — mai su nomi scoperti a runtime (assert interni)
+        let known: Set<String> = ["WiFiManager", "WiFiManagerClient", "WiFiClientManager",
+                                  "WiFiSystemClient", "WiFiController", "WiFiDevice"]
+        let candidates = wifiClasses.filter { known.contains($0) }
         for cname in candidates {
+            CrashTracer.mark("introspect \(cname): sharedInstance")
             guard let cls = NSClassFromString(cname) as? NSObject.Type,
                   cls.responds(to: NSSelectorFromString("sharedInstance")) else { continue }
             guard let shared = cls.perform(NSSelectorFromString("sharedInstance"))?.takeUnretainedValue() as? NSObject else {
                 continue
             }
+            CrashTracer.mark("introspect \(cname): method list")
             var mcount: UInt32 = 0
             let klass = object_getClass(shared) ?? cls
             guard let methods = class_copyMethodList(klass, &mcount) else { continue }
