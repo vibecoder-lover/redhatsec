@@ -203,6 +203,14 @@ final class ShellRunner {
         var cSelf: UnsafeRawPointer? = nil
         out.append("SecCodeCopySelf rc=\(secCodeCopySelf(0, &cSelf))")
 
+        out.append("— rootd 127.0.0.1:4444 —")
+        let rd = RootdClient.exec("id -u", timeout: 6)
+        if rd.exitCode == 0 {
+            out.append("rootd OK → id -u = \(rd.stdout.trimmingCharacters(in: .whitespacesAndNewlines))")
+        } else {
+            out.append(rd.stderr)
+        }
+
         // helper nel bundle: spawn in-container sempre permesso anche sandboxed
         let helper = Bundle.main.bundlePath + "/RHSHelper"
         if fm.fileExists(atPath: helper) {
