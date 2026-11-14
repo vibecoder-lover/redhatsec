@@ -543,7 +543,7 @@ final class Orchestrator: ObservableObject {
         if tcpBridge.connected {
             return await bridgeRT(host, port, payload, timeout: timeout)
         }
-        let s = await tcpRoundTrip(host: host, port: Int(port), payload: payload, timeout: timeout)
+        let s = await tcpRoundTrip(host: host, port: port, payload: payload, timeout: timeout)
         return s.isEmpty ? nil : Data(s.utf8)
     }
 
@@ -551,7 +551,7 @@ final class Orchestrator: ObservableObject {
         if tcpBridge.connected {
             return await tcpBridge.portScan(host: host, ports: [port]).contains { $0.0 == port }
         }
-        let s = await tcpRoundTrip(host: host, port: Int(port), payload: Data(), timeout: 2)
+        let s = await tcpRoundTrip(host: host, port: port, payload: Data(), timeout: 2)
         return !s.isEmpty
     }
 
