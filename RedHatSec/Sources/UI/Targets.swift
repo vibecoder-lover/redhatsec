@@ -6,6 +6,11 @@ func outcomeColor(_ outcome: String) -> Color {
     return .bad
 }
 
+// esposizione CVE: vettori ad alta severità nel catalogo per lo stesso proto
+func cveCountFor(_ t: TargetDevice) -> Int {
+    VectorDB.all().filter { $0.proto == t.proto && $0.cvss >= 7 }.count
+}
+
 func outcomeMark(_ outcome: String) -> String {
     if outcome.contains("executed") || outcome.contains("tool:") { return "✓" }
     if outcome == "plan" { return "◌" }
@@ -17,9 +22,15 @@ struct TargetsView: View {
     @State private var filter: Proto?
     @State private var selected: TargetDevice?
     @State private var dumpDetail: NFCDump?
+    @State private var rssiMin = -100
+    @State private var onlyCVE = false
 
     var filtered: [TargetDevice] {
-        filter == nil ? o.targets : o.targets.filter { $0.proto == filter }
+        o.targets.filter {
+            (filter == nil || $0.proto == filter) &&
+            $0.rssi >= rssiMin &&
+            (!onlyCVE || cveCountFor($0) > 0)
+        }
     }
 
     var body: some View {
@@ -28,6 +39,10 @@ struct TargetsView: View {
                 VStack(spacing: 12) {
                     filterChips
                     if o.targets.isEmpty { emptyState }
+                    if !o.targets.isEmpty { strengthRow }
+                    if filtered.isEmpty && !o.targets.isEmpty {
+                        Text("nessun target coi filtri attivi").font(.caption).foregroundColor(.dim)
+                    }
                     ForEach(filtered) { t in
                         TargetRow(t: t) {
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { selected = t }
@@ -43,6 +58,20 @@ struct TargetsView: View {
             .sheet(item: $selected) { t in TargetDetailView(target: t) }
             .sheet(item: $dumpDetail) { d in NFCDumpDetail(dump: d) }
         }
+    }
+
+    // filtri: potenza segnale minima + solo target con CVE note (≥7 CVSS nel catalogo)
+    private var strengthRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("SEGNALE ≥ \(rssiMin) dBm").font(.system(size: 10, weight: .bold, design: .rounded)).foregroundColor(.dim)
+                Spacer()
+                Chip(text: onlyCVE ? "CVE ✓ ON" : "CVE OFF", active: onlyCVE) { onlyCVE.toggle() }
+            }
+            Slider(value: Binding(get: { Double(rssiMin) }, set: { rssiMin = Int($0) }), in: -95...(-35), step: 5)
+                .tint(.redHat)
+        }
+        .padding(10).card()
     }
 
     private var filterChips: some View {
@@ -227,6 +256,11 @@ struct TargetRow: View {
                         .foregroundColor(.white).lineLimit(1)
                     HStack(spacing: 6) {
                         Text(t.via).font(.system(size: 10)).foregroundColor(.dim)
+                        let cve = cveCountFor(t)
+                        if cve > 0 {
+                            Text("CVE:\(cve)").font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .foregroundColor(.bad)
+                        }
                         if t.extra["autoArm"] == "1" {
                             Pill(text: "AUTO-ARM", color: .ok)
                         }
@@ -421,6 +455,9 @@ struct TargetDetailView: View {
                 } else {
                     KV(k: "gatt", val: target.extra["gatt"]?.isEmpty == false ? target.extra["gatt"]! : "non enumerato — AUTO-PREPARE")
                 }
+                if let s = target.extra["ssidBLE"], !s.isEmpty {
+                    KV(k: "SSID via GATT", val: s)
+                }
                 KV(k: "posso", val: "enum GATT · write · flood · malformed ATT (on-device)")
             case .net:
                 let open = target.extra["open"]?.isEmpty == false ? target.extra["open"]! : "nessuna porta nota"
@@ -449,7 +486,7 @@ struct TargetDetailView: View {
                 Spacer()
                 Menu {
                     ForEach(addableVectors) { v in
-                        Button(v.name) { o.addVectorToPlan(v.id, target: target) }
+                        Button(v.proto == target.proto ? v.name : "[\(v.proto.rawValue)] \(v.name)") { o.addVectorToPlan(v.id, target: target) }
                     }
                 } label: {
                     Label("aggiungi", systemImage: "plus.circle.fill")
@@ -468,8 +505,12 @@ struct TargetDetailView: View {
     }
 
     private var addableVectors: [AttackVector] {
-        VectorDB.all().filter { $0.proto == target.proto }
-            .filter { v in !relatedPlan.contains { $0.vector.id == v.id } }
+        // tutti i vettori non ancora in piano, stesso proto prima —
+        // niente filtro rigido che nascondeva il resto dopo la rimozione
+        VectorDB.all().filter { v in
+            !relatedPlan.contains { $0.vector.id == v.id }
+        }
+        .sorted { ($0.proto == target.proto ? 0 : 1) < ($1.proto == target.proto ? 0 : 1) }
     }
 
     private func planRow(_ e: PlanEntry) -> some View {

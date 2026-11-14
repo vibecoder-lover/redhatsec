@@ -11,6 +11,7 @@ import ObjectiveC
 struct GATTReport {
     var lines: [String] = []
     var writable: [(svc: String, chr: String)] = []
+    var ssidCandidates: [String] = []
 }
 
 final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
@@ -20,6 +21,8 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var enumContinuation: CheckedContinuation<GATTReport, Never>?
     private var enumBuffer: [String] = []
     private var writableChars: [(svc: String, chr: String)] = []
+    private var ssidCandidates: [String] = []
+    private var ssidSeen = Set<String>()
 
     var isReady: Bool { central?.state == .poweredOn }
 
@@ -116,6 +119,8 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
         enumBuffer = []
         writableChars = []
+        ssidCandidates = []
+        ssidSeen = []
         return await withCheckedContinuation { cont in
             enumContinuation = cont
             per.delegate = self
@@ -136,6 +141,9 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         for s in peripheral.services ?? [] {
             enumBuffer.append("SVC \(BLEScanner.friendlyService(s.uuid))")
+            if let hint = BLEScanner.provisionHint(s.uuid) {
+                enumBuffer.append("  ↳ \(hint) — SSID/config probabilmente qui")
+            }
             peripheral.discoverCharacteristics(nil, for: s)
         }
         if peripheral.services?.isEmpty ?? true { finishEnum() }
@@ -158,7 +166,39 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         if let v = characteristic.value, !v.isEmpty {
             enumBuffer.append("    val \(characteristic.uuid.uuidString): \(v.hexPreview)")
+            if let s = Self.ssidCandidate(v) {
+                let svc = characteristic.service?.uuid.uuidString.prefix(8) ?? "?"
+                let line = "SSID? \"\(s)\" (svc \(svc) chr \(characteristic.uuid.uuidString.prefix(8)))"
+                if ssidSeen.insert(line).inserted {
+                    enumBuffer.append("    ↳ \(line)")
+                    ssidCandidates.append(line)
+                }
+            }
         }
+    }
+
+    // servizi di provisioning Wi-Fi noti (SSID via GATT)
+    static func provisionHint(_ u: CBUUID) -> String? {
+        let s = u.uuidString.uppercased()
+        if s.hasPrefix("6E400001") { return "Nordic UART — provisioning/config possibile" }
+        if s.hasPrefix("FFE0") || s.hasPrefix("FFF0") || s.hasPrefix("FF00") { return "vendor service — provisioning ESP/clone comune" }
+        if s.hasPrefix("F000") || s.hasPrefix("C300") { return "TI SimpleLink — config service" }
+        if s.hasPrefix("180A") { return "Device Information — fingerprint firmware" }
+        if s.hasPrefix("FE9F") { return "Google Fast Pair" }
+        if s.hasPrefix("FD5A") { return "Wi-Fi Alliance — Wi-Fi provisioning" }
+        if s.hasPrefix("C5F0") || s.hasPrefix("2A00") || s.hasPrefix("2A01") { return "GAP/GATT — info device" }
+        return nil
+    }
+
+    // valore plausibile SSID: ASCII stampabile 3-32, alfanumerico+spazi-_.
+    static func ssidCandidate(_ data: Data) -> String? {
+        guard (3...32).contains(data.count) else { return nil }
+        let s = String(decoding: data, as: UTF8.self)
+        guard s.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value < 0x7F }) else { return nil }
+        guard s.range(of: "^[a-zA-Z0-9][a-zA-Z0-9_ .\\-]{2,31}$", options: .regularExpression) != nil else { return nil }
+        // scarta valori che sono chiaramente versioni/seriali puri
+        guard !s.lowercased().contains("v1.") && !s.lowercased().contains("rev") else { return nil }
+        return s
     }
 
     func write(_ target: TargetDevice, service: String, characteristic: String,
@@ -228,7 +268,7 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private func finishEnum() {
         let c = enumContinuation
         enumContinuation = nil
-        c?.resume(returning: GATTReport(lines: enumBuffer, writable: writableChars))
+        c?.resume(returning: GATTReport(lines: enumBuffer, writable: writableChars, ssidCandidates: ssidCandidates))
     }
 }
 
