@@ -251,7 +251,7 @@ final class ShellRunner {
                 guard u32(data, blobOff) == 0xFADE7171 else { return "ent blob magic err" }
                 let bLen = Int(u32(data, blobOff + 4))
                 if bLen > 8, Int(blobOff) + bLen <= data.count {
-                    entsXML = String(data: data[(blobOff + 8)..<(Int(blobOff) + bLen)], encoding: .utf8) ?? ""
+                    entsXML = String(data: data[(Int(blobOff) + 8)..<(Int(blobOff) + bLen)], encoding: .utf8) ?? ""
                 }
             }
             idx += 8
