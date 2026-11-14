@@ -182,7 +182,15 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
     case 0x02: {  // scan — la scan SDK vuole la promiscua OFF
       wifi_promiscuous_enable(0);
       WiFi.scanDelete();
+      WiFi.enableSTA(true);
       int n = WiFi.scanNetworks(false, true);
+      Serial.printf("[scan] n=%d\n", n);
+      if (n <= 0) {
+        // retry: alcuni SDK 3.x servono un warm-up prima della prima scan in AP_STA
+        delay(600);
+        n = WiFi.scanNetworks(false, true);
+        Serial.printf("[scan] retry n=%d\n", n);
+      }
       uint8_t payload[900];
       int i = 0;
       for (int k = 0; k < n && i < 880; k++) {
