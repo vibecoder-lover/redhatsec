@@ -519,6 +519,19 @@ struct TargetDetailView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(e.vector.name).font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
                 Text(capLabel(e.vector)).font(.system(size: 10, design: .monospaced)).foregroundColor(.dim)
+                if let m = o.missingTools(for: e.vector.id).first {
+                    Button {
+                        Haptics.tap()
+                        o.log("[tool] install \(m.name)…", .info)
+                        ToolRegistry.install(m.name, line: { o.log($0, .info) }, done: { _ in })
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.down.circle.fill").font(.system(size: 9))
+                            Text("richiede \(m.name) — INSTALLA").font(.system(size: 9, design: .monospaced))
+                        }
+                        .foregroundColor(.warn)
+                    }
+                }
             }
             Spacer()
             Pill(text: statusLabel(e), color: statusColor(e))
