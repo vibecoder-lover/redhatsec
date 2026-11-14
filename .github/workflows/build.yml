@@ -41,6 +41,21 @@ jobs:
             exit 1
           fi
 
+      - name: Build RHSHelper
+        run: |
+          cd RedHatSec
+          if xcodebuild -project RedHatSec.xcodeproj -target RHSHelper \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED="NO" CODE_SIGNING_ALLOWED="NO" \
+            ARCHS=arm64 build > helper.log 2>&1; then
+            echo "HELPER OK"
+            find build -type f -name 'RHSHelper'
+          else
+            echo "===== HELPER BUILD FAILED ====="
+            grep -E "error:" helper.log | head -40
+            exit 1
+          fi
+
       - name: Verify built binary
         run: |
           APP=$(find RedHatSec/build -type d -name '*.app' | head -1)
