@@ -67,6 +67,8 @@ struct DashboardView: View {
             Pill(text: ShellRunner.shared.isJailbroken ? "JB OK" : "NO JB",
                  color: ShellRunner.shared.isJailbroken ? .ok : .bad)
             Pill(text: "tools: \(ShellRunner.shared.availableTools.count)", color: .info)
+            Pill(text: o.tcpBridge.connected ? "BRIDGE ✓" : "BRIDGE ✗",
+                 color: o.tcpBridge.connected ? .ok : .bad)
             Spacer()
             if o.phase == .execute {
                 Pill(text: o.currentStep, color: .warn).shimmering()

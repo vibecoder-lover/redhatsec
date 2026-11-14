@@ -142,10 +142,25 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
             responseCont = c
             send(cmd, payload: payload)
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
-                guard let self, self.responseCont != nil else { return }
-                self.responseCont = nil
-                c.resume(returning: nil)
+                guard let self else { return }
+                self.resumeResponse(nil)
             }
+        }
+    }
+
+    private func resumeResponse(_ r: (UInt8, Data)?) {
+        DispatchQueue.main.async {
+            guard let c = self.responseCont else { return }
+            self.responseCont = nil
+            c.resume(returning: r)
+        }
+    }
+
+    private func resumeScan(_ nets: [BridgeNet]) {
+        DispatchQueue.main.async {
+            guard let c = self.scanCont else { return }
+            self.scanCont = nil
+            c.resume(returning: nets)
         }
     }
 
@@ -155,20 +170,15 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         guard let frame = popFrame() else { return }
         guard frame.status == 0x00 else {
             log("RX error \(frame.status)")
-            responseCont?.resume(returning: (frame.status, Data()))
-            responseCont = nil
+            resumeResponse((frame.status, Data()))
             return
         }
         switch frame.cmdEcho {
         case Cmd.wifiResults.rawValue:
-            let nets = parseNets(frame.payload)
-            scanCont?.resume(returning: nets)
-            scanCont = nil
-            responseCont?.resume(returning: (0, Data()))
-            responseCont = nil
+            resumeScan(parseNets(frame.payload))
+            resumeResponse((0, Data()))
         default:
-            responseCont?.resume(returning: (0, Data(frame.payload)))
-            responseCont = nil
+            resumeResponse((0, Data(frame.payload)))
         }
     }
 
@@ -223,9 +233,8 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
             scanCont = c
             send(.wifiScan, payload: [UInt8(seconds)])
             DispatchQueue.global().asyncAfter(deadline: .now() + Double(seconds) + 6) { [weak self] in
-                guard let self, self.scanCont != nil else { return }
-                self.scanCont = nil
-                c.resume(returning: [])
+                guard let self else { return }
+                self.resumeScan([])
             }
         }
         scanNets = nets
@@ -502,15 +511,31 @@ final class TCPBridge: NSObject, ObservableObject {
         log("raw → UART (\(bytes.count)B)")
     }
 
+    // resume-once: niente doppio resume (crash "continuation misuse")
+    private func resumeResponse(_ r: (UInt8, Data)?) {
+        DispatchQueue.main.async {
+            guard let c = self.responseCont else { return }
+            self.responseCont = nil
+            c.resume(returning: r)
+        }
+    }
+
+    private func resumeScan(_ nets: [BridgeManager.BridgeNet]) {
+        DispatchQueue.main.async {
+            guard let c = self.scanCont else { return }
+            self.scanCont = nil
+            c.resume(returning: nets)
+        }
+    }
+
     private func sendAwait(_ cmd: UInt8, payload: [UInt8], timeout: TimeInterval = 10) async -> (UInt8, Data)? {
         guard connected else { return nil }
         return await withCheckedContinuation { c in
             responseCont = c
             send(cmd, payload: payload)
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
-                guard let self, self.responseCont != nil else { return }
-                self.responseCont = nil
-                c.resume(returning: nil)
+                guard let self else { return }
+                self.resumeResponse(nil)
             }
         }
     }
@@ -540,20 +565,15 @@ final class TCPBridge: NSObject, ObservableObject {
         DispatchQueue.main.async {
             guard f.status == 0x00 else {
                 self.log("RX status err \(f.status)")
-                self.responseCont?.resume(returning: (f.status, Data()))
-                self.responseCont = nil
+                self.resumeResponse((f.status, Data()))
                 return
             }
             switch f.cmdEcho {
             case 0x03: // wifiResults
-                let nets = self.parseNets(f.payload)
-                self.scanCont?.resume(returning: nets)
-                self.scanCont = nil
-                self.responseCont?.resume(returning: (0, Data()))
-                self.responseCont = nil
+                self.resumeScan(self.parseNets(f.payload))
+                self.resumeResponse((0, Data()))
             default:
-                self.responseCont?.resume(returning: (0, Data(f.payload)))
-                self.responseCont = nil
+                self.resumeResponse((0, Data(f.payload)))
             }
         }
     }
@@ -586,9 +606,8 @@ final class TCPBridge: NSObject, ObservableObject {
             scanCont = c
             send(0x02, payload: [UInt8(seconds)])
             DispatchQueue.global().asyncAfter(deadline: .now() + Double(seconds) + 6) { [weak self] in
-                guard let self, self.scanCont != nil else { return }
-                self.scanCont = nil
-                c.resume(returning: [])
+                guard let self else { return }
+                self.resumeScan([])
             }
         }
         scanNets = nets

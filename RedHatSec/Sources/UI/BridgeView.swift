@@ -119,7 +119,7 @@ struct BridgeView: View {
             if !nets.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("RETI VISIBILI DALLA RADIO — \(nets.count)").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
-                    ForEach(nets) { n in
+                    ForEach(Array(nets.enumerated()), id: \.offset) { i, n in
                         HStack(spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(n.ssid).font(.system(size: 13, weight: .semibold)).foregroundColor(.white)

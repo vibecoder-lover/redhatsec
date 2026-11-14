@@ -2,6 +2,7 @@ import Foundation
 import Network
 import SwiftUI
 import CryptoKit
+import Combine
 
 struct PlanEntry: Identifiable {
     var id = UUID()
@@ -34,7 +35,15 @@ final class Orchestrator: ObservableObject {
 
     init() {
         loadDumps()
+        // forwarding: i bridge sono ObservableObject esterni — chi osserva Orchestrator
+        // vede anche i loro cambi (statusRow, sheet Impostazioni, ecc.)
+        bridgeObservers = [
+            bridge.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() },
+            tcpBridge.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() },
+        ]
     }
+
+    private var bridgeObservers: [AnyCancellable] = []
 
     private let journalPath: URL = {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
