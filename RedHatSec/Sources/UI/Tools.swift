@@ -99,6 +99,8 @@ struct TerminalView: View {
         ("disk", "df"),
         ("net", "ifconfig"),
         ("env", "env"),
+        ("sudo?", "sudo whoami"),
+        ("apt upd", "sudo apt-get update"),
         ("help", "help"),
     ]
 
@@ -121,7 +123,7 @@ struct TerminalView: View {
                         }
                     }
                     ForEach(quick, id: \.0) { q in
-                        Chip(text: q.0, active: false) { tm.run(q.1) }
+                        Chip(text: q.0, active: false) { tm.runSmartText(q.1) }
                     }
                 }
                 .padding(.horizontal, 10)
@@ -146,6 +148,23 @@ struct TerminalView: View {
                     withAnimation { proxy.scrollTo(tm.lines.last?.id, anchor: .bottom) }
                 }
             }
+
+            HStack(spacing: 8) {
+                Image(systemName: "shield.lefthalf.filled")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(RootShell.shared.available ? .ok : .dim)
+                SecureField("password root — in RAM, mai su disco", text: Binding(
+                    get: { RootShell.shared.password },
+                    set: { RootShell.shared.password = $0 }))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, design: .monospaced))
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(hex: 0x070709)))
+                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+                Pill(text: RootShell.shared.available ? "sudo ✓" : "sudo ✗", color: RootShell.shared.available ? .ok : .bad)
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 6)
 
             HStack(spacing: 10) {
                 Text("rhs")
@@ -188,6 +207,28 @@ extension TerminalModel {
         if head == "clear" { lines.removeAll(); return }
         if head == "install", parts.count > 1 {
             installTool(parts[1])
+            return
+        }
+        if head == "sudo" {
+            append("$ \(cmd)", .exec)
+            guard parts.count > 1 else {
+                append("uso: sudo <comando> — la password va nel campo ROOT sopra", .warn)
+                return
+            }
+            running = true
+            let rest = parts.dropFirst().joined(separator: " ")
+            DispatchQueue.global(qos: .utility).async {
+                let r = RootShell.shared.runSync(rest, timeout: 300)
+                DispatchQueue.main.async {
+                    if !r.stdout.isEmpty { self.append(String(r.stdout.suffix(2500))) }
+                    self.append(String(r.stderr.suffix(1200)), r.exitCode == 0 ? .good : .bad)
+                    if r.stderr.contains("incorrect password") || r.stderr.contains("no passwd") ||
+                        r.stderr.contains("Authentication failure") {
+                        self.append("password root errata — correggi il campo ROOT sopra", .bad)
+                    }
+                    self.running = false
+                }
+            }
             return
         }
         if BuiltinExec.names.contains(head) {

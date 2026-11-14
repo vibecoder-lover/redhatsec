@@ -15,17 +15,22 @@
 //     0x05 beacon[count][len][ssid]...  → armato (loop in background)
 //     0x06 pmkid[mac6][ch]              → EAPOL raw (max 128B) o "no eapol"
 //     0x07 stop                         → ferma beacon + pmkid
+//     0x08 join[len][ssid][plen][pass]  → IP locale (stringa) o "join failed"
+//     0x10 tcp_scan[ip4][count][port u16 xN] → [port u16][bannerLen][banner]*
+//     0x11 tcp_roundtrip[ip4][port u16][tcs][plen u16][payload] → bytes
+//     0x12 udp_roundtrip[ip4][port u16][tcs][plen u16][payload] → bytes
 //
 // Note: ogni operazione che cambia canale (deauth, beacon, pmkid) spezza
 // momentaneamente lo STA. Il risultato viene bufferizzato e consegnato
 // al primo client TCP che si riconnette.
 
 #include <ESP8266WiFi.h>
+#include <WiFiUdp.h>
 #include <user_interface.h>
 
 // ============ CONFIG ============
 const char *STA_SSID = "Hexxeted";      // hotspot personale iPhone
-const char *STA_PASS = "lwae9180";    // ← cambia
+const char *STA_PASS = "lwae9180";      // ← cambia
 const uint16_t TCP_PORT = 3333;
 
 // ============ STATO ============
@@ -342,7 +347,7 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       sendFrame(0x07, 0x00, (const uint8_t *)"stopped", 7);
       break;
 
-    case 0x08: {  // join(ssidLen,ssid,passLen,pass) — STA verso la rete target, AP resta attivo
+    case 0x08: {  // join(ssidLen,ssid,passLen,pass) — STA verso la rete target
       int p = 0;
       if (plen < 2) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
       int sl = pl[p++];
@@ -354,7 +359,7 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       char pass[65]; memcpy(pass, pl + p, pw); pass[pw] = 0;
       wifi_promiscuous_enable(0);
       WiFi.mode(WIFI_AP_STA);
-      WiFi.begin(ssid, pw[0] ? pass : NULL);
+      WiFi.begin(ssid, pass[0] ? pass : NULL);
       joinPending = true;
       joinStart = millis();
       Serial.printf("[join] %s\n", ssid);
@@ -463,7 +468,7 @@ void setup() {
   }
 
   wifi_set_promiscuous_rx_cb(snifferCb);
-  // promiscuo spento di default — si accende solo durante PMKID
+  // SDK3: filtro hardware rimosso, il filtro EAPOL è in snifferCb
 
   server.begin();
   server.setNoDelay(true);

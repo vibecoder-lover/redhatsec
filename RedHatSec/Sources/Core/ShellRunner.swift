@@ -70,17 +70,26 @@ final class ShellRunner {
     }
 
     func run(_ cmd: String, args: [String], timeout: TimeInterval = 15) -> ShellResult {
+        return runWithStdin(cmd, args: args, stdin: nil, timeout: timeout)
+    }
+
+    // run con stdin: serve per sudo -S (password su stdin)
+    func runWithStdin(_ cmd: String, args: [String], stdin: Data?, timeout: TimeInterval = 15) -> ShellResult {
         guard let bin = resolve(cmd) else {
             return ShellResult(exitCode: 127, stdout: "", stderr: "tool not found: \(cmd)")
         }
         let outPipe = Pipe()
         let errPipe = Pipe()
+        let inPipe = stdin != nil ? Pipe() : nil
         var attr: posix_spawnattr_t? = nil
         posix_spawnattr_init(&attr)
         var fileActions: posix_spawn_file_actions_t? = nil
         posix_spawn_file_actions_init(&fileActions)
         posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 1)
         posix_spawn_file_actions_adddup2(&fileActions, errPipe.fileHandleForWriting.fileDescriptor, 2)
+        if let inPipe {
+            posix_spawn_file_actions_adddup2(&fileActions, inPipe.fileHandleForReading.fileDescriptor, 0)
+        }
 
         var argv = buildArgv(bin: bin, args: args)
         var envp = buildEnvp()
@@ -99,6 +108,14 @@ final class ShellRunner {
         }
         try? outPipe.fileHandleForWriting.close()
         try? errPipe.fileHandleForWriting.close()
+        if let inPipe {
+            // scrivo stdin e chiudo: il child vede EOF subito dopo
+            if let data = stdin {
+                try? inPipe.fileHandleForWriting.write(contentsOf: data)
+            }
+            try? inPipe.fileHandleForWriting.close()
+            try? inPipe.fileHandleForReading.close()
+        }
 
         let grp = DispatchGroup()
         var outData = Data()
