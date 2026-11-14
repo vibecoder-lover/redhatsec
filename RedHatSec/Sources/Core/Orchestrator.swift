@@ -111,19 +111,35 @@ final class Orchestrator: ObservableObject {
             DispatchQueue.global().asyncAfter(deadline: .now() + 8) { c.resume() }
         }
 
-        // WiFi (private framework probe → fallback)
+        // Wi-Fi: se il bridge ESP8266 è online lo fa la radio del bridge, altrimenti sonde locali
         if phase == .scan {
-            CrashTracer.mark("pipeline: wifi probe")
-            log("Wi-Fi metadata probe (MobileWiFi)…", .exec)
-            let nets = await Task.detached { [wifi] in wifi.availableNetworks() }.value
-            if nets.isEmpty {
-                log("Wi-Fi: sonde fallite — diag: \(self.wifi.lastDiag) — vettori Wi-Fi restano PLAN", .warn)
+            CrashTracer.mark("pipeline: wifi")
+            if tcpBridge.connected {
+                log("Wi-Fi recon via bridge ESP8266…", .exec)
+                let nets = await tcpBridge.wifiScan(seconds: 8)
+                if nets.isEmpty {
+                    log("Wi-Fi bridge: nessuna rete vista dalla radio ESP8266", .warn)
+                } else {
+                    log("Wi-Fi bridge: \(nets.count) rete(e) via ESP8266", .good)
+                    for n in nets {
+                        var t = TargetDevice(name: n.ssid, proto: .wifi, rssi: n.rssi, mac: n.bssid, via: "ESP8266 bridge")
+                        t.extra["sec"] = n.sec
+                        t.extra["ch"] = String(n.ch)
+                        addTarget(t)
+                    }
+                }
             } else {
-                log("Wi-Fi: \(nets.count) rete(e) — \(self.wifi.lastDiag)", .good)
-                for n in nets {
-                    var t = TargetDevice(name: n.ssid, proto: .wifi, rssi: n.rssi, mac: n.bssid, via: "Wi-Fi")
-                    t.extra["sec"] = n.sec
-                    addTarget(t)
+                log("Wi-Fi metadata probe (MobileWiFi)…", .exec)
+                let nets = await Task.detached { [wifi] in wifi.availableNetworks() }.value
+                if nets.isEmpty {
+                    log("Wi-Fi: sonde locali fallite — connetti il bridge ESP8266 per il recon radio — diag: \(self.wifi.lastDiag)", .warn)
+                } else {
+                    log("Wi-Fi: \(nets.count) rete(e) — \(self.wifi.lastDiag)", .good)
+                    for n in nets {
+                        var t = TargetDevice(name: n.ssid, proto: .wifi, rssi: n.rssi, mac: n.bssid, via: "Wi-Fi")
+                        t.extra["sec"] = n.sec
+                        addTarget(t)
+                    }
                 }
             }
         }
