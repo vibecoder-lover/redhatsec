@@ -235,7 +235,7 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
         pmkidArmed = true;
         pmkidStart = millis();
         radioChannel(pl[6]);
-        wifi_set_promisc_rx_cb(snifferCb);
+        wifi_set_promiscuous_rx_cb(snifferCb);
         Serial.println("[pmkid] armed");
       }
       break;
