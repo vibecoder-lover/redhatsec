@@ -571,8 +571,11 @@ final class Orchestrator: ObservableObject {
         if tcpBridge.connected {
             return await tcpBridge.portScan(host: host, ports: [port]).contains { $0.0 == port }
         }
-        let s = await tcpRoundTrip(host: host, port: port, payload: Data(), timeout: 2)
-        return !s.isEmpty
+        // handshake-only: connect riuscito = porto aperto (i server che tacciono prima del primo byte non vengono più marcati chiusi)
+        let s = TCPSession()
+        let ok = await withCheckedContinuation { c in s.connect(host, port, timeout: 3) { c.resume(returning: $0) } }
+        s.close()
+        return ok
     }
 
     private func runOSProbe(_ id: String, _ e: PlanEntry) async -> String {
@@ -791,17 +794,26 @@ final class Orchestrator: ObservableObject {
         func patch(_ src: Data, _ range: Range<Int>, _ val: Data) -> Data {
             var d = src; d.replaceSubrange(range, with: val); return d
         }
-        _ = await rawRT(host, 445, neg)
-        guard let sr = await rawRT(host, 445, sess), sr.count >= 34, sr[4] == 0xff else {
+        func rt(_ s: TCPSession, _ payload: Data) async -> Data? {
+            s.send(payload)
+            return await withCheckedContinuation { c in s.readFrame { c.resume(returning: $0) } }
+        }
+        // UNA SOLA connessione per l'intera state machine (UID/TID vivono nel socket)
+        let s = TCPSession()
+        let up = await withCheckedContinuation { c in s.connect(host, 445) { c.resume(returning: $0) } }
+        guard up else { return "MS17-010: 445 non raggiungibile" }
+        defer { s.close() }
+        _ = await rt(s, neg)
+        guard let sr = await rt(s, sess), sr.count >= 34, sr[4] == 0xff else {
             return "MS17-010: session setup anon non conclusiva — server SMB1 filtrato o SMB2-only"
         }
         let treeP = patch(tree, 32..<34, sr.subdata(in: 32..<34)) // UID
-        guard let tr = await rawRT(host, 445, treeP), tr.count >= 30, tr[4] == 0xff else {
+        guard let tr = await rt(s, treeP), tr.count >= 30, tr[4] == 0xff else {
             return "MS17-010: tree connect IPC$ fallita — share restritte"
         }
         let transP = patch(patch(trans, 28..<30, tr.subdata(in: 28..<30)), // TID
                            32..<34, tr.subdata(in: 32..<34))               // UID
-        guard let fin = await rawRT(host, 445, transP), fin.count >= 13, fin[4] == 0xff else {
+        guard let fin = await rt(s, transP), fin.count >= 13, fin[4] == 0xff else {
             return "MS17-010: trans2 senza risposta — check non conclusivo"
         }
         let st = [UInt32(fin[9]), UInt32(fin[10]) << 8, UInt32(fin[11]) << 16, UInt32(fin[12]) << 24]
@@ -1158,6 +1170,88 @@ final class Orchestrator: ObservableObject {
                 c.resume(returning: $0)
             }
         }
+    }
+}
+
+// connessione TCP persistente con framing NBSS (per state machine SMB)
+final class TCPSession {
+    private var conn: NWConnection?
+    private var buf = Data()
+    private var frameHandler: ((Data?) -> Void)?
+    private var alive = false
+    private let q = DispatchQueue(label: "rhs.tcp.session")
+
+    func connect(_ host: String, _ port: UInt16, timeout: TimeInterval = 5, onReady: @escaping (Bool) -> Void) {
+        guard let p = NWEndpoint.Port(rawValue: port) else { onReady(false); return }
+        let c = NWConnection(host: NWEndpoint.Host(host), port: p, using: .tcp)
+        var decided = false
+        conn = c
+        let ready: (Bool) -> Void = { [weak self] ok in
+            guard let self, !decided else { return }
+            decided = true
+            if ok {
+                self.alive = true
+                self.pump(c)
+            }
+            onReady(ok)
+        }
+        c.stateUpdateHandler = { [weak self] st in
+            switch st {
+            case .ready: ready(true)
+            case .failed, .cancelled:
+                self?.alive = false
+                ready(false)
+            default: break
+            }
+        }
+        c.start(queue: q)
+        q.asyncAfter(deadline: .now() + timeout) { ready(false) }
+    }
+
+    func send(_ payload: Data, completion: ((Bool) -> Void)? = nil) {
+        q.async {
+            guard let c = self.conn, self.alive else { completion?(false); return }
+            c.send(content: payload, completion: .contentProcessed { e in completion?(e == nil) })
+        }
+    }
+
+    // attende la prossima frame NBSS completa dal buffer
+    func readFrame(timeout: TimeInterval = 4, onFrame: @escaping (Data?) -> Void) {
+        q.async {
+            guard self.alive else { onFrame(nil); return }
+            var fired = false
+            let fire: (Data?) -> Void = { f in
+                if !fired { fired = true; self.frameHandler = nil; onFrame(f) }
+            }
+            self.frameHandler = fire
+            self.q.asyncAfter(deadline: .now() + timeout) { fire(nil) }
+            self.flushFrame()
+        }
+    }
+
+    private func pump(_ c: NWConnection) {
+        guard alive else { return }
+        c.receive(minimumIncompleteLength: 1, maximumLength: 16384) { d, _, _, _ in
+            if let d = d, !d.isEmpty {
+                self.buf += d
+                self.flushFrame()
+            }
+            if self.alive { self.pump(c) }
+        }
+    }
+
+    private func flushFrame() {
+        guard buf.count >= 4 else { return }
+        let len = Int(buf[2]) << 8 | Int(buf[3])
+        guard buf.count >= 4 + len, buf[0] == 0x00 else { return }
+        let f = Data(buf.prefix(4 + len))
+        buf.removeFirst(4 + len)
+        frameHandler?(f)
+    }
+
+    func close() {
+        alive = false
+        conn?.cancel()
     }
 }
 
