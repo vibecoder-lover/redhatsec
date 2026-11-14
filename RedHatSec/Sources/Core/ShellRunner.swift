@@ -4,13 +4,13 @@ import Foundation
 // con le persona spawn attributes (override uid/gid 0) — richiede l'entitlement
 // com.apple.private.persona-mgmt. Ricetta da TSUtil.m di TrollStore.
 @_silgen_name("posix_spawnattr_set_persona_np")
-private func spawnattr_set_persona_np(_ attr: UnsafeMutablePointer<posix_spawnattr_t>, _ id: uid_t, _ flags: UInt32) -> Int32
+private func spawnattr_set_persona_np(_ attr: UnsafeMutablePointer<posix_spawnattr_t?>, _ id: uid_t, _ flags: UInt32) -> Int32
 
 @_silgen_name("posix_spawnattr_set_persona_uid_np")
-private func spawnattr_set_persona_uid(_ attr: UnsafeMutablePointer<posix_spawnattr_t>, _ uid: uid_t) -> Int32
+private func spawnattr_set_persona_uid(_ attr: UnsafeMutablePointer<posix_spawnattr_t?>, _ uid: uid_t) -> Int32
 
 @_silgen_name("posix_spawnattr_set_persona_gid_np")
-private func spawnattr_set_persona_gid(_ attr: UnsafeMutablePointer<posix_spawnattr_t>, _ gid: gid_t) -> Int32
+private func spawnattr_set_persona_gid(_ attr: UnsafeMutablePointer<posix_spawnattr_t?>, _ gid: gid_t) -> Int32
 
 private let POSIX_SPAWN_PERSONA_FLAG_OVERRIDE: UInt32 = 1
 
