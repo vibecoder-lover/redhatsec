@@ -83,8 +83,14 @@ jobs:
       - name: Embed RHSHelper
         run: |
           APP=$(find RedHatSec/build -type d -name '*.app' | head -1)
-          HELPER=$(find RedHatSec/build -type f -name RHSHelper | head -1)
-          if [ -z "$HELPER" ]; then echo "::error::RHSHelper non trovato in build products"; find RedHatSec/build -name '*RHSHelper*' || true; exit 1; fi
+          echo "APP=[$APP]"
+          echo "--- file con 'helper' nel nome ---"
+          find RedHatSec/build | grep -i helper || true
+          echo "--- Products dir ---"
+          ls -la RedHatSec/build/Build/Products/Release-iphoneos/ 2>/dev/null || true
+          ls -la RedHatSec/build/Release-iphoneos/ 2>/dev/null || true
+          HELPER=$(find RedHatSec/build -type f -name 'RHSHelper' | head -1)
+          if [ -z "$HELPER" ]; then echo "::error::RHSHelper non trovato in build products"; exit 1; fi
           ldid -S "$HELPER"
           cp "$HELPER" "$APP/RHSHelper"
           echo "helper embedded: $APP/RHSHelper"
