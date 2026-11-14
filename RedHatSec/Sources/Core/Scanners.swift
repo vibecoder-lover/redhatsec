@@ -337,69 +337,23 @@ final class WiFiScanner {
     }
 
     private func probeMobileWiFi() -> [WiFiNet]? {
+        CrashTracer.mark("mobilewifi start")
+        defer { CrashTracer.mark("mobilewifi done") }
         guard dlopen("/System/Library/PrivateFrameworks/MobileWiFi.framework/MobileWiFi", RTLD_NOW) != nil else {
             diag("dlopen MobileWiFi fallito")
             return nil
         }
-        return probeFrameworkIntrospection(prefixes: ["WiFi"], label: "MobileWiFi")
-    }
-
-    private func probeFrameworkIntrospection(prefixes: [String], label: String) -> [WiFiNet]? {
-        CrashTracer.mark("introspect \(label) start")
-        defer { CrashTracer.mark("introspect \(label) done") }
-        var count: UInt32 = 0
-        guard let list = objc_copyClassList(&count) else {
-            diag("\(label): objc_copyClassList nil")
-            return nil
-        }
-        var wifiClasses: [String] = []
-        for i in 0..<Int(count) {
-            let name = String(cString: class_getName(list[i]))
-            if prefixes.contains(where: name.hasPrefix) { wifiClasses.append(name) }
-        }
-        // NOTA: nessun free su list — l'SDK la marca autoreleasing (memoria gestita dal
-        // runtime): liberarla è invalid free → crash. Leak trascurabile a scan manuale.
-        diag("\(label) classi: \(wifiClasses.prefix(20).joined(separator: ", "))"
-             + (wifiClasses.count > 20 ? " +\(wifiClasses.count - 20)" : ""))
-        // sharedInstance SOLO su classi note — mai su nomi scoperti a runtime (assert interni)
-        let known: Set<String> = ["WiFiManager", "WiFiManagerClient", "WiFiClientManager",
-                                  "WiFiSystemClient", "WiFiController", "WiFiDevice"]
-        let candidates = wifiClasses.filter { known.contains($0) }
-        for cname in candidates {
-            CrashTracer.mark("introspect \(cname): sharedInstance")
+        // solo classi/selector noti con responds-check — NESSUN runtime-poking cieco
+        for cname in ["WiFiManager", "WiFiManagerClient", "WiFiClientManager"] {
+            CrashTracer.mark("mobilewifi try \(cname)")
             guard let cls = NSClassFromString(cname) as? NSObject.Type,
                   cls.responds(to: NSSelectorFromString("sharedInstance")) else { continue }
             guard let shared = cls.perform(NSSelectorFromString("sharedInstance"))?.takeUnretainedValue() as? NSObject else {
+                diag("\(cname): sharedInstance nil")
                 continue
             }
-            CrashTracer.mark("introspect \(cname): method list")
-            var mcount: UInt32 = 0
-            let klass = object_getClass(shared) ?? cls
-            guard let methods = class_copyMethodList(klass, &mcount) else { continue }
-            var selNames: [String] = []
-            for j in 0..<Int(mcount) {
-                let m = methods[j]
-                guard method_getNumberOfArguments(m) == 2 else { continue }
-                let rt = method_copyReturnType(m)
-                let isObj = rt[0] == UInt8(ascii: "@")
-                free(rt)
-                guard isObj else { continue }
-                let sn = String(cString: sel_getName(method_getName(m)))
-                let low = sn.lowercased()
-                if low.contains("network") || low.contains("scan") || low.contains("list") || low.contains("ssid") {
-                    selNames.append(sn)
-                }
-            }
-            free(methods)
-            diag("\(cname).sharedInstance metodi candidati: \(selNames.joined(separator: ", "))")
-            // WHITELIST: mai chiamare metodi privati sconosciuti (crash su stato interno nil).
-            // Il dump qui sopra serve a scoprire i NOMI reali sul device; i selector non
-            // in whitelist restano dati nel journal — li hardcodiamo al prossimo giro.
-            let whitelist: Set<String> = ["copyNetworkList", "networks", "allNetworks",
-                                          "scanResults", "copyScanResults", "knownNetworks",
-                                          "wifiNetworks", "networkList"]
-            for sn in selNames where whitelist.contains(sn) {
-                CrashTracer.mark("introspect call \(cname).\(sn)")
+            CrashTracer.mark("mobilewifi \(cname) ok → selector")
+            for sn in ["copyNetworkList", "networks", "allNetworks", "copyScanResults", "scanResults"] {
                 guard let r = shared.perform(NSSelectorFromString(sn))?.takeUnretainedValue() as? NSArray,
                       r.count > 0 else { continue }
                 diag("\(cname).\(sn) → \(r.count) elementi")
@@ -414,8 +368,9 @@ final class WiFiScanner {
                 }
                 if !out.isEmpty { return out }
             }
+            diag("\(cname): selector noti vuoti")
         }
-        diag("\(label): nessuna lista reti via introspezione")
+        diag("mobilewifi: classi/selector non presenti su questo iOS")
         return nil
     }
 
