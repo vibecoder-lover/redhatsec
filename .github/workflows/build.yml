@@ -45,7 +45,8 @@ jobs:
         run: |
           cd RedHatSec
           if xcodebuild -project RedHatSec.xcodeproj -target RHSHelper \
-            -configuration Release -sdk iphoneos -derivedDataPath build \
+            -configuration Release -sdk iphoneos \
+            SYMROOT=$(pwd)/build/Build/Products OBJROOT=$(pwd)/build/Intermediates.noindex \
             CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED="NO" CODE_SIGNING_ALLOWED="NO" \
             ARCHS=arm64 build > helper.log 2>&1; then
             echo "HELPER OK"
