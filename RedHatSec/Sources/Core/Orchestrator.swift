@@ -454,6 +454,17 @@ final class Orchestrator: ObservableObject {
         "ble_write": .exploitConfirmed,
         "ble_connectflood": .responseConfirmed,
         "ble_sweyntooth": .bannerOnly,
+        "ble_l2cap_probe": .responseConfirmed,
+        "os_android_adb": .responseConfirmed,
+        "os_android_fastpair": .bannerOnly,
+        "os_ios_lockdown": .bannerOnly,
+        "os_ios_continuity": .bannerOnly,
+        "os_win_smb": .responseConfirmed,
+        "os_win_rdp": .responseConfirmed,
+        "os_linux_ssh": .responseConfirmed,
+        "os_linux_cups": .responseConfirmed,
+        "os_mac_rmd": .bannerOnly,
+        "os_iot_tuya": .bannerOnly,
         "net_mqtt": .exploitConfirmed,
         "net_telnet": .exploitConfirmed,
         "net_snmp": .responseConfirmed,
@@ -524,6 +535,86 @@ final class Orchestrator: ObservableObject {
         let resp = await bridgeRT(host, 1900, Data(search.utf8), udp: true, timeout: 5)
         guard let resp, !resp.isEmpty else { return "UPnP via bridge: M-SEARCH senza risposta" }
         return "UPnP via bridge: \(String(decoding: resp, as: UTF8.self).prefix(500))"
+    }
+
+    // MARK: OS-wide probes (dalla radio bridge o dai socket app)
+
+    private func rawRT(_ host: String, _ port: UInt16, _ payload: Data, timeout: TimeInterval = 3) async -> Data? {
+        if tcpBridge.connected {
+            return await bridgeRT(host, port, payload, timeout: timeout)
+        }
+        let s = await tcpRoundTrip(host: host, port: Int(port), payload: payload, timeout: timeout)
+        return s.isEmpty ? nil : Data(s.utf8)
+    }
+
+    private func portOpen(_ host: String, _ port: UInt16) async -> Bool {
+        if tcpBridge.connected {
+            return await tcpBridge.portScan(host: host, ports: [port]).contains { $0.0 == port }
+        }
+        let s = await tcpRoundTrip(host: host, port: Int(port), payload: Data(), timeout: 2)
+        return !s.isEmpty
+    }
+
+    private func runOSProbe(_ id: String, _ e: PlanEntry) async -> String {
+        guard let t = e.target, let host = t.extra["host"] else { return "no host" }
+        switch id {
+        case "os_android_adb":
+            let d = await rawRT(host, 5555, Data("000Chost:version".utf8))
+            guard let d, !d.isEmpty else { return "ADB 5555: nessuna risposta — adb TCP chiuso" }
+            let s = String(decoding: d, as: UTF8.self)
+            return s.contains("OKAY")
+                ? "ADB APERTO su \(host):5555 → \(s.prefix(120)) — adb shell disponibile (RCE Android; root se ro.debuggable)"
+                : "ADB 5555 risponde ma handshake non standard: \(s.prefix(120))"
+        case "os_ios_lockdown":
+            return await portOpen(host, 62078)
+                ? "lockdownd 62078 APERTO su \(host) — Wi-Fi sync/companion raggiungibile"
+                : "62078 chiuso"
+        case "os_win_smb":
+            let blob = Data([0x00,0x00,0x00,0x2f,0xff,0x53,0x4d,0x42,0x72,0x00,0x00,0x00,0x00,0x18,0x07,0xc8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x0c,0x00,0x02,0x4e,0x54,0x20,0x4c,0x4d,0x20,0x30,0x2e,0x31,0x32,0x00])
+            let d = await rawRT(host, 445, blob)
+            guard let d, !d.isEmpty else { return "SMB 445: nessuna risposta" }
+            let ntlm = String(decoding: d, as: UTF8.self).contains("NTLMSSP")
+            let smb1 = d.contains(0xff) && d.contains(0x53) && d.contains(0x4d) && d.contains(0x42)
+            return smb1 || ntlm
+                ? "SMB APERTO su \(host):445 — negotiate resp (\(ntlm ? "NTLMSSP / SMB2+" : "SMB1 dialect")) → dialect/CVE mapping (EternalBlue se SMB1)"
+                : "SMB 445 risposta non-SMB: \(d.map { String(format: "%02x", $0) }.joined().prefix(80))"
+        case "os_win_rdp":
+            let cr = Data([0x03,0x00,0x00,0x13,0x0e,0xe0,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x08,0x00,0x03,0x00,0x00,0x00])
+            let d = await rawRT(host, 3389, cr)
+            guard let d, !d.isEmpty, d[0] == 0x03 else {
+                return d != nil && !(d?.isEmpty ?? true)
+                    ? "RDP 3389 risponde non-TPKT: \(String(decoding: d!.prefix(80), as: UTF8.self))"
+                    : "RDP 3389: nessuna risposta"
+            }
+            let protoFlag = d.count >= 11 ? d[9] : 0
+            return "RDP APERTO su \(host):3389 — negotiate resp (proto \(String(format: "0x%02x", protoFlag)); 0x02=TLS/NLA, 0x01=standard → precondizioni BlueKeep)"
+        case "os_linux_ssh":
+            let d = await rawRT(host, 22, Data())
+            guard let d, !d.isEmpty else { return "SSH 22: nessun banner" }
+            let s = String(decoding: d.prefix(120), as: UTF8.self)
+            return s.contains("SSH-") ? "SSH banner: \(s.prefix(80)) → mapping CVE OpenSSH" : "22 aperto, banner: \(s.prefix(80))"
+        case "os_linux_cups":
+            let q = Data("GET /printers HTTP/1.1\r\nHost: \(host):631\r\n\r\n".utf8)
+            let d = await rawRT(host, 631, q)
+            guard let d, !d.isEmpty else { return "CUPS 631: nessuna risposta" }
+            let s = String(decoding: d.prefix(200), as: UTF8.self)
+            return s.contains("HTTP")
+                ? "CUPS/IPP APERTO → \(s.prefix(120)) (abuso print-jobs; CVE CUPS 2024)"
+                : "631 risposta: \(s.prefix(120))"
+        case "os_mac_rmd":
+            return await portOpen(host, 3283)
+                ? "ARD 3283 APERTO su \(host) — Remote Management raggiungibile (chain VNC/screen sharing)"
+                : "3283 chiuso"
+        case "os_iot_tuya":
+            var states: [String] = []
+            for p: UInt16 in [6668, 8886] {
+                states.append("\(p): \(await portOpen(host, p) ? "APERTO" : "chiuso")")
+            }
+            let any = states.contains { $0.contains("APERTO") }
+            return "Tuya probe \(host) — \(states.joined(separator: " · "))\(any ? " → fingerprint Tuya: abuso cloud/broadcast key" : "")"
+        default:
+            return "probe non implementata"
+        }
     }
 
     // OPSEC: wipe totale di stato, journal e dump — gesture di panico
@@ -676,6 +767,41 @@ final class Orchestrator: ObservableObject {
             guard let t = e.target else { return "no target" }
             let n = await ble.flood(t, attempts: 12)
             return "flood: \(n) connect cycle completi — target responsivo = \(n < 6 ? "possibile DoS parziale" : "non impattato")"
+        case "ble_sweyntooth":
+            guard let t = e.target else { return "no target" }
+            let vendor = (t.vendor ?? "sconosciuto").lowercased()
+            let socVuln = ["nordic", "ti ", "cc26", "stm32", "stmicro", "nxp", "cypress", "infineon",
+                           "silabs", "silicon labs", "telink", "microchip", "dialog", "marvell", "anhui"]
+                .contains { vendor.contains($0) }
+            let n = await ble.flood(t, attempts: 60)
+            var out = "vendor=\(t.vendor ?? "?") vulnerableSoC=\(socVuln) — \(n) connect/disconnect cycles (LL termination stress)"
+            if socVuln {
+                out += "\nSoC in lista SweynTooth: se il device è scomparso o ha riavviato → CRASH CONFERMATO (CVE-2020-10060/61 family)"
+            } else {
+                out += "\nvendor non in lista — proof resta banner: monitora se il device sparisce"
+            }
+            return out
+        case "ble_l2cap_probe":
+            guard let t = e.target else { return "no target" }
+            let psms: [UInt16] = [0x25, 0x41, 0x66]
+            var out: [String] = []
+            for psm in psms {
+                let r = await ble.l2capProbe(t, psm: psm)
+                out.append("PSM 0x\(String(psm, radix: 16)): \(r)")
+            }
+            return out.joined(separator: "\n")
+        case "os_android_adb", "os_ios_lockdown", "os_win_smb", "os_win_rdp",
+             "os_linux_ssh", "os_linux_cups", "os_mac_rmd", "os_iot_tuya":
+            return await runOSProbe(id, e)
+        case "os_android_fastpair":
+            guard let t = e.target else { return "no target" }
+            let svc = (t.services ?? []).contains { $0.contains("Fast Pair") }
+            return "Fast Pair: \(svc ? "FE9F in ADV → device Android (model ID → identità device)" : "nessun adv Fast Pair — ri-scan") · companyID=\(t.extra["companyID"] ?? "?")"
+        case "os_ios_continuity":
+            guard let t = e.target else { return "no target" }
+            return (t.vendor ?? "").contains("Apple")
+                ? "Continuity adv Apple (0x004C) visto — device Apple vicino: fingerprint handoff/hotspot nel detail"
+                : "nessun adv Apple visto — ri-scan"
         case "net_mqtt":
             guard let t = e.target, let host = t.extra["host"] else { return "no host" }
             if tcpBridge.connected { return await bridgeMQTT(host) }

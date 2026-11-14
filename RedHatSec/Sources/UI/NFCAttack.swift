@@ -5,6 +5,8 @@ struct NFCAttackView: View {
     @State private var tag: NFCTagFingerprint?
     @State private var armed: NFCTactic?
     @State private var phishURL = "https://example.com/catch?u="
+    @State private var autoexecKind = "aar"
+    @State private var autoexecValue = ""
     @State private var log: [LogEntry] = []
     @State private var busy = false
 
@@ -22,6 +24,9 @@ struct NFCAttackView: View {
         let inject = NFCTactic(id: "ndef_inject", name: "NDEF Injection",
                                brief: "Riscrive NDEF con URL tracker/phish — auto-open su Android.",
                                sev: .high, needsConfig: true, executable: t.ndefWritable)
+        let autoexec = NFCTactic(id: "ndef_autoexec", name: "NDEF Auto-Exec Launcher",
+                                 brief: "AAR Android (lancia app al tocco) · tel: · smsto: · WIFI: join — si attiva alla lettura del tag.",
+                                 sev: .high, needsConfig: true, executable: t.ndefWritable)
         let clone = NFCTactic(id: "clone", name: "Clone su Magic Card",
                               brief: "Dump completo + replay su tag bersaglio (da Targets › NFC DUMPS).",
                               sev: .high, needsConfig: false, executable: true)
@@ -35,14 +40,14 @@ struct NFCAttackView: View {
                 NFCTactic(id: "clone_plan", name: "Clone (PLAN — hardware)",
                           brief: "Dump+clone Classic richiedono Proxmark/PN532 via bridge BLE.",
                           sev: .info, needsConfig: false, executable: false),
-                inject,
+                inject, autoexec,
             ]
         case "NTAG/Ultralight":
             return [
                 NFCTactic(id: "ntag_pwd", name: "PWD Dictionary Probe (PoC)",
                           brief: "PWD di fabbrica NTAG21x — comando 0x1B ISO14443-A da verificare su tag fisico.",
                           sev: .high, needsConfig: false, executable: true),
-                inject, clone,
+                inject, autoexec, clone,
             ]
         case "DESFire":
             return [
@@ -52,9 +57,10 @@ struct NFCAttackView: View {
                 NFCTactic(id: "ndef_inject", name: "NDEF Injection",
                           brief: "DESFire con NDEF app configurato — tentativo write.",
                           sev: .medium, needsConfig: true, executable: t.ndefWritable),
+                autoexec,
             ]
         default:
-            return [inject, clone]
+            return [inject, autoexec, clone]
         }
     }
 
@@ -139,12 +145,30 @@ struct NFCAttackView: View {
     private var armBar: some View {
         VStack(alignment: .leading, spacing: 8) {
             if armed?.needsConfig == true {
-                Text("PAYLOAD URL").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
-                TextField("https://...", text: $phishURL)
-                    .textFieldStyle(.plain).font(.system(size: 13, design: .monospaced))
-                    .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
-                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+                if armed?.id == "ndef_autoexec" {
+                    Text("TIPO AUTO-EXEC").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
+                    Picker("", selection: $autoexecKind) {
+                        Text("AAR — lancia app Android").tag("aar")
+                        Text("tel: — chiamata").tag("tel")
+                        Text("smsto: — SMS").tag("sms")
+                        Text("WIFI: — join Wi-Fi").tag("wifi")
+                        Text("URI raw").tag("uri")
+                    }
+                    .pickerStyle(.menu)
+                    .tint(.redHat)
+                    TextField(autoexecPlaceholder, text: $autoexecValue)
+                        .textFieldStyle(.plain).font(.system(size: 13, design: .monospaced))
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
+                        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+                } else {
+                    Text("PAYLOAD URL").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
+                    TextField("https://...", text: $phishURL)
+                        .textFieldStyle(.plain).font(.system(size: 13, design: .monospaced))
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
+                        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+                }
             }
             Button {
                 Haptics.heavy()
@@ -161,6 +185,16 @@ struct NFCAttackView: View {
             .disabled(busy)
         }
         .padding(14).card()
+    }
+
+    private var autoexecPlaceholder: String {
+        switch autoexecKind {
+        case "aar": return "com.example.app"
+        case "tel": return "+391234567890"
+        case "sms": return "numero,messaggio"
+        case "wifi": return "WIFI:T:WPA;S:SSID;P:password;;"
+        default: return "https://..."
+        }
     }
 
     private func logColor(_ lvl: LogEntry.Level) -> Color {
@@ -220,7 +254,10 @@ struct NFCAttackView: View {
             busy = false
             return
         }
-        let lines = await o.nfc.attack(tac.id, config: ["url": phishURL])
+        let cfg: [String: String] = tac.id == "ndef_autoexec"
+            ? ["kind": autoexecKind, "value": autoexecValue]
+            : ["url": phishURL]
+        let lines = await o.nfc.attack(tac.id, config: cfg)
         await MainActor.run {
             for l in lines {
                 self.log.append(LogEntry(level: l.contains("✓") || l.contains("FOUND") ? .good : (l.contains("FAIL") ? .bad : .info), text: l))

