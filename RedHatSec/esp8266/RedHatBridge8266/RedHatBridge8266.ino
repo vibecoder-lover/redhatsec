@@ -43,6 +43,8 @@ bool txPending = false;
 
 bool scanPending = false;
 uint32_t scanStart = 0;
+bool joinPending = false;
+uint32_t joinStart = 0;
 
 bool beaconActive = false;
 uint8_t beaconSsids[16][33];
@@ -340,6 +342,98 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       sendFrame(0x07, 0x00, (const uint8_t *)"stopped", 7);
       break;
 
+    case 0x08: {  // join(ssidLen,ssid,passLen,pass) — STA verso la rete target, AP resta attivo
+      int p = 0;
+      if (plen < 2) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
+      int sl = pl[p++];
+      if (p + sl > plen) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
+      char ssid[33]; memcpy(ssid, pl + p, sl); ssid[sl] = 0; p += sl;
+      if (p >= plen) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
+      int pw = pl[p++];
+      if (p + pw > plen) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
+      char pass[65]; memcpy(pass, pl + p, pw); pass[pw] = 0;
+      wifi_promiscuous_enable(0);
+      WiFi.mode(WIFI_AP_STA);
+      WiFi.begin(ssid, pw[0] ? pass : NULL);
+      joinPending = true;
+      joinStart = millis();
+      Serial.printf("[join] %s\n", ssid);
+      break;
+    }
+
+    case 0x10: {  // tcp_scan(ip4, count, port u16 LE xN) → [port u16 LE][bannerLen][banner]...
+      IPAddress ip(pl[0], pl[1], pl[2], pl[3]);
+      int cnt = pl[4];
+      if (cnt > 12) cnt = 12;
+      uint8_t out[160];
+      int oi = 0;
+      uint32_t t0 = millis();
+      for (int k = 0; k < cnt && millis() - t0 < 12000 && oi < 150; k++) {
+        uint16_t port = pl[5 + k * 2] | (pl[6 + k * 2] << 8);
+        WiFiClient c;
+        if (c.connect(ip, port)) {
+          out[oi++] = port & 0xFF;
+          out[oi++] = port >> 8;
+          int blIdx = oi++;
+          delay(250);
+          int bl = 0;
+          while (c.available() && bl < 40) { out[oi++] = c.read(); bl++; }
+          out[blIdx] = (uint8_t)bl;
+          c.stop();
+        }
+      }
+      sendFrame(0x10, 0x00, out, oi);
+      break;
+    }
+
+    case 0x11: {  // tcp_roundtrip(ip4, port u16, timeout_cs, plen u16, payload) → bytes
+      IPAddress ip(pl[0], pl[1], pl[2], pl[3]);
+      uint16_t port = pl[4] | (pl[5] << 8);
+      int tcs = pl[6];
+      int plen = pl[7] | (pl[8] << 8);
+      WiFiClient c;
+      if (!c.connect(ip, port)) {
+        sendFrame(0x11, 0x01, (const uint8_t *)"conn fail", 9);
+        break;
+      }
+      c.write(pl + 9, plen);
+      uint8_t resp[512];
+      int rl = 0;
+      uint32_t t0 = millis();
+      while (millis() - t0 < (uint32_t)tcs * 100 && rl < 512) {
+        while (c.available() && rl < 512) resp[rl++] = c.read();
+        delay(15);
+      }
+      c.stop();
+      sendFrame(0x11, 0x00, resp, rl);
+      break;
+    }
+
+    case 0x12: {  // udp_roundtrip(ip4, port u16, timeout_cs, plen u16, payload) → bytes
+      IPAddress ip(pl[0], pl[1], pl[2], pl[3]);
+      uint16_t port = pl[4] | (pl[5] << 8);
+      int tcs = pl[6];
+      int plen = pl[7] | (pl[8] << 8);
+      WiFiUDP u;
+      u.beginPacket(ip, port);
+      u.write(pl + 9, plen);
+      u.endPacket();
+      uint8_t resp[512];
+      int rl = 0;
+      uint32_t t0 = millis();
+      while (millis() - t0 < (uint32_t)tcs * 100) {
+        int ps = u.parsePacket();
+        if (ps > 0) {
+          while (u.available() && rl < 512) resp[rl++] = u.read();
+          break;
+        }
+        delay(20);
+      }
+      u.stop();
+      sendFrame(0x12, rl > 0 ? 0x00 : 0x01, resp, rl);
+      break;
+    }
+
     default:
       sendFrame(cmd, 0x03, (const uint8_t *)"unknown cmd", 11);
   }
@@ -404,6 +498,19 @@ void loop() {
 
   // scan async
   pollScan();
+
+  // join rete target (STA) — risposta asincrona
+  if (joinPending) {
+    if (WiFi.status() == WL_CONNECTED) {
+      joinPending = false;
+      apChannel = WiFi.channel();
+      String ips = WiFi.localIP().toString();
+      sendFrame(0x08, 0x00, (const uint8_t *)ips.c_str(), ips.length());
+    } else if (millis() - joinStart > 15000) {
+      joinPending = false;
+      sendFrame(0x08, 0x02, (const uint8_t *)"join failed", 11);
+    }
+  }
 
   // beacon spam
   if (beaconActive) beaconLoop();

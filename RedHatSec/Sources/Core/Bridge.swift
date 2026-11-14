@@ -653,4 +653,64 @@ final class TCPBridge: NSObject, ObservableObject {
     func stopAll() {
         send(0x07, payload: [])
     }
+
+    // MARK: ops di rete via radio ESP (il telefono orchestra, l'ESP esegue sulla rete target)
+
+    // roundtrip generico: copre MQTT/RTSP/telnet (TCP) e SNMP/CoAP/UPnP (UDP)
+    func roundTrip(host: String, port: Int, payload: [UInt8], udp: Bool = false, timeout: TimeInterval = 4) async -> Data? {
+        guard connected else { return nil }
+        var ip = host.split(separator: ".").compactMap { UInt8($0) }
+        guard ip.count == 4 else { log("roundTrip: serve un IP numerico, non \(host)"); return nil }
+        ip += [UInt8(port & 0xFF), UInt8((port >> 8) & 0xFF)]
+        ip.append(UInt8(min(25, Int(timeout * 10))))
+        ip += [UInt8(payload.count & 0xFF), UInt8((payload.count >> 8) & 0xFF)]
+        ip += payload
+        let r = await sendAwait(udp ? 0x12 : 0x11, payload: ip, timeout: timeout + 14)
+        guard r?.0 == 0 else {
+            if let r { log("roundtrip \(host):\(port) err \(r.0)") }
+            return nil
+        }
+        return r?.1
+    }
+
+    // port scan via bridge: [port u16 LE][bannerLen][banner]...
+    func portScan(host: String, ports: [UInt16]) async -> [(UInt16, String)] {
+        guard connected else { return [] }
+        var ip = host.split(separator: ".").compactMap { UInt8($0) }
+        guard ip.count == 4 else { return [] }
+        var p = ports.prefix(12).map { [UInt8($0 & 0xFF), UInt8(($0 >> 8) & 0xFF)] }.flatMap { $0 }
+        ip.append(UInt8(ports.prefix(12).count))
+        ip += p
+        p.removeAll()
+        let r = await sendAwait(0x10, payload: ip, timeout: 26)
+        guard let r, r.0 == 0 else { return [] }
+        var out: [(UInt16, String)] = []
+        let d = r.1
+        var i = 0
+        while i + 3 <= d.count {
+            let port = UInt16(d[i]) | (UInt16(d[i + 1]) << 8)
+            let bl = Int(d[i + 2])
+            i += 3
+            guard i + bl <= d.count else { break }
+            let banner = String(decoding: d[i..<(i + bl)], as: UTF8.self)
+            i += bl
+            out.append((port, banner))
+        }
+        log("port scan \(host): \(out.count) porte aperte")
+        return out
+    }
+
+    // STA dell'ESP verso la RETE TARGET (l'AP del bridge resta attivo)
+    func joinTarget(_ ssid: String, _ pass: String) async -> Bool {
+        guard connected else { return false }
+        var pl: [UInt8] = [UInt8(min(32, ssid.utf8.count))] + Array(ssid.utf8.prefix(32))
+        pl += [UInt8(min(64, pass.utf8.count))] + Array(pass.utf8.prefix(64))
+        let r = await sendAwait(0x08, payload: pl, timeout: 22)
+        if let r, r.0 == 0 {
+            log("join rete target OK — IP ESP: \(String(decoding: r.1, as: UTF8.self))")
+            return true
+        }
+        log("join rete target fallita")
+        return false
+    }
 }

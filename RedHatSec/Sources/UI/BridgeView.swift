@@ -11,12 +11,51 @@ struct BridgeView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             tcpSection
+            joinSection
             actionsSection
             netsSection
             rawSection
             logSection
         }
         .onAppear { tcp.startAutoConnect() }
+    }
+
+    @State private var targetSSID = ""
+    @State private var targetPass = ""
+    @State private var joining = false
+
+    private var joinSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("RETE TARGET — la radio dell'ESP attacca qui").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
+            TextField("SSID rete target", text: $targetSSID)
+                .textFieldStyle(.plain).font(.system(size: 12, design: .monospaced))
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+            TextField("password (opzionale per OPEN)", text: $targetPass)
+                .textFieldStyle(.plain).font(.system(size: 12, design: .monospaced))
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+            Button {
+                Haptics.heavy(); joining = true
+                Task {
+                    _ = await tcp.joinTarget(targetSSID, targetPass)
+                    joining = false
+                }
+            } label: {
+                Label(joining ? "JOIN…" : "JOIN RETE TARGET", systemImage: "arrow.turn.right.down")
+                    .frame(maxWidth: .infinity).padding(.vertical, 11)
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+            }
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color.info.opacity(0.3)))
+            .foregroundColor(.info)
+            .buttonStyle(ScaleButton())
+            .disabled(joining || !tcp.connected || targetSSID.isEmpty)
+            Text("AP+STA: il bridge resta connesso all'app e la STA entra nella rete target — scan/port/MQTT/SNMP/telnet girano dalla radio dell'ESP.")
+                .font(.caption2).foregroundColor(.dim)
+        }
+        .padding(14).card()
     }
 
     private var tcpSection: some View {
