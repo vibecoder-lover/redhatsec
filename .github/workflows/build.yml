@@ -64,6 +64,15 @@ jobs:
             exit 1
           fi
 
+      - name: Embed RHSHelper
+        run: |
+          APP=$(find RedHatSec/build -type d -name '*.app' | head -1)
+          HELPER=$(find RedHatSec/build -type f -name RHSHelper | head -1)
+          if [ -z "$HELPER" ]; then echo "::error::RHSHelper non trovato in build products"; find RedHatSec/build -name '*RHSHelper*' || true; exit 1; fi
+          ldid -S "$HELPER"
+          cp "$HELPER" "$APP/RHSHelper"
+          echo "helper embedded: $APP/RHSHelper"
+
       - name: Package .app
         run: |
           APP=$(find RedHatSec/build -maxdepth 5 -type d -name '*.app' | head -1)

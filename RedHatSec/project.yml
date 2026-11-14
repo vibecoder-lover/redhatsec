@@ -47,3 +47,24 @@ targets:
         ARCHS: arm64
         GCC_OPTIMIZATION_LEVEL: "3"
         SWIFT_OPTIMIZATION_LEVEL: "-O"
+
+  RHSHelper:
+    type: tool
+    platform: iOS
+    sources:
+      - Helper
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGN_IDENTITY: ""
+        ENABLE_BITCODE: "NO"
+        ARCHS: arm64
+        IPHONEOS_DEPLOYMENT_TARGET: "16.1"
+        GCC_OPTIMIZATION_LEVEL: "3"
+
+schemes:
+  RedHatSec:
+    build:
+      targets:
+        RedHatSec: release
+        RHSHelper: release

@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 // iOS 15+: l'exec diretto di binari setuid è negato dall'AMFI. Il root si ottiene
 // con le persona spawn attributes (override uid/gid 0) — richiede l'entitlement
@@ -92,6 +93,12 @@ final class ShellRunner {
         guard let bin = resolve(cmd) else {
             return ShellResult(exitCode: 127, stdout: "", stderr: "tool not found: \(cmd)")
         }
+        return runPath(bin, args: args, stdin: stdin, asRoot: asRoot, timeout: timeout)
+    }
+
+    // spawn per path assoluto — serve per l'helper nel bundle (non è nel PATH)
+    func runPath(_ path: String, args: [String], stdin: Data?, asRoot: Bool = false, timeout: TimeInterval = 15) -> ShellResult {
+        let bin = path
         let outPipe = Pipe()
         let errPipe = Pipe()
         let inPipe = stdin != nil ? Pipe() : nil
@@ -180,7 +187,36 @@ final class ShellRunner {
             }
             out.append("\(path)\(root ? " +persona" : "") → \(spawnProbe(path, root: root, args: args))")
         }
+
+        // entitlements come li vede AMFI (dal code signing del binario in esecuzione)
+        out.append("— entitlements embedded —")
+        let keys = Self.ownEntitlementKeys()
+        out.append(keys.joined(separator: ", "))
+
+        // helper nel bundle: spawn in-container sempre permesso anche sandboxed
+        let helper = Bundle.main.bundlePath + "/RHSHelper"
+        if fm.fileExists(atPath: helper) {
+            out.append("\(helper) +persona → \(spawnProbe(helper, root: true, args: ["id -u"]))")
+        } else {
+            out.append("RHSHelper — assente nel bundle")
+        }
         return out
+    }
+
+    static func ownEntitlementKeys() -> [String] {
+        var code: SecCode? = nil
+        guard SecCodeCopySelf(kSecCSDefaultFlags, &code) == errSecSuccess, let code else {
+            return ["SecCodeCopySelf fallita"]
+        }
+        var info: CFDictionary? = nil
+        guard SecCodeCopySigningInformation(code, kSecCSRequirementInformation, &info) == errSecSuccess,
+              let info else {
+            return ["SecCodeCopySigningInformation fallita"]
+        }
+        guard let ent = (info as NSDictionary)[kSecCodeInfoEntitlementsDict] as? [String: Any] else {
+            return ["nessun entitlement nel codice"]
+        }
+        return ent.keys.sorted()
     }
 
     private func spawnProbe(_ path: String, root: Bool, args: [String]) -> String {

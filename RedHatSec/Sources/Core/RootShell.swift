@@ -17,9 +17,23 @@ final class RootShell: ObservableObject {
 
     func runSync(_ cmd: String, timeout: TimeInterval = 180) -> ShellResult {
         let wrapped = "export DEBIAN_FRONTEND=noninteractive; \(cmd)"
-        let r = ShellRunner.shared.runWithStdin("sh", args: ["-c", wrapped], stdin: nil, asRoot: true, timeout: timeout)
-        lastRootOK = r.exitCode == 0
-        return r
+        // A) persona spawn diretto di sh del bootstrap (uid 0 override)
+        let a = ShellRunner.shared.runWithStdin("sh", args: ["-c", wrapped], stdin: nil, asRoot: true, timeout: timeout)
+        guard a.stderr.contains("spawn failed") else {
+            lastRootOK = a.exitCode == 0
+            return a
+        }
+        // B) helper nel bundle — lo spawn in-container è sempre permesso; l'helper
+        // nasce root (persona) e fa lui l'exec di sh, con diagnostica EXECFAIL
+        let helper = Bundle.main.bundlePath + "/RHSHelper"
+        guard FileManager.default.fileExists(atPath: helper) else {
+            var r = a
+            r.stderr += "\n[RHSHelper] assente nel bundle"
+            return r
+        }
+        let b = ShellRunner.shared.runPath(helper, args: [wrapped], stdin: nil, asRoot: true, timeout: timeout)
+        lastRootOK = b.exitCode == 0
+        return b
     }
 
     func run(_ cmd: String, timeout: TimeInterval = 180) async -> ShellResult {
