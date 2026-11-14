@@ -41,15 +41,23 @@ final class TerminalModel: ObservableObject {
         running = true
         Haptics.tap()
         append("$ \(cmd)", .exec)
-        let args = Array(parts.dropFirst())
-        ShellRunner.shared.stream(head, args: args, line: { l in
-            DispatchQueue.main.async { self.append(l) }
-        }, onExit: { code in
+        // tutto via rootd: launchd (root) spawna sh per noi — lo spawn diretto
+        // dall'app è negato dall'AMFI (SecCodeCopySelf rc=-67065 = unsigned)
+        DispatchQueue.global(qos: .utility).async {
+            let r = RootShell.shared.runSync(cmd, timeout: 300)
             DispatchQueue.main.async {
-                self.append("exit \(code)", .warn)
+                for l in r.stdout.split(separator: "\n", omittingEmptySubsequences: false).prefix(400) {
+                    self.append(String(l))
+                }
+                if !r.stderr.isEmpty {
+                    for l in r.stderr.split(separator: "\n", omittingEmptySubsequences: false).prefix(120) {
+                        self.append(String(l), .warn)
+                    }
+                }
+                self.append("exit \(r.exitCode)", r.exitCode == 0 ? .good : .warn)
                 self.running = false
             }
-        })
+        }
     }
 }
 
