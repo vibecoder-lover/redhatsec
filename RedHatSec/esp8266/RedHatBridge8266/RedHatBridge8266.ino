@@ -50,13 +50,14 @@ uint8_t crc8(const uint8_t *d, int n) {
 
 // ===== TX verso l'app (chunked notify a 20B, MTU-safe anche su TCP) =====
 void sendFrame(uint8_t cmdEcho, uint8_t status, const uint8_t *payload, int len) {
-  uint8_t f[512];
+  uint8_t f[1024];
   int i = 0;
   f[i++] = 0x5A;
   f[i++] = len & 0xFF;
   f[i++] = (len >> 8) & 0xFF;
   f[i++] = cmdEcho;
   f[i++] = status;
+  if (len > 1000) len = 1000;
   if (len > 0) { memcpy(f + i, payload, len); i += len; }
   f[i++] = crc8(f + 1, 4 + len);
   if (client && client.connected()) {
@@ -178,7 +179,9 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
     case 0x01:  // ping
       sendFrame(0x01, 0x00, (const uint8_t *)"RHS-8266", 8);
       break;
-    case 0x02: {  // scan
+    case 0x02: {  // scan — la scan SDK vuole la promiscua OFF
+      wifi_promiscuous_enable(0);
+      WiFi.scanDelete();
       int n = WiFi.scanNetworks(false, true);
       uint8_t payload[900];
       int i = 0;
@@ -198,6 +201,7 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       }
       WiFi.scanDelete();
       sendFrame(0x02, 0x00, payload, i);
+      wifi_promiscuous_enable(1);
       break;
     }
     case 0x04:  // deauth(mac6, ch, count)
