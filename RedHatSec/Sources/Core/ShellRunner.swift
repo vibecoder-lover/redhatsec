@@ -246,18 +246,26 @@ final class ShellRunner {
             off += cmdsize
         }
         guard sigOff > 0 else { return "nessuna LC_CODE_SIGNATURE" }
-        guard u32(data, sigOff) == 0xFADE0B01 else { return "superblob magic err" }
-        let count = u32(data, sigOff + 8)
+        // i blob CodeSigning sono big-endian (Mach-O LE, blob BE)
+        func u32be(_ d: Data, _ o: UInt32) -> UInt32 {
+            let v = u32(d, o)
+            return (v << 24) | ((v & 0xFF00) << 8) | ((v >> 8) & 0xFF00) | (v >> 24)
+        }
+        let sbMagic = u32be(data, sigOff)
+        guard sbMagic == 0xFADE0B01 else {
+            return "superblob magic err: 0x\(String(u32be(data, sigOff), radix: 16))"
+        }
+        let count = u32be(data, sigOff + 8)
         var entsXML = ""
         var idx = sigOff + 12
         for _ in 0..<count {
             guard Int(idx) + 8 <= data.count else { break }
-            let type = u32(data, idx)
-            let o = u32(data, idx + 4)
+            let type = u32be(data, idx)
+            let o = u32be(data, idx + 4)
             if type == 0x10007 { // CSSLOT_ENTITLEMENTS
                 let blobOff = sigOff + o
-                guard u32(data, blobOff) == 0xFADE7171 else { return "ent blob magic err" }
-                let bLen = Int(u32(data, blobOff + 4))
+                guard u32be(data, blobOff) == 0xFADE7171 else { return "ent blob magic err" }
+                let bLen = Int(u32be(data, blobOff + 4))
                 if bLen > 8, Int(blobOff) + bLen <= data.count {
                     entsXML = String(data: data[(Int(blobOff) + 8)..<(Int(blobOff) + bLen)], encoding: .utf8) ?? ""
                 }
