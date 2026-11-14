@@ -161,7 +161,7 @@ struct TerminalView: View {
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color(hex: 0x070709)))
                     .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
-                Pill(text: RootShell.shared.available ? "sudo ✓" : "sudo ✗", color: RootShell.shared.available ? .ok : .bad)
+                Pill(text: RootShell.shared.available ? "root ✓" : "root ✗", color: RootShell.shared.available ? .ok : .bad)
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 6)

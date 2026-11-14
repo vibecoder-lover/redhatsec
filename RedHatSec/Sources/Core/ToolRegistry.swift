@@ -12,13 +12,14 @@ func proc_pidpath_c(_ pid: pid_t, _ buf: UnsafeMutablePointer<CChar>, _ size: UI
 
 enum BuiltinExec {
     static let names: Set<String> = ["ls", "cat", "echo", "whoami", "id", "uname",
-                                     "env", "df", "ps", "ifconfig", "pwd", "help", "clear"]
+                                     "env", "df", "ps", "ifconfig", "pwd", "help", "clear", "spawntest"]
 
     static func exec(_ parts: [String]) -> [String]? {
         guard let head = parts.first, names.contains(head), head != "clear" else { return nil }
         let args = Array(parts.dropFirst())
         switch head {
         case "help": return helpLines
+        case "spawntest": return ShellRunner.shared.probeSpawn()
         case "pwd": return [FileManager.default.currentDirectoryPath]
         case "echo": return [args.joined(separator: " ")]
         case "whoami": return [userLine]
@@ -39,6 +40,8 @@ enum BuiltinExec {
         "  ls [dir] · cat <file> · pwd · echo · whoami · id · uname [-a]",
         "  env · df · ifconfig · ps · clear · help",
         "  install <tool>   → auto-install da repo (fallback Sileo)",
+        "  spawntest        → diagnostica posix_spawn (persona root)",
+        "  sudo <cmd>       → exec root via persona spawn",
         "  altri comandi    → exec via posix_spawn (richiede entitlements no-container)",
     ]
 

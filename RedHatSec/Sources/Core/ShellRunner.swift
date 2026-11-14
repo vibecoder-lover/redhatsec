@@ -1,5 +1,19 @@
 import Foundation
 
+// iOS 15+: l'exec diretto di binari setuid è negato dall'AMFI. Il root si ottiene
+// con le persona spawn attributes (override uid/gid 0) — richiede l'entitlement
+// com.apple.private.persona-mgmt. Ricetta da TSUtil.m di TrollStore.
+@_silgen_name("posix_spawnattr_set_persona_np")
+private func spawnattr_set_persona_np(_ attr: UnsafeMutablePointer<posix_spawnattr_t>, _ id: uid_t, _ flags: UInt32) -> Int32
+
+@_silgen_name("posix_spawnattr_set_persona_uid_np")
+private func spawnattr_set_persona_uid(_ attr: UnsafeMutablePointer<posix_spawnattr_t>, _ uid: uid_t) -> Int32
+
+@_silgen_name("posix_spawnattr_set_persona_gid_np")
+private func spawnattr_set_persona_gid(_ attr: UnsafeMutablePointer<posix_spawnattr_t>, _ gid: gid_t) -> Int32
+
+private let POSIX_SPAWN_PERSONA_FLAG_OVERRIDE: UInt32 = 1
+
 struct ShellResult {
     var exitCode: Int32
     var stdout: String
@@ -74,7 +88,7 @@ final class ShellRunner {
     }
 
     // run con stdin: serve per sudo -S (password su stdin)
-    func runWithStdin(_ cmd: String, args: [String], stdin: Data?, timeout: TimeInterval = 15) -> ShellResult {
+    func runWithStdin(_ cmd: String, args: [String], stdin: Data?, asRoot: Bool = false, timeout: TimeInterval = 15) -> ShellResult {
         guard let bin = resolve(cmd) else {
             return ShellResult(exitCode: 127, stdout: "", stderr: "tool not found: \(cmd)")
         }
@@ -83,6 +97,11 @@ final class ShellRunner {
         let inPipe = stdin != nil ? Pipe() : nil
         var attr: posix_spawnattr_t? = nil
         posix_spawnattr_init(&attr)
+        if asRoot {
+            spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAG_OVERRIDE)
+            spawnattr_set_persona_uid(&attr, 0)
+            spawnattr_set_persona_gid(&attr, 0)
+        }
         var fileActions: posix_spawn_file_actions_t? = nil
         posix_spawn_file_actions_init(&fileActions)
         posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 1)
@@ -140,6 +159,61 @@ final class ShellRunner {
             ?? String(data: errData, encoding: .isoLatin1) ?? ""
         let suffix = timedOut ? "\n[timeout \(timeout)s — killed]" : ""
         return ShellResult(exitCode: status, stdout: so, stderr: se + suffix)
+    }
+
+    // MARK: diagnostica spawn — spawntest
+
+    func probeSpawn() -> [String] {
+        var out: [String] = []
+        let fm = FileManager.default
+        let targets: [(String, Bool, [String])] = [
+            ("/bin/ls", false, ["-1", "/"]),
+            ("/usr/bin/id", false, []),
+            ("/var/jb/usr/bin/sh", false, ["-c", "echo jb-sh-ok"]),
+            ("/var/jb/usr/bin/sh", true, ["-c", "id -u"]),
+            ("/var/jb/usr/bin/whoami", true, []),
+        ]
+        for (path, root, args) in targets {
+            guard fm.fileExists(atPath: path) else {
+                out.append("\(path) — assente")
+                continue
+            }
+            out.append("\(path)\(root ? " +persona" : "") → \(spawnProbe(path, root: root, args: args))")
+        }
+        return out
+    }
+
+    private func spawnProbe(_ path: String, root: Bool, args: [String]) -> String {
+        let outPipe = Pipe()
+        var attr: posix_spawnattr_t? = nil
+        posix_spawnattr_init(&attr)
+        if root {
+            spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAG_OVERRIDE)
+            spawnattr_set_persona_uid(&attr, 0)
+            spawnattr_set_persona_gid(&attr, 0)
+        }
+        var fileActions: posix_spawn_file_actions_t? = nil
+        posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 1)
+        posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 2)
+
+        var argv = buildArgv(bin: path, args: args)
+        var envp = buildEnvp()
+        var pid: pid_t = 0
+        let rc = posix_spawn(&pid, path, &fileActions, &attr, &argv, &envp)
+        posix_spawnattr_destroy(&attr)
+        posix_spawn_file_actions_destroy(&fileActions)
+        for p in argv { if let p { free(p) } }
+        for p in envp { if let p { free(p) } }
+        guard rc == 0 else { return "spawn rc=\(rc) \(String(cString: strerror(rc)))" }
+        try? outPipe.fileHandleForWriting.close()
+        var data = Data()
+        DispatchQueue.global().sync { data = outPipe.fileHandleForReading.readDataToEndOfFile() }
+        var st: Int32 = 0
+        waitpid(pid, &st, 0)
+        let s = String(data: data.prefix(160), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return "exit=\(st >> 8) out: \(s.isEmpty ? "(vuoto)" : s)"
     }
 
     func stream(_ cmd: String, args: [String], line: @escaping (String) -> Void,
