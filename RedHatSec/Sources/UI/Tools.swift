@@ -157,23 +157,6 @@ struct TerminalView: View {
                 }
             }
 
-            HStack(spacing: 8) {
-                Image(systemName: "shield.lefthalf.filled")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(RootShell.shared.available ? .ok : .dim)
-                SecureField("password root — in RAM, mai su disco", text: Binding(
-                    get: { RootShell.shared.password },
-                    set: { RootShell.shared.password = $0 }))
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12, design: .monospaced))
-                    .padding(8)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(hex: 0x070709)))
-                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
-                Pill(text: RootShell.shared.available ? "root ✓" : "root ✗", color: RootShell.shared.available ? .ok : .bad)
-            }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 6)
-
             HStack(spacing: 10) {
                 Text("rhs")
                     .font(.system(size: 12, weight: .heavy, design: .monospaced))
@@ -230,10 +213,6 @@ extension TerminalModel {
                 DispatchQueue.main.async {
                     if !r.stdout.isEmpty { self.append(String(r.stdout.suffix(2500))) }
                     self.append(String(r.stderr.suffix(1200)), r.exitCode == 0 ? .good : .bad)
-                    if r.stderr.contains("incorrect password") || r.stderr.contains("no passwd") ||
-                        r.stderr.contains("Authentication failure") {
-                        self.append("password root errata — correggi il campo ROOT sopra", .bad)
-                    }
                     self.running = false
                 }
             }

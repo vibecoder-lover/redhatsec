@@ -81,7 +81,6 @@ enum RootdClient {
 final class RootShell: ObservableObject {
     static let shared = RootShell()
 
-    @Published var password: String = ""
     @Published var lastRootOK = false
 
     var available: Bool {

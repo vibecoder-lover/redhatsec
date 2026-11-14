@@ -209,9 +209,9 @@ enum ToolRegistry {
             let apt = sh.resolve("apt-get")
             let dpkgDeb = sh.resolve("dpkg-deb")
 
-            // PATH 1 — apt ROOT via sudo: installazione vera in /var/jb
+            // PATH 1 — apt root via rootd (launchd): installazione vera in /var/jb
             if RootShell.shared.available {
-                line("[install] apt root via sudo…")
+                line("[install] apt root via rootd…")
                 let r = RootShell.shared.runSync("apt-get update -qq; apt-get install -y \(s.pkg)", timeout: 300)
                 let out = (r.stdout.isEmpty ? r.stderr : r.stdout)
                 line(String(out.suffix(400)))
@@ -222,10 +222,8 @@ enum ToolRegistry {
                 }
                 if r.exitCode == 0 {
                     line("[install] apt root exit=0 ma bin non trovato — fallback userland")
-                } else if r.stderr.contains("incorrect password") || r.stderr.contains("no password") || r.stderr.contains("Authentication") {
-                    line("[install] password root errata — imposta il campo ROOT nel terminale")
                 } else {
-                    line("[install] root apt fallito (exit=\(r.exitCode)) — fallback userland")
+                    line("[install] apt root fallito (exit=\(r.exitCode)) — fallback userland")
                 }
             }
 
