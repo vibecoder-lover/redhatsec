@@ -15,6 +15,15 @@ private func spawnattr_set_persona_gid(_ attr: UnsafeMutablePointer<posix_spawna
 
 private let POSIX_SPAWN_PERSONA_FLAG_OVERRIDE: UInt32 = 1
 
+// dump entitlements dal code signing: le SecCode* non sono visibili a Swift
+// su iOS SDK, quindi si dichiarano raw. kSecCSRequirementInformation = 2,
+// kSecCodeInfoEntitlementsDict = "entitlements".
+@_silgen_name("SecCodeCopySelf")
+private func secCodeCopySelf(_ flags: UInt32, _ code: UnsafeMutablePointer<UnsafeRawPointer?>) -> Int32
+
+@_silgen_name("SecCodeCopySigningInformation")
+private func secCodeCopySigningInformation(_ code: UnsafeRawPointer, _ flags: UInt32, _ info: UnsafeMutablePointer<CFDictionary?>) -> Int32
+
 struct ShellResult {
     var exitCode: Int32
     var stdout: String
@@ -204,16 +213,15 @@ final class ShellRunner {
     }
 
     static func ownEntitlementKeys() -> [String] {
-        var code: SecCode? = nil
-        guard SecCodeCopySelf(kSecCSDefaultFlags, &code) == errSecSuccess, let code else {
+        var code: UnsafeRawPointer? = nil
+        guard secCodeCopySelf(0, &code) == 0, let code else {
             return ["SecCodeCopySelf fallita"]
         }
         var info: CFDictionary? = nil
-        guard SecCodeCopySigningInformation(code, kSecCSRequirementInformation, &info) == errSecSuccess,
-              let info else {
+        guard secCodeCopySigningInformation(code, 2, &info) == 0, let info else {
             return ["SecCodeCopySigningInformation fallita"]
         }
-        guard let ent = (info as NSDictionary)[kSecCodeInfoEntitlementsDict] as? [String: Any] else {
+        guard let ent = (info as NSDictionary)["entitlements"] as? [String: Any] else {
             return ["nessun entitlement nel codice"]
         }
         return ent.keys.sorted()
