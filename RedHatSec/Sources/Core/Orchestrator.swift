@@ -393,7 +393,7 @@ final class Orchestrator: ObservableObject {
             } else {
                 t.extra["gatt"] = String(rep.lines.joined(separator: " | ").prefix(300))
                 if !rep.ssidCandidates.isEmpty {
-                    t.extra["ssidBLE"] = rep.ssidCandidates.joined(separator: " | ").prefix(200)
+                    t.extra["ssidBLE"] = String(rep.ssidCandidates.joined(separator: " | ").prefix(200))
                     log("BLE \(t.name): SSID via GATT → \(rep.ssidCandidates.first ?? "?")", .good)
                 }
                 log("BLE \(t.name): nessuna chr scrivibile — flood/sweyntooth armati senza config", .warn)
