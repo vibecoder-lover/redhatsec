@@ -28,12 +28,12 @@ struct BridgeView: View {
                      color: tcp.connected ? .ok : (tcp.state.hasPrefix("auto") ? .warn : .bad))
             }
             KV(k: "stato", val: tcp.state)
-            KV(k: "rete", val: "AP 'RHS-Bridge' (pass redhatsec) → 192.168.4.1:3333")
+            KV(k: "rete", val: "STA: l'ESP si aggancia al tuo hotspot → sweep 172.20.10.2-14 / 192.168.4.1")
             if tcp.connected {
                 KV(k: "stato radio", val: "i vettori PLAN (deauth/PMKID/beacon) sono eseguibili")
             }
             if !tcp.connected {
-                Text("Una sola volta: Impostazioni iOS › Wi-Fi › unisciti a 'RHS-Bridge'. Poi l'app si riconnette da sola.")
+                Text("Modifica STA_SSID/STA_PASS nel firmware col nome della TUA hotspot, flasha: l'ESP entra nella rete e l'app lo trova con lo sweep, da sola.")
                     .font(.caption2).foregroundColor(.dim)
             }
             HStack(spacing: 8) {

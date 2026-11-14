@@ -174,7 +174,7 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
             return
         }
         switch frame.cmdEcho {
-        case Cmd.wifiResults.rawValue:
+        case 0x02, 0x03: // wifiResults — eco del cmd richiesta o esplicito
             resumeScan(parseNets(frame.payload))
             resumeResponse((0, Data()))
         default:
@@ -323,23 +323,23 @@ final class TCPBridge: NSObject, ObservableObject {
         }
     }
 
-    // MARK: auto-connect (AP-only firmware: l'iPhone deve avere "RHS-Bridge" salvato)
+    // MARK: auto-connect (firmware STA: l'ESP si aggancia al hotspot iPhone, IP = DHCP)
 
     func startAutoConnect() {
         guard !connected else { return }
         DispatchQueue.main.async {
-            self.state = "auto-connect 192.168.4.1…"
+            self.state = "auto-connect: sweep subnet…"
             self.retryTimer?.invalidate()
-            self.retryTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { _ in
+            self.retryTimer = Timer.scheduledTimer(withTimeInterval: 18, repeats: true) { _ in
                 guard !self.connected else {
                     self.retryTimer?.invalidate()
                     self.retryTimer = nil
                     return
                 }
-                self.connect(host: "192.168.4.1")
+                self.sweep()
             }
         }
-        connect(host: "192.168.4.1")
+        sweep()
     }
 
     // MARK: scoperta
@@ -572,7 +572,7 @@ final class TCPBridge: NSObject, ObservableObject {
                 return
             }
             switch f.cmdEcho {
-            case 0x03: // wifiResults
+            case 0x02, 0x03: // wifiResults — l'eco del cmd richiesta (0x02) o esplicito (0x03)
                 self.resumeScan(self.parseNets(f.payload))
                 self.resumeResponse((0, Data()))
             default:
@@ -610,7 +610,7 @@ final class TCPBridge: NSObject, ObservableObject {
             scanCont = c
             send(0x02, payload: [UInt8(seconds)])
             CrashTracer.mark("tcp scan frame sent")
-            DispatchQueue.global().asyncAfter(deadline: .now() + Double(seconds) + 6) { [weak self] in
+            DispatchQueue.global().asyncAfter(deadline: .now() + Double(seconds) + 12) { [weak self] in
                 guard let self else { return }
                 self.resumeScan([])
             }
