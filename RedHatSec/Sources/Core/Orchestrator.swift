@@ -94,6 +94,7 @@ final class Orchestrator: ObservableObject {
     }
 
     private func runScanPipeline() async {
+        CrashTracer.mark("pipeline start")
         // NFC in parallelo (attende tap)
         let nfcTask = Task { [weak self] () -> NFCDump? in
             guard let self else { return nil }
@@ -112,6 +113,7 @@ final class Orchestrator: ObservableObject {
 
         // WiFi (private framework probe → fallback)
         if phase == .scan {
+            CrashTracer.mark("pipeline: wifi probe")
             log("Wi-Fi metadata probe (MobileWiFi)…", .exec)
             let nets = await Task.detached { [wifi] in wifi.availableNetworks() }.value
             if nets.isEmpty {
@@ -179,6 +181,7 @@ final class Orchestrator: ObservableObject {
         // MATCH
         phase = .match
         buildPlan()
+        CrashTracer.mark("pipeline done: \(plan.count) vectors")
         log("plan armed: \(plan.count) vector(s) — conferma per eseguire", .good)
         phase = .armed
         progress = 1.0

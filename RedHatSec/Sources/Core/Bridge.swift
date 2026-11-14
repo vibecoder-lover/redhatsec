@@ -229,14 +229,17 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
 
     func wifiScan(seconds: Int = 8) async -> [BridgeNet] {
         guard connected else { return [] }
+        CrashTracer.mark("ble scan start")
         let nets = await withCheckedContinuation { (c: CheckedContinuation<[BridgeNet], Never>) in
             scanCont = c
             send(.wifiScan, payload: [UInt8(seconds)])
+            CrashTracer.mark("ble scan frame sent")
             DispatchQueue.global().asyncAfter(deadline: .now() + Double(seconds) + 6) { [weak self] in
                 guard let self else { return }
                 self.resumeScan([])
             }
         }
+        CrashTracer.mark("ble scan done nets=\(nets.count)")
         scanNets = nets
         log("wifi scan: \(nets.count) rete(e)")
         return nets
@@ -602,14 +605,17 @@ final class TCPBridge: NSObject, ObservableObject {
 
     func wifiScan(seconds: Int = 8) async -> [BridgeManager.BridgeNet] {
         guard connected else { return [] }
+        CrashTracer.mark("tcp scan start")
         let nets = await withCheckedContinuation { (c: CheckedContinuation<[BridgeManager.BridgeNet], Never>) in
             scanCont = c
             send(0x02, payload: [UInt8(seconds)])
+            CrashTracer.mark("tcp scan frame sent")
             DispatchQueue.global().asyncAfter(deadline: .now() + Double(seconds) + 6) { [weak self] in
                 guard let self else { return }
                 self.resumeScan([])
             }
         }
+        CrashTracer.mark("tcp scan done nets=\(nets.count)")
         scanNets = nets
         log("wifi scan: \(nets.count) rete(e)")
         return nets

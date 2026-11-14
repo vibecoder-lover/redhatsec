@@ -275,12 +275,27 @@ final class WiFiScanner {
 
     func availableNetworks() -> [WiFiNet] {
         diagLines = []
+        CrashTracer.mark("wifi probe start")
         var nets: [WiFiNet] = []
+        CrashTracer.mark("wifi: pre mobilewifi")
         if let n = probeMobileWiFi() { nets = n }
-        else if let n = probeHotspotHelper() { nets = n }
-        else if let n = probeCurrentNetworkInfo() { nets = n }
-        else if let n = probeHotspotCurrent() { nets = n }
-        else { nets = probeKnownNetworksPlist() }
+        else {
+            CrashTracer.mark("wifi: pre helper")
+            if let n = probeHotspotHelper() { nets = n }
+            else {
+                CrashTracer.mark("wifi: pre CNCopy")
+                if let n = probeCurrentNetworkInfo() { nets = n }
+                else {
+                    CrashTracer.mark("wifi: pre NEHotspotNetwork")
+                    if let n = probeHotspotCurrent() { nets = n }
+                    else {
+                        CrashTracer.mark("wifi: pre known-networks")
+                        nets = probeKnownNetworksPlist()
+                    }
+                }
+            }
+        }
+        CrashTracer.mark("wifi probe done (\(nets.count) nets)")
         lastDiag = diagLines.joined(separator: " || ")
         return nets
     }
@@ -330,6 +345,8 @@ final class WiFiScanner {
     }
 
     private func probeFrameworkIntrospection(prefixes: [String], label: String) -> [WiFiNet]? {
+        CrashTracer.mark("introspect \(label) start")
+        defer { CrashTracer.mark("introspect \(label) done") }
         var count: UInt32 = 0
         guard let list = objc_copyClassList(&count) else {
             diag("\(label): objc_copyClassList nil")
@@ -369,7 +386,14 @@ final class WiFiScanner {
             }
             free(methods)
             diag("\(cname).sharedInstance metodi candidati: \(selNames.joined(separator: ", "))")
-            for sn in selNames {
+            // WHITELIST: mai chiamare metodi privati sconosciuti (crash su stato interno nil).
+            // Il dump qui sopra serve a scoprire i NOMI reali sul device; i selector non
+            // in whitelist restano dati nel journal — li hardcodiamo al prossimo giro.
+            let whitelist: Set<String> = ["copyNetworkList", "networks", "allNetworks",
+                                          "scanResults", "copyScanResults", "knownNetworks",
+                                          "wifiNetworks", "networkList"]
+            for sn in selNames where whitelist.contains(sn) {
+                CrashTracer.mark("introspect call \(cname).\(sn)")
                 guard let r = shared.perform(NSSelectorFromString(sn))?.takeUnretainedValue() as? NSArray,
                       r.count > 0 else { continue }
                 diag("\(cname).\(sn) → \(r.count) elementi")

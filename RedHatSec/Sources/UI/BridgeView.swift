@@ -59,9 +59,11 @@ struct BridgeView: View {
             Text("AZIONI RADIO").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
             Button {
                 Haptics.heavy(); scanning = true
+                CrashTracer.mark("bridge scan tap tcp=\(tcp.connected) ble=\(ble.connected)")
                 Task {
                     if ble.connected { _ = await ble.wifiScan() } else { _ = await tcp.wifiScan() }
                     scanning = false
+                    CrashTracer.mark("bridge scan flow done")
                 }
             } label: {
                 Label(scanning ? "SCAN IN CORSO…" : "WIFI SCAN (via bridge)", systemImage: "dot.radiowaves.left.and.right")
@@ -201,12 +203,14 @@ struct BridgeView: View {
 struct SettingsView: View {
     @EnvironmentObject var o: Orchestrator
     @Environment(\.dismiss) var dismiss
+    @State private var trace: [String] = []
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     BridgeView(ble: o.bridge, tcp: o.tcpBridge)
+                    traceSection
                 }
                 .padding(16)
             }
@@ -218,7 +222,38 @@ struct SettingsView: View {
                     Button("chiudi") { dismiss() }
                 }
             }
+            .onAppear { trace = Self.readTrace() }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private var traceSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("CRASH TRACE").font(.system(size: 11, weight: .bold)).foregroundColor(.bad)
+                Spacer()
+                Button("cancella") {
+                    CrashTracer.clear()
+                    trace = []
+                }
+                .font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
+            }
+            if trace.isEmpty {
+                Text("vuoto — nessuna traccia").font(.caption).foregroundColor(.dim)
+            } else {
+                ForEach(Array(trace.suffix(30).enumerated()), id: \.offset) { _, l in
+                    Text(l).font(.system(size: 10, design: .monospaced)).foregroundColor(.white.opacity(0.85))
+                }
+            }
+            Text("Se l'app crasha: reinstalla/apri e incolli le ultime righe — l'ultima senza \"ok\" è il punto del crash.")
+                .font(.caption2).foregroundColor(.dim)
+        }
+        .padding(14).card()
+    }
+
+    static func readTrace() -> [String] {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        guard let s = try? String(contentsOf: docs.appendingPathComponent("crash_trace.txt"), encoding: .utf8) else { return [] }
+        return s.split(separator: "\n").map(String.init)
     }
 }
