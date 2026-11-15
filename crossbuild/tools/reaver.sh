@@ -3,7 +3,7 @@
 set -e
 V=1.6.6
 SRC="$SRCROOT/reaver-$V"
-[ -f "$SRCROOT/reaver-$V.tar.gz" ] || curl -fSL "https://github.com/t6n/reaver/archive/refs/tags/v$V.tar.gz" -o "$SRCROOT/reaver-$V.tar.gz"
+[ -f "$SRCROOT/reaver-$V.tar.gz" ] || curl -fSL "https://github.com/t6x/reaver-wps-fork-t6x/archive/refs/tags/v$V.tar.gz" -o "$SRCROOT/reaver-$V.tar.gz"
 [ -d "$SRC" ] || tar xzf "$SRCROOT/reaver-$V.tar.gz" -C "$SRCROOT"
 cd "$SRC/src"
 export PKG_CONFIG_PATH="$DEPS/usr/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"

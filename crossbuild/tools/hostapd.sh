@@ -10,14 +10,13 @@ cat > .config <<EOF
 CONFIG_DRIVER_BSD=y
 CONFIG_IEEE80211N=y
 CONFIG_IEEE80211AC=y
-CONFIG_ACS=y
 CONFIG_IPV6=y
 CONFIG_BACKEND_FILE=y
-CFLAGS += -I$DEPS/usr/include
+CFLAGS += -I$DEPS/usr/include -I../src -I../src/utils -I../src/ap
 LIBS += -L$DEPS/usr/lib
 LIBS_p += -lssl -lcrypto
 EOF
-make -j8 CC="$CC" CFLAGS="$CFLAGS"
+make CC="$CC" -j8
 mkdir -p "$STAGE/var/jb/usr/bin"
 cp hostapd "$STAGE/var/jb/usr/bin/"
 $STRIP "$STAGE/var/jb/usr/bin/hostapd" 2>/dev/null || true
