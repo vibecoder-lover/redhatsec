@@ -44,4 +44,4 @@ Per autotools passa **sempre** `--host=arm-apple-darwin` (cross-mode: configure 
 
 ## Deploy
 Il workflow `debs.yml` compila la matrice e pubblica i `.deb` nella release tag `debs` — l'app li installa con `curl + dpkg -i` via rootd.
-Trigger: il workflow parte su push di crossbuild/** — failure stampa primo errore + comando.
+Trigger: il workflow parte su push di crossbuild/** — failure stampa primo errore, comando e tail del log.

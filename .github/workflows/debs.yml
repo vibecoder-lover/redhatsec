@@ -31,8 +31,10 @@ jobs:
           set -o pipefail
           for t in $T; do
             if ! ./build.sh "$t" 2>&1 | tee "$t.log"; then
-              echo "=== FAIL $t: primo errore con comando ==="
+              echo "=== FAIL $t: primo errore ==="
               grep -n -B10 -m1 "error:" "$t.log"
+              echo "=== FAIL $t: tail ==="
+              tail -40 "$t.log"
               exit 1
             fi
           done
