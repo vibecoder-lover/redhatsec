@@ -11,9 +11,12 @@ make distclean >/dev/null 2>&1 || true
 # configure cerca pcap-bpf.h TOP-LEVEL (legacy, non installato da libpcap >=1.9) → alias dir
 mkdir -p "$DEPS/usr/include/pcap-legacy"
 cp "$DEPS/usr/include/pcap/bpf.h" "$DEPS/usr/include/pcap-legacy/pcap-bpf.h" 2>/dev/null || true
+# AC_TRY_RUN BPF senza action-if-cross → morte in cross; sostituisco con AC_DEFINE
+perl -0pi -e 's/AC_MSG_CHECKING\(for BPF device sending support\).*?else\s+AC_MSG_RESULT\(no\)\s*fi\s*\]\)/AC_DEFINE([HAVE_BPF],[1],[Do we have BPF device support?])\nhave_bpf=yes\nAC_MSG_RESULT(yes)/s' configure.in
 CC="$CC" CFLAGS="$CFLAGS -I$DEPS/usr/include" LDFLAGS="$LDFLAGS -L$DEPS/usr/lib" \
 ./configure --prefix="$PREFIX" --host=arm-apple-darwin \
-  --with-pcap-includes="$DEPS/usr/include/pcap-legacy"
+  --with-pcap-includes="$DEPS/usr/include/pcap-legacy" \
+  --with-libnet-includes="$DEPS/usr/include"
 echo "configure done"
 make -j1
 echo "make done"

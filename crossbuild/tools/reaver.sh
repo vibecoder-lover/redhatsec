@@ -9,6 +9,10 @@ cd "$SRC/src"
 # Xcode 26 SDK: net/if_arp.h rimosso — shim da xnu (iface.c ARPHRD_ETHER)
 mkdir -p "$DEPS/usr/include/net"
 [ -f "$DEPS/usr/include/net/if_arp.h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/net/if_arp.h" -o "$DEPS/usr/include/net/if_arp.h"
+# netinet/if_ether.h rimosso pure (iface.c) + net/ethernet.h che include
+mkdir -p "$DEPS/usr/include/netinet"
+[ -f "$DEPS/usr/include/netinet/if_ether.h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/netinet/if_ether.h" -o "$DEPS/usr/include/netinet/if_ether.h"
+[ -f "$DEPS/usr/include/net/ethernet.h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/net/ethernet.h" -o "$DEPS/usr/include/net/ethernet.h"
 make distclean >/dev/null 2>&1 || true
 # configure antepone "-lm -lpcap" a LDFLAGS → -lpcap prima del nostro -L → post-fix config.mak
 CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="-L$DEPS/usr/lib" \

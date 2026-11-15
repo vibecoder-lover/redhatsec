@@ -8,6 +8,8 @@ SRC="$SRCROOT/hostapd-$V"
 # Xcode 26 SDK ha rimosso net/route.h — shim da xnu (driver_bsd.c lo usa)
 mkdir -p "$DEPS/usr/include/net"
 [ -f "$DEPS/usr/include/net/route.h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/net/route.h" -o "$DEPS/usr/include/net/route.h"
+# -lrt (glibc legacy) assente su iOS SDK → togli dal Makefile
+sed -i '' '/-lrt/d' "$SRC/hostapd/Makefile"
 cd "$SRC/hostapd"
 cat > .config <<EOF
 CONFIG_DRIVER_DUMMY=y
