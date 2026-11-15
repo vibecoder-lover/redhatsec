@@ -1,5 +1,5 @@
 #!/bin/bash
-# pack.sh <tool> — pacchetto .deb rootless (ar 60-byte, formato dpkg iOS)
+# pack.sh <tool> — pacchetto .deb rootless (ar llvm, formato Procursus-compatible)
 set -e
 cd "$(dirname "$0")"
 source ./env.sh
@@ -22,24 +22,11 @@ Section: Security
 Description: RedHatSec cross-compiled tool ($TOOL) for iphoneos-arm64 rootless
 EOF
 
-tar czf "$T/control.tar.gz" -C "$T/control" .
-cp -a "$STAGE/." "$T/data/"
+tar czf "$T/control.tar.gz" -C "$T/control" control
 tar czf "$T/data.tar.gz"    -C "$T/data" var
+printf '2.0\n' > "$T/debian-binary"
 
-# ar members: header 60 byte (name16 mtime12 uid6 gid6 mode8 size10 + "\`\n")
-C_SIZE=$(stat -f %z "$T/control.tar.gz")
-D_SIZE=$(stat -f %z "$T/data.tar.gz")
-OUT="deb/${TOOL}_iphoneos-arm64.deb"
-{
-    printf '!<arch>\n'
-    printf '%-16s%-12s%-6s%-6s%-8s%-10s\`\n' 'debian-binary' '0' '0' '0' '644' '4'
-    printf '2.0\n'
-    printf '%-16s%-12s%-6s%-6s%-8s%-10s\`\n' 'control.tar.gz' '0' '0' '0' '644' "$C_SIZE"
-    cat "$T/control.tar.gz"
-    if [ $((C_SIZE % 2)) -eq 1 ]; then printf '\n'; fi
-    printf '%-16s%-12s%-6s%-6s%-8s%-10s\`\n' 'data.tar.gz' '0' '0' '0' '644' "$D_SIZE"
-    cat "$T/data.tar.gz"
-    if [ $((D_SIZE % 2)) -eq 1 ]; then printf '\n'; fi
-} > "$OUT"
-
-echo "packed: $OUT ($(du -k "$OUT" | awk '{print $1}') KB)"
+OUT="$ROOT/deb/${TOOL}_iphoneos-arm64.deb"
+rm -f "$OUT"
+( cd "$T" && ar rc "$OUT" debian-binary control.tar.gz data.tar.gz )
+echo "packed: ${TOOL}_iphoneos-arm64.deb ($(du -k "$OUT" | awk '{print $1}') KB)"
