@@ -191,7 +191,10 @@ struct TerminalView: View {
             .padding(12)
             .background(Color.surface)
         }
-        .onAppear { focused = true }
+        .onAppear {
+            focused = true
+            if tm.lines.isEmpty { tm.append("rhs build \(ToolRegistry.buildTag)", .info) }
+        }
     }
 }
 

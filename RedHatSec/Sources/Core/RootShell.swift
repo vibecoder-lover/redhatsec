@@ -43,7 +43,7 @@ enum RootdClient {
         conn.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                conn.send(content: Data("RHSROOT:\(cmd)\n".utf8), completion: .contentProcessed { _ in
+                conn.send(content: Data("RHSROOT:{ \(cmd) ; }; echo __RHS_RC_$?\n".utf8), completion: .contentProcessed { _ in
                     recvAll(conn, st)
                 })
             case .failed(let e):
@@ -59,7 +59,15 @@ enum RootdClient {
             return ShellResult(exitCode: -1, stdout: st.out, stderr: "[rootd timeout \(Int(timeout))s]")
         }
         conn.cancel()
-        return ShellResult(exitCode: st.error.isEmpty ? 0 : -1, stdout: st.out, stderr: st.error)
+        // il wrapper stampa __RHS_RC_<exit> → parse e strip (exit code reale del comando)
+        let out = st.out
+        var code: Int32 = 0
+        var clean = out
+        if let r = out.range(of: "__RHS_RC_", options: .backwards) {
+            code = Int32(String(out[r.upperBound...].prefix(while: { $0.isNumber }))) ?? 0
+            clean = String(out[..<r.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return ShellResult(exitCode: st.error.isEmpty ? code : -1, stdout: clean, stderr: st.error)
     }
 
     private static func recvAll(_ conn: NWConnection, _ st: RootdState) {
@@ -84,9 +92,7 @@ final class RootShell: ObservableObject {
     @Published var lastRootOK = false
 
     var available: Bool {
-        // rootd è un servizio TCP indipendente dal PATH dell'app: non gate-are
-        // su resolve("sh") — runSync() ha i suoi 3 fallback (rootd → persona → helper)
-        true
+        ShellRunner.shared.resolve("sh") != nil
     }
 
     func runSync(_ cmd: String, timeout: TimeInterval = 180) -> ShellResult {

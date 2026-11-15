@@ -173,6 +173,7 @@ enum BuiltinExec {
 }
 
 enum ToolRegistry {
+    static let buildTag = "b3-aebe0cc"
     static let appBinDir = "/var/mobile/RedHatSec/bin"
     static let workDir = "/var/mobile/RedHatSec"
     static let sourcesPath = workDir + "/etc/apt/sources.list.d/rhs.list"
@@ -323,7 +324,7 @@ enum ToolRegistry {
                 // PATH 1.5 — .deb locale: bootstrap dpkg se assente + dpkg -i; fallback estrazione tar (bsdtar legge l'ar)
                 if let url = s.debURL {
                     line("[install] .deb locale: \(url)…")
-                    let script = "command -v dpkg >/dev/null 2>&1 || apt-get install -y --allow-unauthenticated dpkg; curl -fSL --max-time 180 -o \(workDir)/tmp/\(s.pkg).deb '\(url)' || exit 9; if dpkg -i \(workDir)/tmp/\(s.pkg).deb; then echo DEB-OK; elif command -v tar >/dev/null 2>&1; then rm -rf \(workDir)/tmp/x; mkdir -p \(workDir)/tmp/x; cd \(workDir)/tmp/x && tar -xf ../\(s.pkg).deb 2>/dev/null && tar xzf data.tar.gz -C / && echo TAR-OK; fi"
+                    let script = "command -v dpkg >/dev/null 2>&1 || apt-get install -y --allow-unauthenticated dpkg; curl -fSL --max-time 180 -o \(workDir)/tmp/\(s.pkg).deb '\(url)' || echo CURL-FAIL; if dpkg -i \(workDir)/tmp/\(s.pkg).deb; then echo DEB-OK; elif command -v tar >/dev/null 2>&1; then rm -rf \(workDir)/tmp/x; mkdir -p \(workDir)/tmp/x; cd \(workDir)/tmp/x && tar -xf ../\(s.pkg).deb 2>/dev/null && tar xzf data.tar.gz -C / && echo TAR-OK; fi"
                     let d = RootShell.shared.runSync(script, timeout: 300)
                     let dout = (d.stdout.isEmpty ? d.stderr : d.stdout)
                     line(String(dout.suffix(400)))

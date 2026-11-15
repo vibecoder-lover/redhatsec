@@ -169,12 +169,14 @@ final class ShellRunner {
 
         var status: Int32 = 0
         waitpid(pid, &status, 0)
+        // raw waitpid status → exit code: WEXITSTATUS / 128+segnale
+        let rawCode: Int32 = status & 0x7F != 0 ? Int32(128 + (status & 0x7F)) : Int32((status >> 8) & 0xFF)
         let so = String(data: outData, encoding: .utf8)
             ?? String(data: outData, encoding: .isoLatin1) ?? ""
         let se = String(data: errData, encoding: .utf8)
             ?? String(data: errData, encoding: .isoLatin1) ?? ""
         let suffix = timedOut ? "\n[timeout \(timeout)s — killed]" : ""
-        return ShellResult(exitCode: status, stdout: so, stderr: se + suffix)
+        return ShellResult(exitCode: rawCode, stdout: so, stderr: se + suffix)
     }
 
     // MARK: diagnostica spawn — spawntest
@@ -361,7 +363,7 @@ final class ShellRunner {
             }
             var status: Int32 = 0
             waitpid(pid, &status, 0)
-            onExit(status)
+            onExit(status & 0x7F != 0 ? Int32(128 + (status & 0x7F)) : Int32((status >> 8) & 0xFF))
         }
     }
 }
