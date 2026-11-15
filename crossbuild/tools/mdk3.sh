@@ -10,7 +10,7 @@ sed -i '' 's/LINKTYPE_PPI_HDR/192/g' src/osdep/file.c
 # CFLAGS via ENV (non command-line): il Makefile fa CFLAGS += -I.. e il "pcap.h" custom
 # deve risolvere a src/pcap.h (le LINKTYPE_* custom). -L via CFLAGS per l'ordine del linker.
 export CFLAGS="-I$SRC/src $CFLAGS -I$DEPS/usr/include -L$DEPS/usr/lib -include $SRCROOT/../endian-shim.h"
-make CC="$CC" -j8
+make -j1 CC="$CC"
 mkdir -p "$STAGE/var/jb/usr/bin"
 cp mdk3 "$STAGE/var/jb/usr/bin/"
 $STRIP "$STAGE/var/jb/usr/bin/mdk3" 2>/dev/null || true

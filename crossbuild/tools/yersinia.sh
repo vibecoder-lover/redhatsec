@@ -6,6 +6,9 @@ SRC="$SRCROOT/yersinia-$V"
 [ -f "$SRCROOT/yersinia-$V.tar.gz" ] || curl -fSL "https://github.com/tomac/yersinia/archive/refs/tags/v$V.tar.gz" -o "$SRCROOT/yersinia-$V.tar.gz"
 [ -d "$SRC" ] || tar xzf "$SRCROOT/yersinia-$V.tar.gz" -C "$SRCROOT"
 cd "$SRC"
+# AC_TRY_RUN BPF senza action-if-cross → morte in cross; sostituisco con AC_DEFINE
+# (PRIMA di autoreconf, altrimenti configure rigenerato resta non patchato)
+perl -0pi -e 's/AC_MSG_CHECKING\(for BPF device sending support\).*?else\s+AC_MSG_RESULT\(no\)\s*fi\s*\]\)/AC_DEFINE([HAVE_BPF],[1],[Do we have BPF device support?])\nhave_bpf=yes\nAC_MSG_RESULT(yes)/s' configure.in
 autoreconf -fi 2>&1 | tail -3
 make distclean >/dev/null 2>&1 || true
 # configure cerca pcap-bpf.h TOP-LEVEL (legacy, non installato da libpcap >=1.9) → alias dir

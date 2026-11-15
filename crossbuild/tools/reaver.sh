@@ -15,13 +15,15 @@ mkdir -p "$DEPS/usr/include/netinet"
 [ -f "$DEPS/usr/include/net/ethernet.h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/net/ethernet.h" -o "$DEPS/usr/include/net/ethernet.h"
 make distclean >/dev/null 2>&1 || true
 # configure antepone "-lm -lpcap" a LDFLAGS → -lpcap prima del nostro -L → post-fix config.mak
-CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="-L$DEPS/usr/lib" \
+CC="$CC" CFLAGS="$CFLAGS -include unistd.h -include sys/wait.h" LDFLAGS="-L$DEPS/usr/lib" \
 ./configure --prefix="$PREFIX" --host=arm-apple-darwin
 echo "configure done"
 # delimiter | (la DEPS contiene / → s/// con / rompe)
 sed -i '' "s|-lpcap|-L$DEPS/usr/lib -lpcap|g" config.mak
 echo "sed done"
 grep LDFLAGS config.mak || true
+# system() è __API_UNAVAILABLE su iOS → fork/exec/waitpid inline
+sed -i '' 's|r = system(get_exec_string());|{ pid_t _p = fork(); if (_p == 0) { execl("/bin/sh", "sh", "-c", get_exec_string(), (char *) NULL); _exit(127); } int _st = 0; waitpid(_p, \&_st, 0); r = _st; }|' wpscrack.c
 make -j1
 echo "make done"
 mkdir -p "$STAGE/var/jb/usr/bin"
