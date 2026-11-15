@@ -84,7 +84,9 @@ final class RootShell: ObservableObject {
     @Published var lastRootOK = false
 
     var available: Bool {
-        ShellRunner.shared.resolve("sh") != nil
+        // rootd è un servizio TCP indipendente dal PATH dell'app: non gate-are
+        // su resolve("sh") — runSync() ha i suoi 3 fallback (rootd → persona → helper)
+        true
     }
 
     func runSync(_ cmd: String, timeout: TimeInterval = 180) -> ShellResult {
