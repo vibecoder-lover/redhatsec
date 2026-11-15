@@ -6,6 +6,33 @@ SRC="$SRCROOT/socat-$V"
 [ -f "$SRCROOT/socat-$V.tar.gz" ] || curl -fSL "http://www.dest-unreach.org/socat/download/socat-$V.tar.gz" -o "$SRCROOT/socat-$V.tar.gz"
 [ -d "$SRC" ] || tar xzf "$SRCROOT/socat-$V.tar.gz" -C "$SRCROOT"
 cd "$SRC"
+# iOS: system() marcata unavailable a compile-time (simbolo esiste nel runtime)
+# → patch call-site: fork + execl + waitpid (strategia standard per tool con system())
+cat > "$SRCROOT/sycls-ios.patch" <<'EOF'
+--- a/sycls.c
++++ b/sycls.c
+@@ -1060,3 +1060,21 @@
+    diag_immediate_exit = 1;
+-   result = system(string);
++   {
++      pid_t pid = fork();
++      if (pid == -1) {
++         result = -1;
++      } else if (pid == 0) {
++         execl("/bin/sh", "sh", "-c", string, (char *)NULL);
++         _exit(127);
++      } else {
++         int status;
++         if (waitpid(pid, &status, 0) == -1) {
++            result = -1;
++         } else {
++            result = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
++         }
++      }
++   }
+    diag_immediate_exit = 0;
+EOF
+patch -p1 --fuzz=3 < "$SRCROOT/sycls-ios.patch" || { echo "PATCH FAIL"; exit 1; }
 make distclean >/dev/null 2>&1 || true
 # socat usa macro custom che A VOLTE (CHANCE=0) fanno try_run → morte in cross.
 # Pre-seedo le cache con i valori arm64-iOS (rilevati via GCC method, validati in CI):
@@ -25,7 +52,7 @@ export sc_cv_type_stat64_stnlink_basic=0 sc_cv_type_stat64_stsize_basic=0
 export sc_cv_type_stat64_stblksize_basic=0 sc_cv_type_stat64_stblocks_basic=0
 export sc_cv_type_struct_timeval_tv_usec=3 sc_cv_type_struct_timespec_tv_nsec=5
 export sc_cv_type_rlimit_rlimmax_basic=8 sc_cv_typeof_struct_cmsghdr_cmsg_len=4
-CC="$CC" CFLAGS="$CFLAGS -include $ROOT/api-shim.h" LDFLAGS="$LDFLAGS" \
+CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" \
 ./configure --prefix="$PREFIX" --host=arm-apple-darwin --disable-openssl --disable-libwrap
 make -j8
 make DESTDIR="$STAGE" install
