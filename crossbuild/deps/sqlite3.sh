@@ -10,7 +10,7 @@ V=3450100   # 3.45.1
 cd "$SRCROOT/sqlite-amalgamation-$V"
 "$CC" $CFLAGS -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_THREADSAFE=0 \
     -DSQLITE_ENABLE_COLUMN_METADATA -c sqlite3.c -o sqlite3.o
-"$AR" rcs "$DEPS/usr/lib/libsqlite3.a" sqlite3.o
+xcrun -sdk iphoneos ar rcs "$DEPS/usr/lib/libsqlite3.a" sqlite3.o
 mkdir -p "$DEPS/usr/include" "$DEPS/usr/lib/pkgconfig"
 cp sqlite3.h "$DEPS/usr/include/"
 cat > "$DEPS/usr/lib/pkgconfig/sqlite3.pc" <<EOF
