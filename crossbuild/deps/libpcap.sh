@@ -17,6 +17,8 @@ printf '#include <sys/types.h>\nint main(void){return 0;}\n' > probe.c
 "$CC" $CFLAGS -c probe.c -o probe.o && file probe.o || { echo "PROBE FAIL"; exit 1; }
 CC="$CC" CXX="$CXX" CFLAGS="$CFLAGS -DHAVE_CONFIG_H" CPPFLAGS="-I$DEPS/usr/include" LDFLAGS="$LDFLAGS -L$DEPS/usr/lib" \
 ./configure --prefix="$DEPS/usr" --host=arm-apple-darwin --with-pcap=bpf --disable-shared --without-libnl --disable-dbus --disable-rdma --disable-snf --disable-tc
+# libpcap su darwin inietta -arch x86_64 -arch arm64 (universal) — confligge col target iOS del wrapper
+sed -i '' 's/-arch x86_64 -arch arm64//g; s/-arch arm64 -arch x86_64//g; s/-arch i386 -arch x86_64//g; s/-arch x86_64//g; s/-arch i386//g' Makefile
 make -j1
 make install
 echo "=== DEP libpcap OK ==="
