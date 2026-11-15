@@ -17,7 +17,7 @@ export ac_cv_file__usr_local_Homebrew=no
 export ac_cv_file__opt_local_include=no
 export ac_cv_file__opt_local_lib=no
 export ac_cv_file__Applications_Xcode_app_Contents_Developer_Toolchains_XcodeDefault_xctoolchain_usr_lib_swift_migrator_sdk_MacOSX_sdk_usr_include=no
-CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" \
+CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" LIBS="-lz" \
 env PATH=/usr/bin:/bin \
 ./configure --prefix="$PREFIX" --host=arm-apple-darwin \
     --disable-libnl --disable-pcre --disable-hwloc \
