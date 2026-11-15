@@ -208,7 +208,7 @@ enum ToolRegistry {
             for l in lines { cmd += " && printf '%s\\n' '\(sq(l))' >> '\(sq(sourcesPath))'" }
             cmd += " && chown -R mobile:mobile '\(sq(workDir))/etc'"
             let r = RootShell.shared.runSync(cmd, timeout: 15)
-            if r.exitCode == 0, FileManager.default.fileExists(atPath: sourcesPath) { return nil }
+            if r.exitCode == 0 { return nil }
             return "mobile EPERM (\(error)) e rootd write rc=\(r.exitCode)"
         }
     }
