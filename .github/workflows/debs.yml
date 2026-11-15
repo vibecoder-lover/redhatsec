@@ -32,7 +32,7 @@ jobs:
           for t in $T; do
             if ! ./build.sh "$t" 2>&1 | tee "$t.log"; then
               echo "=== FAIL $t: primo errore ==="
-              grep -n -B10 -m1 "error:" "$t.log"
+              grep -n -B10 -m1 "error:\|Error 1\|No such file\|not found\|undefined refe" "$t.log"
               echo "=== FAIL $t: tail ==="
               tail -40 "$t.log"
               exit 1
