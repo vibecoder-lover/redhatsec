@@ -11,6 +11,9 @@ cd "$SRC"
 perl -0pi -e 's/AC_MSG_CHECKING\(for BPF device sending support\).*?else\s+AC_MSG_RESULT\(no\)\s*fi\s*\]\)/AC_DEFINE([HAVE_BPF],[1],[Do we have BPF device support?])\nhave_bpf=yes\nAC_MSG_RESULT(yes)/s' configure.in
 # versione libnet: TRY_RUN in cross → sempre "no"; sostituisco con have_libnet=yes
 perl -0pi -e 's/AC_TRY_RUN\(\[\n#include<stdio\.h>\n#include<libnet\.h>.*?have_libnet=no\]\)/AC_MSG_RESULT\(yes\)\nhave_libnet=yes/s' configure.in
+# vtp.c: aux_short2 è puntatore + memcpy 4 byte → valore + 2 byte (bug upstream)
+sed -i '' 's|u_int16_t \*aux_short2;|u_int16_t aux_short2;|' src/vtp.c
+sed -i '' 's|memcpy((void \*)&aux_short2, (void \*)aux_short, 4);|memcpy((void *)\&aux_short2, (void *)aux_short, 2);|' src/vtp.c
 autoreconf -fi 2>&1 | tail -3
 make distclean >/dev/null 2>&1 || true
 # configure cerca pcap-bpf.h TOP-LEVEL (legacy, non installato da libpcap >=1.9) → alias dir
