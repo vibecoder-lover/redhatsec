@@ -19,9 +19,14 @@ make distclean >/dev/null 2>&1 || true
 # configure cerca pcap-bpf.h TOP-LEVEL (legacy, non installato da libpcap >=1.9) → alias dir
 mkdir -p "$DEPS/usr/include/pcap-legacy"
 cp "$DEPS/usr/include/pcap/bpf.h" "$DEPS/usr/include/pcap-legacy/pcap-bpf.h" 2>/dev/null || true
-CC="$CC" CFLAGS="$CFLAGS -I$DEPS/usr/include" LDFLAGS="$LDFLAGS -L$DEPS/usr/lib" \
+# ncurses: header widec in ncursesw/ + merge libncursesw+libtinfow → libncurses.a
+cp -R "$DEPS/usr/include/ncursesw/." "$DEPS/usr/include/" 2>/dev/null || true
+if [ -f "$DEPS/usr/lib/libncursesw.a" ] && [ ! -f "$DEPS/usr/lib/libncurses.a" ]; then
+  xcrun -sdk iphoneos libtool -static -o "$DEPS/usr/lib/libncurses.a" "$DEPS/usr/lib/libncursesw.a" "$DEPS/usr/lib/libtinfow.a"
+fi
+CC="$CC" CFLAGS="$CFLAGS -I$DEPS/usr/include/ncursesw -I$DEPS/usr/include" LDFLAGS="$LDFLAGS -L$DEPS/usr/lib" \
 ./configure --prefix="$PREFIX" --host=arm-apple-darwin \
-  --disable-gtk --with-ncurses=no \
+  --with-ncurses="$DEPS/usr" \
   --with-pcap-includes="$DEPS/usr/include/pcap-legacy" \
   --with-libnet-includes="$DEPS/usr/include"
 echo "configure done"
