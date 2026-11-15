@@ -177,15 +177,11 @@ enum ToolRegistry {
     static let workDir = "/var/mobile/RedHatSec"
     static let sourcesPath = workDir + "/etc/apt/sources.list.d/rhs.list"
 
-    // sorgenti di default: base rootless + repo community tool di sicurezza
-    // estendibile a runtime: `repo add <url>` dal terminale
+    // sorgenti di default: Procursus rootless (suite 1900 = arch iphoneos-arm64, iOS16 Dopamine)
+    // estendibile a runtime: `repo add <url>` dal terminale; `repo reset` riparte da qui
     static let defaultRepos: [String] = [
-        "deb https://apt.procurs.us/ iphoneos-arm64/1900 main",
-        "deb https://repo.chariz.com/ iphoneos-arm64/1900 main",
-        "deb https://havoc.app/ iphoneos-arm64/1900 main",
-        "deb https://repo.dylbin.com/ ./",
-        "deb https://cydia.invoxiplaygames.com/ ./",
-        "deb https://repo.coxxs.net/ ./",
+        "deb https://apt.procurs.us/ 1900 main",
+        "deb https://apt.procurs.us/ 2000 main",
     ]
 
     static func sources() -> [String] {
@@ -224,7 +220,10 @@ enum ToolRegistry {
         case "list":
             return ["sorgenti (\(sourcesPath)):"]
                 + sources().map { "  \($0)" }
-                + ["estendi con: repo add deb https://<host>/ ./"]
+                + ["estendi con: repo add deb https://<host>/ ./ — reset: repo reset"]
+        case "reset":
+            if let e = writeSources(defaultRepos) { return ["write rhs.list fallita: \(e)"] }
+            return ["sorgenti ripristinate:"] + defaultRepos.map { "  \($0)" }
         case "add":
             guard args.count > 1 else { return ["repo add: serve l'URL"] }
             var s = sources()
@@ -242,7 +241,7 @@ enum ToolRegistry {
             if let e = writeSources(s) { return ["write rhs.list fallita: \(e)"] }
             return ["rimossi i sorgenti con '\(kw)' (\(s.count) rimasti)"]
         default:
-            return ["uso: repo list | repo add <deb-url> | repo del <kw>"]
+            return ["uso: repo list | repo add <deb-url> | repo del <kw> | repo reset"]
         }
     }
 
