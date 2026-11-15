@@ -236,7 +236,10 @@ enum ToolRegistry {
     static let specs: [ToolSpec] = [
         ToolSpec(name: "nmap", pkg: "nmap", bins: ["nmap"]),
         ToolSpec(name: "tcpdump", pkg: "tcpdump", bins: ["tcpdump"]),
-        ToolSpec(name: "aircrack-ng", pkg: "aircrack-ng", bins: ["aircrack-ng", "aireplay-ng", "airodump-ng"]),
+        ToolSpec(name: "aircrack-ng", pkg: "aircrack-ng", bins: ["aircrack-ng", "aireplay-ng", "airodump-ng"],
+                 debURL: "https://github.com/vibecoder-lover/redhatsec/releases/download/debs/aircrack-ng_iphoneos-arm64.deb"),
+        ToolSpec(name: "socat", pkg: "socat", bins: ["socat"],
+                 debURL: "https://github.com/vibecoder-lover/redhatsec/releases/download/debs/socat_iphoneos-arm64.deb"),
         ToolSpec(name: "reaver", pkg: "reaver", bins: ["reaver", "pixiewps"]),
         ToolSpec(name: "mdk3", pkg: "mdk3", bins: ["mdk3"]),
         ToolSpec(name: "yersinia", pkg: "yersinia", bins: ["yersinia"]),
@@ -247,7 +250,6 @@ enum ToolRegistry {
         ToolSpec(name: "python3", pkg: "python3", bins: ["python3"]),
         ToolSpec(name: "netcat", pkg: "netcat", bins: ["nc"]),
         ToolSpec(name: "openssh", pkg: "openssh", bins: ["ssh", "scp", "ssh-keygen"]),
-        ToolSpec(name: "socat", pkg: "socat", bins: ["socat"]),
         ToolSpec(name: "openssl", pkg: "openssl", bins: ["openssl"]),
         ToolSpec(name: "wget", pkg: "wget", bins: ["wget"]),
     ]

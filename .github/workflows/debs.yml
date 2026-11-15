@@ -1,0 +1,45 @@
+name: debs
+on:
+  workflow_dispatch:
+    inputs:
+      tools:
+        description: 'tool da compilare (virgole, vuoto = tutti)'
+        required: false
+        default: ''
+  push:
+    paths: ['crossbuild/**']
+
+permissions:
+  contents: write
+
+jobs:
+  build-debs:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install flex bison
+      - name: Build debs (cross iphoneos-arm64)
+        run: |
+          cd crossbuild
+          chmod +x *.sh deps/*.sh tools/*.sh
+          if [ -n "${{ github.event.inputs.tools }}" ]; then
+            IFS=',' read -ra T <<< "${{ github.event.inputs.tools }}"
+          else
+            T=$(for f in tools/*.sh; do basename "$f" .sh; done)
+          fi
+          for t in $T; do ./build.sh "$t"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: redhatsec-debs
+          path: crossbuild/deb/*.deb
+          if-no-files-found: error
+      - name: Publish to release tag "debs"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd crossbuild
+          gh release create debs --title "Tool debs iphoneos-arm64" \
+            --notes "Cross-compiled security tools for rootless iOS. Install via app (debURL)." \
+            --clobber 2>/dev/null || true
+          gh release upload debs deb/*.deb --clobber
