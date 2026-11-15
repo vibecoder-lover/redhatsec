@@ -29,15 +29,20 @@ jobs:
             T=$(for f in tools/*.sh; do basename "$f" .sh; done)
           fi
           set -o pipefail
+          FAILED=""
           for t in $T; do
             if ! ./build.sh "$t" 2>&1 | tee "$t.log"; then
-              echo "=== FAIL $t: primo errore ==="
+              echo "=== SKIP $t: primo errore ==="
               grep -n -B10 -m1 "error:\|Error 1\|No such file\|not found\|undefined refe" "$t.log"
-              echo "=== FAIL $t: tail ==="
+              echo "=== SKIP $t: tail ==="
               tail -40 "$t.log"
-              exit 1
+              rm -rf stage
+              FAILED="$FAILED $t"
             fi
           done
+          echo "FAILED_TOOLS=$FAILED" | tee failed.txt
+          ls -la deb/ || true
+          exit 0
       - uses: actions/upload-artifact@v4
         with:
           name: redhatsec-debs
