@@ -35,10 +35,10 @@ OUT="deb/${TOOL}_iphoneos-arm64.deb"
     printf '2.0\n'
     printf '%-16s%-12s%-6s%-6s%-8s%-10s\`\n' 'control.tar.gz' '0' '0' '0' '644' "$C_SIZE"
     cat "$T/control.tar.gz"
-    [ $((C_SIZE % 2)) -eq 1 ] && printf '\n'
+    if [ $((C_SIZE % 2)) -eq 1 ]; then printf '\n'; fi
     printf '%-16s%-12s%-6s%-6s%-8s%-10s\`\n' 'data.tar.gz' '0' '0' '0' '644' "$D_SIZE"
     cat "$T/data.tar.gz"
-    [ $((D_SIZE % 2)) -eq 1 ] && printf '\n'
+    if [ $((D_SIZE % 2)) -eq 1 ]; then printf '\n'; fi
 } > "$OUT"
 
 echo "packed: $OUT ($(du -k "$OUT" | awk '{print $1}') KB)"

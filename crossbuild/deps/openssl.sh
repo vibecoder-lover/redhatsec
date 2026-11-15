@@ -2,7 +2,7 @@
 # deps: openssl static cross (libssl.a + libcrypto.a) via target ios64-cross
 set -e
 cd "$ROOT"
-[ -f "$DEPS/usr/lib/libssl.a" ] && exit 0
+if [ -f "$DEPS/usr/lib/libssl.a" ]; then exit 0; fi
 echo "=== DEP openssl ==="
 V=3.3.2
 [ -f "$SRCROOT/openssl-$V.tar.gz" ] || curl -fSL "https://github.com/openssl/openssl/releases/download/openssl-$V/openssl-$V.tar.gz" -o "$SRCROOT/openssl-$V.tar.gz"

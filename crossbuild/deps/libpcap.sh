@@ -2,7 +2,7 @@
 # deps: libpcap static cross (per airodump/aireplay e tool sniffing)
 set -e
 cd "$ROOT"
-[ -f "$DEPS/usr/lib/libpcap.a" ] && exit 0
+if [ -f "$DEPS/usr/lib/libpcap.a" ]; then exit 0; fi
 echo "=== DEP libpcap ==="
 V=1.10.5
 [ -f "$SRCROOT/libpcap-$V.tar.gz" ] || curl -fSL "https://www.tcpdump.org/release/libpcap-$V.tar.gz" -o "$SRCROOT/libpcap-$V.tar.gz"
