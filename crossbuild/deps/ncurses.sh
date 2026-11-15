@@ -4,6 +4,10 @@ set -e
 cd "$ROOT"
 if [ -f "$DEPS/usr/lib/libncursesw.a" ]; then exit 0; fi
 echo "=== DEP ncurses ==="
+# Xcode 26 SDK ha rimosso sys/ttydev.h e sys/ttchars.h — shim da xnu
+mkdir -p "$DEPS/usr/include/sys"
+[ -f "$DEPS/usr/include/sys/ttydev.h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/sys/ttydev.h" -o "$DEPS/usr/include/sys/ttydev.h"
+[ -f "$DEPS/usr/include/sys/ttchars.h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/sys/ttchars.h" -o "$DEPS/usr/include/sys/ttchars.h"
 V=6.5
 [ -f "$SRCROOT/ncurses-$V.tar.gz" ] || curl -fSL "https://invisible-mirror.net/archives/ncurses/ncurses-$V.tar.gz" -o "$SRCROOT/ncurses-$V.tar.gz"
 [ -d "$SRCROOT/ncurses-$V" ] || tar xzf "$SRCROOT/ncurses-$V.tar.gz" -C "$SRCROOT"
