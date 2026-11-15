@@ -9,8 +9,7 @@ V=3.3.2
 [ -d "$SRCROOT/openssl-$V" ] || tar xzf "$SRCROOT/openssl-$V.tar.gz" -C "$SRCROOT"
 cd "$SRCROOT/openssl-$V"
 make distclean >/dev/null 2>&1 || true
-CROSS_TOP="$(dirname "$SDK")" CROSS_SDK="$(basename "$SDK")" \
-./Configure ios64-cross no-asm no-tests no-shared \
+./Configure ios64-xcrun no-asm no-tests no-shared \
     --prefix="$DEPS/usr" --openssldir="$DEPS/etc/ssl" \
     CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
 make -j8 build_libs
