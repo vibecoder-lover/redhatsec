@@ -5,8 +5,7 @@ cd "$ROOT"
 if [ -f "$DEPS/usr/lib/libsqlite3.a" ]; then exit 0; fi
 echo "=== DEP sqlite3 ==="
 V=3450100   # 3.45.1
-Y=$(echo "$V" | cut -c1-4); M=$(echo "$V" | cut -c5-6 | sed 's/^0//'); D=$(echo "$V" | cut -c7-8 | sed 's/^0//')
-[ -f "$SRCROOT/sqlite-amalgamation-$V.zip" ] || curl -fSL "https://www.sqlite.org/$Y/sqlite-amalgamation-$V.zip" -o "$SRCROOT/sqlite-amalgamation-$V.zip"
+[ -f "$SRCROOT/sqlite-amalgamation-$V.zip" ] || curl -fSL "https://www.sqlite.org/2024/sqlite-amalgamation-$V.zip" -o "$SRCROOT/sqlite-amalgamation-$V.zip"
 [ -d "$SRCROOT/sqlite-amalgamation-$V" ] || { rm -rf "$SRCROOT/sqlite-amalgamation-$V"; unzip -q "$SRCROOT/sqlite-amalgamation-$V.zip" -d "$SRCROOT"; }
 cd "$SRCROOT/sqlite-amalgamation-$V"
 "$CC" $CFLAGS -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_THREADSAFE=0 \
