@@ -32,7 +32,7 @@ cat > "$SRCROOT/sycls-ios.patch" <<'EOF'
 +   }
     diag_immediate_exit = 0;
 EOF
-patch -p1 --fuzz=3 < "$SRCROOT/sycls-ios.patch" || { echo "PATCH FAIL"; exit 1; }
+patch -p1 --fuzz=3 < <(tr -d '\r' < "$SRCROOT/sycls-ios.patch") || { echo "PATCH FAIL"; exit 1; }
 make distclean >/dev/null 2>&1 || true
 # socat usa macro custom che A VOLTE (CHANCE=0) fanno try_run → morte in cross.
 # Pre-seedo le cache con i valori arm64-iOS (rilevati via GCC method, validati in CI):
