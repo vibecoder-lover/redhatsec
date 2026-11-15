@@ -31,8 +31,8 @@ jobs:
           set -o pipefail
           for t in $T; do
             if ! ./build.sh "$t" 2>&1 | tee "$t.log"; then
-              echo "=== FAIL $t: contesto ==="
-              grep -n -B6 "error:" "$t.log" | head -120
+              echo "=== FAIL $t: primo errore con comando ==="
+              grep -n -B10 -m1 "error:" "$t.log"
               exit 1
             fi
           done

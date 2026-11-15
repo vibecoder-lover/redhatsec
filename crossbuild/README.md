@@ -44,4 +44,4 @@ Per autotools passa **sempre** `--host=arm-apple-darwin` (cross-mode: configure 
 
 ## Deploy
 Il workflow `debs.yml` compila la matrice e pubblica i `.deb` nella release tag `debs` — l'app li installa con `curl + dpkg -i` via rootd.
-Deploy: il log fallito salva `<tool>.log` nel workspace — il contesto dell'errore viene stampato dal workflow su failure.
+Deploy: il log fallito salva `<tool>.log` nel workspace — il workflow stampa su failure il primo errore con il comando.
