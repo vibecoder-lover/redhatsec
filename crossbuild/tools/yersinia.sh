@@ -7,7 +7,6 @@ SRC="$SRCROOT/yersinia-$V"
 [ -d "$SRC" ] || tar xzf "$SRCROOT/yersinia-$V.tar.gz" -C "$SRCROOT"
 cd "$SRC"
 autoreconf -fi 2>&1 | tail -3
-trap 'echo "### FAILED line $BASH_LINENO"; tail -20 config.log 2>/dev/null || echo "(no config.log)"' ERR
 make distclean >/dev/null 2>&1 || true
 CC="$CC" CFLAGS="$CFLAGS -I$DEPS/usr/include" LDFLAGS="$LDFLAGS -L$DEPS/usr/lib" \
 ./configure --prefix="$PREFIX" --host=arm-apple-darwin

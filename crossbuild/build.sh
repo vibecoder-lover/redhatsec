@@ -29,7 +29,7 @@ mkdir -p deb
 for t in $TOOLS; do
     echo "=== BUILD $t ==="
     rm -rf "$STAGE"; mkdir -p "$STAGE"
-    bash "tools/$t.sh"
+    bash ${XTR:+-x} "tools/$t.sh"
     bash ./pack.sh "$t"
     echo "=== OK $t → deb/${t}_iphoneos-arm64.deb ==="
 done
