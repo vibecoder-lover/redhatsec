@@ -270,6 +270,8 @@ enum ToolRegistry {
         ToolSpec(name: "openssh", pkg: "openssh", bins: ["ssh", "scp", "ssh-keygen"]),
         ToolSpec(name: "openssl", pkg: "openssl", bins: ["openssl"]),
         ToolSpec(name: "wget", pkg: "wget", bins: ["wget"]),
+        ToolSpec(name: "dpkg", pkg: "dpkg", bins: ["dpkg", "dpkg-deb"]),
+        ToolSpec(name: "apt", pkg: "apt", bins: ["apt", "apt-get"]),
     ]
 
     static func spec(_ tool: String) -> ToolSpec? {
