@@ -18,6 +18,7 @@ mkdir -p "$DEPS/usr/include/pcap-legacy"
 cp "$DEPS/usr/include/pcap/bpf.h" "$DEPS/usr/include/pcap-legacy/pcap-bpf.h" 2>/dev/null || true
 CC="$CC" CFLAGS="$CFLAGS -I$DEPS/usr/include" LDFLAGS="$LDFLAGS -L$DEPS/usr/lib" \
 ./configure --prefix="$PREFIX" --host=arm-apple-darwin \
+  --disable-gtk \
   --with-pcap-includes="$DEPS/usr/include/pcap-legacy" \
   --with-libnet-includes="$DEPS/usr/include"
 echo "configure done"
