@@ -44,4 +44,4 @@ Per autotools passa **sempre** `--host=arm-apple-darwin` (cross-mode: configure 
 
 ## Deploy
 Il workflow `debs.yml` compila la matrice e pubblica i `.deb` nella release tag `debs` — l'app li installa con `curl + dpkg -i` via rootd.
-Trigger: il workflow parte su push di crossbuild/** — failure stampa primo errore (multi-pattern), comando e tail del log. Ricetta aircrack-ng: autotools minimale (libnl/pcre/hwloc/sqlite/gcrypt/opt OFF, openssl da DEPS statico).
+Trigger: il workflow parte su push di crossbuild/** — failure stampa primo errore (multi-pattern), comando e tail del log. brew: flex bison autoconf automake libtool (autoreconf serve per tarball git). Ricetta aircrack-ng: autotools minimale (libnl/pcre/hwloc/sqlite/gcrypt/opt OFF, openssl da DEPS statico).
