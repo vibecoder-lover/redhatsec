@@ -9,6 +9,7 @@ cd "$SRC"
 autoreconf -fi 2>&1 | tail -2
 CC="$CC" CFLAGS="$CFLAGS -I$DEPS/usr/include" LDFLAGS="$LDFLAGS -L$DEPS/usr/lib" \
 ./configure --prefix="$DEPS/usr" --host=arm-apple-darwin \
+  --with-link-layer=bpf \
   --disable-shared --enable-static
 make -j8
 make install
