@@ -14,6 +14,9 @@ perl -0pi -e 's/AC_TRY_RUN\(\[\n#include<stdio\.h>\n#include<libnet\.h>.*?have_l
 # vtp.c: aux_short2 è puntatore + memcpy 4 byte → valore + 2 byte (bug upstream)
 sed -i '' 's|u_int16_t \*aux_short2;|u_int16_t aux_short2;|' src/vtp.c
 sed -i '' 's|memcpy((void \*)&aux_short2, (void \*)aux_short, 4);|memcpy((void *)\&aux_short2, (void *)aux_short, 2);|' src/vtp.c
+# yersinia.c: handler K&R vs Darwin sa_handler(int); pthread_self struct → long
+sed -i '' 's|void (\*handler)()|void (*handler)(int)|' src/yersinia.c
+sed -i '' 's|(int)pthread_self()|(int)(long)pthread_self()|g' src/yersinia.c
 autoreconf -fi 2>&1 | tail -3
 make distclean >/dev/null 2>&1 || true
 # configure cerca pcap-bpf.h TOP-LEVEL (legacy, non installato da libpcap >=1.9) → alias dir
