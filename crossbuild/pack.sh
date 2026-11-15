@@ -23,6 +23,7 @@ Description: RedHatSec cross-compiled tool ($TOOL) for iphoneos-arm64 rootless
 EOF
 
 tar czf "$T/control.tar.gz" -C "$T/control" .
+cp -a "$STAGE/." "$T/data/"
 tar czf "$T/data.tar.gz"    -C "$T/data" var
 
 # ar members: header 60 byte (name16 mtime12 uid6 gid6 mode8 size10 + "\`\n")
