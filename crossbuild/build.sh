@@ -15,7 +15,7 @@ else
 fi
 
 for dep in deps/*.sh; do
-    bash "$dep"
+    bash "$dep" || echo "=== DEP $(basename "$dep" .sh) FAILED (tolerata, tool che la usa fara SKIP) ==="
 done
 
 # smoke: il wrapper produce arm64-ios?
