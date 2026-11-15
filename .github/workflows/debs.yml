@@ -49,6 +49,5 @@ jobs:
         run: |
           cd crossbuild
           gh release create debs --title "Tool debs iphoneos-arm64" \
-            --notes "Cross-compiled security tools for rootless iOS. Install via app (debURL)." \
-            --clobber 2>/dev/null || true
+            --notes "Cross-compiled security tools for rootless iOS. Install via app (debURL)." 2>/dev/null || true
           gh release upload debs deb/*.deb --clobber
