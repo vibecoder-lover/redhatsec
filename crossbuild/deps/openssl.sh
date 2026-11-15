@@ -11,7 +11,8 @@ cd "$SRCROOT/openssl-$V"
 make distclean >/dev/null 2>&1 || true
 CROSS_TOP="$(dirname "$SDK")" CROSS_SDK="$(basename "$SDK")" \
 ./Configure ios64-cross no-asm no-tests no-shared \
-    --prefix="$DEPS/usr" --openssldir="$DEPS/etc/ssl"
+    --prefix="$DEPS/usr" --openssldir="$DEPS/etc/ssl" \
+    CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS"
 make -j8 build_libs
 make install_sw
 echo "=== DEP openssl OK ==="
