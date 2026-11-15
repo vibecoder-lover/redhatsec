@@ -18,6 +18,13 @@ for dep in deps/*.sh; do
     bash "$dep"
 done
 
+# smoke: il wrapper produce arm64-ios?
+echo 'int main(void){return 0;}' > "$ROOT/smoke.c"
+echo "SMOKE: $CC $CFLAGS"
+"$CC" $CFLAGS -c "$ROOT/smoke.c" -o "$ROOT/smoke.o" || { echo "SMOKE COMPILE FAIL"; exit 1; }
+file "$ROOT/smoke.o" || true
+echo "$CC -v:"; "$CC" -v 2>&1 | tail -2 || true
+
 mkdir -p deb
 for t in $TOOLS; do
     echo "=== BUILD $t ==="
