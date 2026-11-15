@@ -23,5 +23,5 @@ EOF
 sed -i '' 's|ghosting.o|ghosting_stub.o|g' src/Makefile
 make -j1 CC="$CC"
 mkdir -p "$STAGE/var/jb/usr/bin"
-cp mdk3 "$STAGE/var/jb/usr/bin/"
+cp src/mdk3 "$STAGE/var/jb/usr/bin/" 2>/dev/null || cp mdk3 "$STAGE/var/jb/usr/bin/"
 $STRIP "$STAGE/var/jb/usr/bin/mdk3" 2>/dev/null || true
