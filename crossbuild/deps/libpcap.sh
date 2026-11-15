@@ -10,7 +10,7 @@ V=1.10.5
 cd "$SRCROOT/libpcap-$V"
 make distclean >/dev/null 2>&1 || true
 CC="$CC" CXX="$CXX" CFLAGS="$CFLAGS -DHAVE_CONFIG_H" LDFLAGS="$LDFLAGS" \
-./configure --prefix="$DEPS/usr" --host=arm-apple-darwin --disable-shared --without-libnl --disable-dbus --disable-rdma --disable-snf --disable-tc
+./configure --prefix="$DEPS/usr" --host=arm-apple-darwin --with-pcap=bpf --disable-shared --without-libnl --disable-dbus --disable-rdma --disable-snf --disable-tc
 make -j8
 make install
 echo "=== DEP libpcap OK ==="
