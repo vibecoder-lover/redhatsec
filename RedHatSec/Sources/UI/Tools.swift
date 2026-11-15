@@ -181,6 +181,12 @@ struct TerminalView: View {
                     Image(systemName: "trash")
                         .font(.system(size: 13)).foregroundColor(.dim)
                 }
+                Button {
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                } label: {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                        .font(.system(size: 13)).foregroundColor(.dim)
+                }
             }
             .padding(12)
             .background(Color.surface)

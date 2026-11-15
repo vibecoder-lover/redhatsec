@@ -205,7 +205,15 @@ enum ToolRegistry {
             try lines.joined(separator: "\n").write(toFile: sourcesPath, atomically: true, encoding: .utf8)
             return nil
         } catch {
-            return "\(error)"
+            // dir owner root (creata via rootd in run precedenti) → scrivo via rootd e ripasso a mobile
+            guard RootShell.shared.available else { return "\(error)" }
+            let sq: (String) -> String = { $0.replacingOccurrences(of: "'", with: "") }
+            var cmd = "mkdir -p '\(sq(dir))' && rm -f '\(sq(sourcesPath))'"
+            for l in lines { cmd += " && printf '%s\\n' '\(sq(l))' >> '\(sq(sourcesPath))'" }
+            cmd += " && chown -R mobile:mobile '\(sq(workDir))/etc'"
+            let r = RootShell.shared.runSync(cmd, timeout: 15)
+            if r.exitCode == 0, FileManager.default.fileExists(atPath: sourcesPath) { return nil }
+            return "mobile EPERM (\(error)) e rootd write rc=\(r.exitCode)"
         }
     }
 
