@@ -14,7 +14,8 @@ CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" \
 ./configure --prefix="$PREFIX" --host=arm-apple-darwin \
     --disable-libnl --disable-pcre --disable-hwloc \
     --without-sqlite3 --without-gcrypt --without-opt \
-    --enable-static --disable-shared
+    --enable-static --disable-shared \
+    --with-openssl="$DEPS/usr"
 [ -f Makefile ] && sed -i '' 's/-arch x86_64 -arch arm64//g; s/-arch arm64 -arch x86_64//g' Makefile
 make -j8
 make DESTDIR="$STAGE" install
