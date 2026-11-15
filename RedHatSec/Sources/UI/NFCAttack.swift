@@ -108,6 +108,13 @@ struct NFCAttackView: View {
                 Pill(text: t.ndefWritable ? "NDEF RW" : "NDEF RO", color: t.ndefWritable ? .ok : .warn)
             }
             KV(k: "UID", val: t.uid)
+            if t.ndefContent.isEmpty {
+                KV(k: "contenuto", val: "vuoto o non leggibile")
+            } else {
+                ForEach(t.ndefContent, id: \.self) { l in
+                    KV(k: "record", val: l)
+                }
+            }
         }
         .padding(14).card()
         .transition(.asymmetric(insertion: .scale(scale: 0.9).combined(with: .opacity), removal: .opacity))

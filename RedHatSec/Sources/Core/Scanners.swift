@@ -563,6 +563,7 @@ struct NFCTagFingerprint: Identifiable {
     let uid: String
     let family: String
     let ndefWritable: Bool
+    var ndefContent: [String] = []
 }
 
 final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSessionDelegate {
@@ -806,10 +807,29 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
         let fam = familyName(m.mifareFamily)
         m.queryNDEFStatus { [weak self] (st: CoreNFC.NFCNDEFStatus, _: Int, _: (any Error)?) in
             guard let self else { return }
-            let info = NFCTagFingerprint(uid: m.identifier.hexPreview, family: fam,
-                                         ndefWritable: st == CoreNFC.NFCNDEFStatus.readWrite)
+            let writable = st == CoreNFC.NFCNDEFStatus.readWrite
             session.alertMessage = "tag: \(fam)"
-            self.finishDetect(info)
+            if st == .notSupported {
+                self.finishDetect(NFCTagFingerprint(uid: m.identifier.hexPreview, family: fam, ndefWritable: false))
+                return
+            }
+            // leggo cosa c'è sul tag: il profilo mostra il contenuto PRIMA di riscriverlo
+            m.readNDEF { [weak self] (msg: NFCNDEFMessage?, err: (any Error)?) in
+                guard let self else { return }
+                var content: [String] = []
+                for r in msg?.records ?? [] {
+                    if let u = r.wellKnownTypeURIPayload {
+                        content.append("URI → \(u.absoluteString)")
+                    } else if let txt = r.wellKnownTypeTextPayload?.0 {
+                        content.append("TXT → \(txt)")
+                    } else {
+                        content.append("\(String(decoding: r.type, as: UTF8.self)) → \(r.payload.count)B")
+                    }
+                }
+                if let err { content.append("read err: \(err.localizedDescription)") }
+                self.finishDetect(NFCTagFingerprint(uid: m.identifier.hexPreview, family: fam,
+                                                    ndefWritable: writable, ndefContent: content))
+            }
         }
     }
 
