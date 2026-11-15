@@ -46,7 +46,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: redhatsec-debs
-          path: crossbuild/deb/*.deb
+          path: |
+            crossbuild/deb/*.deb
+            crossbuild/*.log
           if-no-files-found: error
       - name: Publish to release tag "debs"
         env:
