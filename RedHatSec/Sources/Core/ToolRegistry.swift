@@ -295,6 +295,8 @@ enum ToolRegistry {
 
             // PATH 1 — apt root via rootd con sorgenti RHS aggregati (app-owned)
             if RootShell.shared.available {
+                let st = RootShell.shared.runSync("echo rhs-rootd-ok", timeout: 15)
+                line("[install] rootd: \(st.exitCode == 0 ? "ok" : "DOWN (exit=\(st.exitCode)) \(st.stderr.prefix(80))")")
                 let lines = sources()
                 if let e = writeSources(lines) {
                     line("[install] write rhs.list fallita: \(e)")
@@ -316,10 +318,11 @@ enum ToolRegistry {
                 }
                 line("[install] apt RHS fallito (exit=\(r.exitCode)) — se il tool è in un altro repo: `repo add deb https://<host>/ ./`")
 
-                // PATH 1.5 — .deb locale: download + dpkg -i via rootd
+                // PATH 1.5 — .deb locale: bootstrap dpkg se assente + dpkg -i; fallback estrazione tar (bsdtar legge l'ar)
                 if let url = s.debURL {
                     line("[install] .deb locale: \(url)…")
-                    let d = RootShell.shared.runSync("curl -fSL --max-time 180 -o \(workDir)/tmp/\(s.pkg).deb '\(url)' && dpkg -i \(workDir)/tmp/\(s.pkg).deb", timeout: 300)
+                    let script = "command -v dpkg >/dev/null 2>&1 || apt-get install -y --allow-unauthenticated dpkg; curl -fSL --max-time 180 -o \(workDir)/tmp/\(s.pkg).deb '\(url)' || exit 9; if dpkg -i \(workDir)/tmp/\(s.pkg).deb; then echo DEB-OK; elif command -v tar >/dev/null 2>&1; then rm -rf \(workDir)/tmp/x; mkdir -p \(workDir)/tmp/x; cd \(workDir)/tmp/x && tar -xf ../\(s.pkg).deb 2>/dev/null && tar xzf data.tar.gz -C / && echo TAR-OK; fi"
+                    let d = RootShell.shared.runSync(script, timeout: 300)
                     let dout = (d.stdout.isEmpty ? d.stderr : d.stdout)
                     line(String(dout.suffix(400)))
                     if d.exitCode == 0, s.bins.first(where: { sh.resolve($0) != nil }) != nil {
