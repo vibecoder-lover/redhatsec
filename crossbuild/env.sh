@@ -9,9 +9,10 @@ export CXX="xcrun -sdk iphoneos clang++"
 export AR="xcrun -sdk iphoneos ar"
 export RANLIB="xcrun -sdk iphoneos ranlib"
 export STRIP="xcrun -sdk iphoneos strip"
-export CFLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=$MIN_IOS -O2"
+export TARGET=arm64-apple-ios14.0
+export CFLAGS="-target $TARGET -isysroot $SDK -O2"
 export CXXFLAGS="$CFLAGS -stdlib=libc++"
-export LDFLAGS="-arch arm64 -isysroot $SDK -miphoneos-version-min=$MIN_IOS"
+export LDFLAGS="-target $TARGET -isysroot $SDK"
 export PREFIX=/var/jb
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 export ROOT
