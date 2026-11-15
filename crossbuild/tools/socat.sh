@@ -7,7 +7,7 @@ SRC="$SRCROOT/socat-$V"
 [ -d "$SRC" ] || tar xzf "$SRCROOT/socat-$V.tar.gz" -C "$SRCROOT"
 cd "$SRC"
 make distclean >/dev/null 2>&1 || true
-CC="$CC" CFLAGS="$CFLAGS -D__API_UNAVAILABLE(x)=" LDFLAGS="$LDFLAGS" \
+CC="$CC" CFLAGS="$CFLAGS -include $ROOT/api-shim.h" LDFLAGS="$LDFLAGS" \
 ./configure --prefix="$PREFIX" --host=arm-apple-darwin --disable-openssl --disable-libwrap
 make -j8
 make DESTDIR="$STAGE" install
