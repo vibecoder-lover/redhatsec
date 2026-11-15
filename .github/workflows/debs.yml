@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: brew install flex bison
+        run: brew install flex bison autoconf automake libtool
       - name: Build debs (cross iphoneos-arm64)
         run: |
           cd crossbuild
