@@ -36,5 +36,5 @@ echo "configure done"
 make -j1
 echo "make done"
 mkdir -p "$STAGE/var/jb/usr/bin"
-cp yersinia "$STAGE/var/jb/usr/bin/"
+cp src/yersinia "$STAGE/var/jb/usr/bin/" 2>/dev/null || cp yersinia "$STAGE/var/jb/usr/bin/"
 $STRIP "$STAGE/var/jb/usr/bin/yersinia" 2>/dev/null || true

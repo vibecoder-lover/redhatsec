@@ -14,6 +14,13 @@ sed -i '' 's|#include "pcap.h"|#include "../pcap.h"|' src/osdep/file.c
 export CFLAGS="-std=gnu89 $CFLAGS -Wno-error=implicit-function-declaration -Wno-error=implicit-int -I$DEPS/usr/include -L$DEPS/usr/lib -include $SRCROOT/../endian-shim.h -include stdio.h -include stdlib.h -include unistd.h"
 # attacks/Makefile fa CFLAGS = (override) → += per ereditare le -include
 sed -i '' 's|^CFLAGS[[:space:]]*= |CFLAGS += |' src/attacks/Makefile
+# ghosting/evasion: osdep Darwin non espone i txpower linux → stub onesto
+cat > src/ghosting_stub.c <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+void parse_ghosting(const char *input) { (void)input; fprintf(stderr, "ghosting/evasion: non supportata su iOS (osdep)\n"); exit(1); }
+EOF
+sed -i '' 's|ghosting.o|ghosting_stub.o|g' Makefile
 make -j1 CC="$CC"
 mkdir -p "$STAGE/var/jb/usr/bin"
 cp mdk3 "$STAGE/var/jb/usr/bin/"
