@@ -26,7 +26,7 @@ if [ -f "$DEPS/usr/lib/libncursesw.a" ] && [ ! -f "$DEPS/usr/lib/libncurses.a" ]
 fi
 CC="$CC" CFLAGS="$CFLAGS -I$DEPS/usr/include/ncursesw -I$DEPS/usr/include" LDFLAGS="$LDFLAGS -L$DEPS/usr/lib" \
 ./configure --prefix="$PREFIX" --host=arm-apple-darwin \
-  --with-ncurses="$DEPS/usr" \
+  --disable-gtk --with-ncurses="$DEPS/usr" \
   --with-pcap-includes="$DEPS/usr/include/pcap-legacy" \
   --with-libnet-includes="$DEPS/usr/include"
 echo "configure done"
