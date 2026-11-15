@@ -28,7 +28,14 @@ jobs:
           else
             T=$(for f in tools/*.sh; do basename "$f" .sh; done)
           fi
-          for t in $T; do ./build.sh "$t"; done
+          set -o pipefail
+          for t in $T; do
+            if ! ./build.sh "$t" 2>&1 | tee "$t.log"; then
+              echo "=== FAIL $t: contesto ==="
+              grep -n -B6 "error:" "$t.log" | head -120
+              exit 1
+            fi
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: redhatsec-debs
