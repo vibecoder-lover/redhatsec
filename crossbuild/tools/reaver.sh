@@ -6,6 +6,9 @@ SRC="$SRCROOT/reaver-wps-fork-t6x-$V"
 [ -f "$SRCROOT/reaver-$V.tar.gz" ] || curl -fSL "https://github.com/t6x/reaver-wps-fork-t6x/archive/refs/tags/v$V.tar.gz" -o "$SRCROOT/reaver-$V.tar.gz"
 [ -d "$SRC" ] || tar xzf "$SRCROOT/reaver-$V.tar.gz" -C "$SRCROOT"
 cd "$SRC/src"
+# Xcode 26 SDK: net/if_arp.h rimosso — shim da xnu (iface.c ARPHRD_ETHER)
+mkdir -p "$DEPS/usr/include/net"
+[ -f "$DEPS/usr/include/net/if_arp.h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/net/if_arp.h" -o "$DEPS/usr/include/net/if_arp.h"
 make distclean >/dev/null 2>&1 || true
 # configure antepone "-lm -lpcap" a LDFLAGS → -lpcap prima del nostro -L → post-fix config.mak
 CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="-L$DEPS/usr/lib" \

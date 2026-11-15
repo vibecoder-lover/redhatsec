@@ -8,8 +8,12 @@ SRC="$SRCROOT/yersinia-$V"
 cd "$SRC"
 autoreconf -fi 2>&1 | tail -3
 make distclean >/dev/null 2>&1 || true
+# configure cerca pcap-bpf.h TOP-LEVEL (legacy, non installato da libpcap >=1.9) → alias dir
+mkdir -p "$DEPS/usr/include/pcap-legacy"
+cp "$DEPS/usr/include/pcap/bpf.h" "$DEPS/usr/include/pcap-legacy/pcap-bpf.h" 2>/dev/null || true
 CC="$CC" CFLAGS="$CFLAGS -I$DEPS/usr/include" LDFLAGS="$LDFLAGS -L$DEPS/usr/lib" \
-./configure --prefix="$PREFIX" --host=arm-apple-darwin
+./configure --prefix="$PREFIX" --host=arm-apple-darwin \
+  --with-pcap-includes="$DEPS/usr/include/pcap-legacy"
 echo "configure done"
 make -j1
 echo "make done"
