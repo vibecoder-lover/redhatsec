@@ -11,7 +11,7 @@ sed -i '' 's/LINKTYPE_PPI_HDR/192/g' src/osdep/file.c
 # deve risolvere a src/pcap.h (le LINKTYPE_* custom). -L via CFLAGS per l'ordine del linker.
 # file.c usa il pcap.h CUSTOM (LINKTYPE_*) → include relativo, ordine -I indifferente
 sed -i '' 's|#include "pcap.h"|#include "../pcap.h"|' src/osdep/file.c
-export CFLAGS="$CFLAGS -I$DEPS/usr/include -L$DEPS/usr/lib -include $SRCROOT/../endian-shim.h -include stdio.h -include unistd.h"
+export CFLAGS="$CFLAGS -I$DEPS/usr/include -L$DEPS/usr/lib -include $SRCROOT/../endian-shim.h -include stdio.h -include stdlib.h -include unistd.h"
 make -j1 CC="$CC"
 mkdir -p "$STAGE/var/jb/usr/bin"
 cp mdk3 "$STAGE/var/jb/usr/bin/"
