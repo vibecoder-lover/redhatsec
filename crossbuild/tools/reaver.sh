@@ -2,7 +2,7 @@
 # tool: reaver + wash (WPS attacker) — crypto internal, pcap static
 set -e
 V=1.6.6
-SRC="$SRCROOT/reaver-$V"
+SRC="$SRCROOT/reaver-wps-fork-t6x-$V"
 [ -f "$SRCROOT/reaver-$V.tar.gz" ] || curl -fSL "https://github.com/t6x/reaver-wps-fork-t6x/archive/refs/tags/v$V.tar.gz" -o "$SRCROOT/reaver-$V.tar.gz"
 [ -d "$SRC" ] || tar xzf "$SRCROOT/reaver-$V.tar.gz" -C "$SRCROOT"
 cd "$SRC/src"
