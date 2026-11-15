@@ -5,6 +5,9 @@ V=2.10
 SRC="$SRCROOT/hostapd-$V"
 [ -f "$SRCROOT/hostapd-$V.tar.gz" ] || curl -fSL "https://w1.fi/releases/hostapd-$V.tar.gz" -o "$SRCROOT/hostapd-$V.tar.gz"
 [ -d "$SRC" ] || tar xzf "$SRCROOT/hostapd-$V.tar.gz" -C "$SRCROOT"
+# Xcode 26 SDK ha rimosso net/route.h — shim da xnu (driver_bsd.c lo usa)
+mkdir -p "$DEPS/usr/include/net"
+[ -f "$DEPS/usr/include/net/route.h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/net/route.h" -o "$DEPS/usr/include/net/route.h"
 cd "$SRC/hostapd"
 cat > .config <<EOF
 CONFIG_DRIVER_BSD=y
