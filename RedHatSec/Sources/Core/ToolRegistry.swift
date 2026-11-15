@@ -5,6 +5,7 @@ struct ToolSpec {
     let name: String
     let pkg: String
     let bins: [String]
+    var debURL: String? = nil
 }
 
 @_silgen_name("proc_pidpath")
@@ -12,7 +13,7 @@ func proc_pidpath_c(_ pid: pid_t, _ buf: UnsafeMutablePointer<CChar>, _ size: UI
 
 enum BuiltinExec {
     static let names: Set<String> = ["ls", "cat", "echo", "whoami", "id", "uname",
-                                     "env", "df", "ps", "ifconfig", "pwd", "help", "clear", "spawntest"]
+                                     "env", "df", "ps", "ifconfig", "pwd", "help", "clear", "spawntest", "repo"]
 
     static func exec(_ parts: [String]) -> [String]? {
         guard let head = parts.first, names.contains(head), head != "clear" else { return nil }
@@ -31,6 +32,7 @@ enum BuiltinExec {
         case "ls": return lsLines(args)
         case "cat": return catLines(args)
         case "ps": return psLines
+        case "repo": return ToolRegistry.repoCmd(args)
         default: return nil
         }
     }
@@ -40,6 +42,7 @@ enum BuiltinExec {
         "  ls [dir] · cat <file> · pwd · echo · whoami · id · uname [-a]",
         "  env · df · ifconfig · ps · clear · help",
         "  install <tool>   → auto-install da repo (fallback Sileo)",
+        "  repo list/add/del → gestisci sorgenti apt RHS (\(ToolRegistry.sourcesPath))",
         "  spawntest        → diagnostica posix_spawn (persona root)",
         "  sudo <cmd>       → exec root via persona spawn",
         "  altri comandi    → exec via posix_spawn (richiede entitlements no-container)",
@@ -172,6 +175,63 @@ enum BuiltinExec {
 enum ToolRegistry {
     static let appBinDir = "/var/mobile/RedHatSec/bin"
     static let workDir = "/var/mobile/RedHatSec"
+    static let sourcesPath = workDir + "/etc/apt/sources.list.d/rhs.list"
+
+    // sorgenti di default: base rootless + repo community tool di sicurezza
+    // estendibile a runtime: `repo add <url>` dal terminale
+    static let defaultRepos: [String] = [
+        "deb https://apt.procurs.us/ iphoneos-arm64/1900 main",
+        "deb https://repo.chariz.com/ iphoneos-arm64/1900 main",
+        "deb https://havoc.app/ iphoneos-arm64/1900 main",
+        "deb https://repo.dylbin.com/ ./",
+        "deb https://cydia.invoxiplaygames.com/ ./",
+        "deb https://repo.coxxs.net/ ./",
+    ]
+
+    static func sources() -> [String] {
+        if let s = try? String(contentsOfFile: sourcesPath, encoding: .utf8) {
+            let lines = s.split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+            if !lines.isEmpty { return lines }
+        }
+        return defaultRepos
+    }
+
+    static func writeSources(_ lines: [String]) {
+        let dir = (sourcesPath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try? lines.joined(separator: "\n").write(toFile: sourcesPath, atomically: true, encoding: .utf8)
+    }
+
+    // builtin terminale: repo list | repo add <url> | repo del <kw>
+    static func repoCmd(_ args: [String]) -> [String] {
+        guard let sub = args.first else { return sources() }
+        switch sub {
+        case "list":
+            return ["sorgenti (\(sourcesPath)):"]
+                + sources().map { "  \($0)" }
+                + ["estendi con: repo add deb https://<host>/ ./"]
+        case "add":
+            guard args.count > 1 else { return ["repo add: serve l'URL"] }
+            var s = sources()
+            var added: [String] = []
+            for url in args.dropFirst() {
+                let line = url.hasPrefix("deb") ? url : "deb \(url) ./"
+                if !s.contains(line) { s.append(line); added.append(line) }
+            }
+            writeSources(s)
+            return added.isEmpty ? ["già presente"] : ["repo aggiunti:"] + added
+        case "del":
+            guard args.count > 1 else { return ["repo del: serve la keyword"] }
+            let kw = args[1]
+            let s = sources().filter { !$0.contains(kw) }
+            writeSources(s)
+            return ["rimossi i sorgenti con '\(kw)' (\(s.count) rimasti)"]
+        default:
+            return ["uso: repo list | repo add <deb-url> | repo del <kw>"]
+        }
+    }
 
     static let specs: [ToolSpec] = [
         ToolSpec(name: "nmap", pkg: "nmap", bins: ["nmap"]),
@@ -213,10 +273,15 @@ enum ToolRegistry {
             let apt = sh.resolve("apt-get")
             let dpkgDeb = sh.resolve("dpkg-deb")
 
-            // PATH 1 — apt root via rootd (launchd): installazione vera in /var/jb
+            // PATH 1 — apt root via rootd con sorgenti RHS aggregati (app-owned)
             if RootShell.shared.available {
-                line("[install] apt root via rootd…")
-                let r = RootShell.shared.runSync("apt-get update -qq; apt-get install -y \(s.pkg)", timeout: 300)
+                let lines = sources()
+                writeSources(lines)
+                let opts = "-o Dir::Etc::sourcelist=\(sourcesPath) -o Dir::Etc::sourceparts=-"
+                line("[install] apt root via rootd — \(lines.count) sorgenti RHS…")
+                let upd = RootShell.shared.runSync("apt-get \(opts) update -qq", timeout: 240)
+                line(String((upd.stdout.isEmpty ? upd.stderr : upd.stdout).suffix(300)))
+                let r = RootShell.shared.runSync("apt-get \(opts) install -y --allow-unauthenticated \(s.pkg)", timeout: 300)
                 let out = (r.stdout.isEmpty ? r.stderr : r.stdout)
                 line(String(out.suffix(400)))
                 if r.exitCode == 0, s.bins.first(where: { sh.resolve($0) != nil }) != nil {
@@ -224,10 +289,19 @@ enum ToolRegistry {
                     done(true)
                     return
                 }
-                if r.exitCode == 0 {
-                    line("[install] apt root exit=0 ma bin non trovato — fallback userland")
-                } else {
-                    line("[install] apt root fallito (exit=\(r.exitCode)) — fallback userland")
+                line("[install] apt RHS fallito (exit=\(r.exitCode)) — se il tool è in un altro repo: `repo add deb https://<host>/ ./`")
+
+                // PATH 1.5 — .deb locale: download + dpkg -i via rootd
+                if let url = s.debURL {
+                    line("[install] .deb locale: \(url)…")
+                    let d = RootShell.shared.runSync("curl -fSL --max-time 180 -o \(workDir)/tmp/\(s.pkg).deb '\(url)' && dpkg -i \(workDir)/tmp/\(s.pkg).deb", timeout: 300)
+                    let dout = (d.stdout.isEmpty ? d.stderr : d.stdout)
+                    line(String(dout.suffix(400)))
+                    if d.exitCode == 0, s.bins.first(where: { sh.resolve($0) != nil }) != nil {
+                        line("[install] \(tool) installato da .deb ✓ — ridigita il comando")
+                        done(true)
+                        return
+                    }
                 }
             }
 
