@@ -10,7 +10,7 @@ mkdir -p "$DEPS/usr/include/net"
 [ -f "$DEPS/usr/include/net/route.h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/net/route.h" -o "$DEPS/usr/include/net/route.h"
 cd "$SRC/hostapd"
 cat > .config <<EOF
-CONFIG_DRIVER_BSD=y
+CONFIG_DRIVER_DUMMY=y
 CONFIG_L2_PACKET=freebsd
 CONFIG_IEEE80211N=y
 CONFIG_IEEE80211AC=y

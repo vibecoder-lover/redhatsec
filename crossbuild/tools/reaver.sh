@@ -11,9 +11,13 @@ make distclean >/dev/null 2>&1 || true
 # configure antepone "-lm -lpcap" a LDFLAGS → -lpcap prima del nostro -L → post-fix config.mak
 CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="-L$DEPS/usr/lib" \
 ./configure --prefix="$PREFIX" --host=arm-apple-darwin
-sed -i '' "s/-lpcap/-L$DEPS\\/usr\\/lib -lpcap/g" config.mak
+echo "configure done"
+# delimiter | (la DEPS contiene / → s/// con / rompe)
+sed -i '' "s|-lpcap|-L$DEPS/usr/lib -lpcap|g" config.mak
+echo "sed done"
 grep LDFLAGS config.mak || true
-make -j8
+make -j1
+echo "make done"
 mkdir -p "$STAGE/var/jb/usr/bin"
 cp reaver "$STAGE/var/jb/usr/bin/"
 cp wash "$STAGE/var/jb/usr/bin/" 2>/dev/null || cp -R reaver "$STAGE/var/jb/usr/bin/wash"

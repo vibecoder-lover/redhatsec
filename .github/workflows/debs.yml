@@ -31,7 +31,7 @@ jobs:
           set -o pipefail
           FAILED=""
           for t in $T; do
-            if ! ./build.sh "$t" 2>&1 | tee "$t.log"; then
+            if ! bash -x ./build.sh "$t" 2>&1 | tee "$t.log"; then
               echo "=== SKIP $t: primo errore ==="
               grep -n -B10 -m1 "error:\|Error 1\|No such file\|not found\|undefined refe" "$t.log" || true
               echo "=== SKIP $t: tail ==="

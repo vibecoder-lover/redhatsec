@@ -1,5 +1,5 @@
 #!/bin/bash
-# tool: yersinia — ncurses static, no GTK
+# tool: yersinia — core CLI senza gtk/ncurses (configure legacy)
 set -e
 V=0.8.2
 SRC="$SRCROOT/yersinia-$V"
@@ -10,10 +10,10 @@ autoreconf -fi 2>&1 | tail -3
 trap 'echo "### FAILED line $BASH_LINENO"; tail -20 config.log 2>/dev/null || echo "(no config.log)"' ERR
 make distclean >/dev/null 2>&1 || true
 CC="$CC" CFLAGS="$CFLAGS -I$DEPS/usr/include" LDFLAGS="$LDFLAGS -L$DEPS/usr/lib" \
-./configure --prefix="$PREFIX" --host=arm-apple-darwin \
-    --disable-gtk --disable-ncurses \
-    --enable-static --disable-shared
-make -j8
+./configure --prefix="$PREFIX" --host=arm-apple-darwin
+echo "configure done"
+make -j1
+echo "make done"
 mkdir -p "$STAGE/var/jb/usr/bin"
 cp yersinia "$STAGE/var/jb/usr/bin/"
 $STRIP "$STAGE/var/jb/usr/bin/yersinia" 2>/dev/null || true
