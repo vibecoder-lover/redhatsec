@@ -11,7 +11,7 @@ cd "$SRC"
 cat > "$SRCROOT/sycls-ios.patch" <<'EOF'
 --- a/sycls.c
 +++ b/sycls.c
-@@ -1060,3 +1060,21 @@
+@@ -1060,3 +1060,18 @@
     diag_immediate_exit = 1;
 -   result = system(string);
 +   {
