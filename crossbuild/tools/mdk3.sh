@@ -20,7 +20,7 @@ cat > src/ghosting_stub.c <<'EOF'
 #include <stdlib.h>
 void parse_ghosting(const char *input) { (void)input; fprintf(stderr, "ghosting/evasion: non supportata su iOS (osdep)\n"); exit(1); }
 EOF
-sed -i '' 's|ghosting.o|ghosting_stub.o|g' Makefile
+sed -i '' 's|ghosting.o|ghosting_stub.o|g' src/Makefile
 make -j1 CC="$CC"
 mkdir -p "$STAGE/var/jb/usr/bin"
 cp mdk3 "$STAGE/var/jb/usr/bin/"
