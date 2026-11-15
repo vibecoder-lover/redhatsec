@@ -820,7 +820,7 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
                 for r in msg?.records ?? [] {
                     if let u = r.wellKnownTypeURIPayload() {
                         content.append("URI → \(u.absoluteString)")
-                    } else if let txt = r.wellKnownTypeTextPayload()?.0 {
+                    } else if let txt = r.wellKnownTypeTextPayload().0 {
                         content.append("TXT → \(txt)")
                     } else {
                         content.append("\(String(decoding: r.type, as: UTF8.self)) → \(r.payload.count)B")
