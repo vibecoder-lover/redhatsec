@@ -4,9 +4,10 @@ set -e
 cd "$ROOT"
 if [ -f "$DEPS/usr/lib/libpcap.a" ]; then exit 0; fi
 echo "=== DEP libpcap ==="
-# Xcode 26 SDK non include più net/bpf.h — shim header da xnu
+# Xcode 26 SDK non include più net/bpf.h e net/if_media.h — shim da xnu
 mkdir -p "$DEPS/usr/include/net"
 [ -f "$DEPS/usr/include/net/bpf.h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/net/bpf.h" -o "$DEPS/usr/include/net/bpf.h"
+[ -f "$DEPS/usr/include/net/if_media.h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/net/if_media.h" -o "$DEPS/usr/include/net/if_media.h"
 V=1.10.5
 [ -f "$SRCROOT/libpcap-$V.tar.gz" ] || curl -fSL "https://www.tcpdump.org/release/libpcap-$V.tar.gz" -o "$SRCROOT/libpcap-$V.tar.gz"
 [ -d "$SRCROOT/libpcap-$V" ] || tar xzf "$SRCROOT/libpcap-$V.tar.gz" -C "$SRCROOT"
