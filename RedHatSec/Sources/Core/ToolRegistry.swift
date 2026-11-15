@@ -198,10 +198,15 @@ enum ToolRegistry {
         return defaultRepos
     }
 
-    static func writeSources(_ lines: [String]) {
+    static func writeSources(_ lines: [String]) -> String? {
         let dir = (sourcesPath as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        try? lines.joined(separator: "\n").write(toFile: sourcesPath, atomically: true, encoding: .utf8)
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try lines.joined(separator: "\n").write(toFile: sourcesPath, atomically: true, encoding: .utf8)
+            return nil
+        } catch {
+            return "\(error)"
+        }
     }
 
     // builtin terminale: repo list | repo add <url> | repo del <kw>
@@ -220,13 +225,13 @@ enum ToolRegistry {
                 let line = url.hasPrefix("deb") ? url : "deb \(url) ./"
                 if !s.contains(line) { s.append(line); added.append(line) }
             }
-            writeSources(s)
+            if let e = writeSources(s) { return ["write rhs.list fallita: \(e)"] }
             return added.isEmpty ? ["già presente"] : ["repo aggiunti:"] + added
         case "del":
             guard args.count > 1 else { return ["repo del: serve la keyword"] }
             let kw = args[1]
             let s = sources().filter { !$0.contains(kw) }
-            writeSources(s)
+            if let e = writeSources(s) { return ["write rhs.list fallita: \(e)"] }
             return ["rimossi i sorgenti con '\(kw)' (\(s.count) rimasti)"]
         default:
             return ["uso: repo list | repo add <deb-url> | repo del <kw>"]
@@ -278,11 +283,16 @@ enum ToolRegistry {
             // PATH 1 — apt root via rootd con sorgenti RHS aggregati (app-owned)
             if RootShell.shared.available {
                 let lines = sources()
-                writeSources(lines)
+                if let e = writeSources(lines) {
+                    line("[install] write rhs.list fallita: \(e)")
+                }
+                let chk = RootShell.shared.runSync("ls -la '\(sourcesPath)' && head -2 '\(sourcesPath)'", timeout: 10)
+                line("[install] rhs.list: \(chk.stdout.isEmpty ? "MANCANTE/err=" + String(chk.exitCode) : chk.stdout.prefix(120))")
                 let opts = "-o Dir::Etc::sourcelist=\(sourcesPath) -o Dir::Etc::sourceparts=-"
                 line("[install] apt root via rootd — \(lines.count) sorgenti RHS…")
-                let upd = RootShell.shared.runSync("apt-get \(opts) update -qq", timeout: 240)
-                line(String((upd.stdout.isEmpty ? upd.stderr : upd.stdout).suffix(300)))
+                let upd = RootShell.shared.runSync("apt-get \(opts) update", timeout: 240)
+                let uout = (upd.stderr.isEmpty ? upd.stdout : upd.stderr)
+                line(String(uout.suffix(500)))
                 let r = RootShell.shared.runSync("apt-get \(opts) install -y --allow-unauthenticated \(s.pkg)", timeout: 300)
                 let out = (r.stdout.isEmpty ? r.stderr : r.stdout)
                 line(String(out.suffix(400)))
