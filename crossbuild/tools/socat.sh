@@ -8,7 +8,7 @@ SRC="$SRCROOT/socat-$V"
 cd "$SRC"
 make distclean >/dev/null 2>&1 || true
 CC="$CC" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" \
-./configure --prefix="$PREFIX" --disable-openssl --disable-libwrap
+./configure --prefix="$PREFIX" --host=arm-apple-darwin --disable-openssl --disable-libwrap
 make -j8
 make DESTDIR="$STAGE" install
 $STRIP "$STAGE/var/jb/usr/bin/"* 2>/dev/null || true

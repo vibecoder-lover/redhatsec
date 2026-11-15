@@ -40,6 +40,7 @@ EOF
 ./build.sh <tool>
 ```
 Autotools/CMake/Makefile-raw vanno bene: l'universale sono le env `CC/CFLAGS/LDFLAGS/PREFIX/DEPS`.
+Per autotools passa **sempre** `--host=arm-apple-darwin` (cross-mode: configure non esegue conftest iOS sul runner).
 
 ## Deploy
 Il workflow `debs.yml` compila la matrice e pubblica i `.deb` nella release tag `debs` — l'app li installa con `curl + dpkg -i` via rootd.
