@@ -25,6 +25,12 @@ printf '2.0\n' > "$T/debian-binary"
 
 tar czf "$T/control.tar.gz" -C "$T/control" control
 cp -a "$STAGE/." "$T/data/"
+# firma ad-hoc: AMFI uccide i Mach-O unsigned (Killed: 9) — ldid su ogni binario
+if command -v ldid >/dev/null 2>&1; then
+  find "$T/data" -type f | while IFS= read -r f; do ldid -S "$f" 2>/dev/null || true; done
+else
+  echo "WARN: ldid assente — binari non firmati"
+fi
 tar czf "$T/data.tar.gz"    -C "$T/data" var
 
 C_SIZE=$(stat -f %z "$T/control.tar.gz")
