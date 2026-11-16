@@ -203,7 +203,7 @@ enum VectorDB {
           "Forza negoziazione chiave a 1 byte entropy durante pairing → crack live della sessione.",
           "Patch stack; min entropy fissata.",
           .plan, "MITM SCT → forza entropy minima"),
-        v("ble_sweyntooth", "Sweyntooth SDK Malformed ATT", .ble, 2019, "CVE-2019-17060",
+        v("ble_sweyntooth_att", "Sweyntooth SDK Malformed ATT", .ble, 2019, "CVE-2019-17060",
           "T1499", 6.5, "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H", .medium,
           "SoC BLE con SDK vulnerabile (Dialog, TI, ST)",
           "ATT error code malformati / PDUs non validi → crash o hang del firmware.",

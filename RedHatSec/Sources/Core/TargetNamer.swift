@@ -20,15 +20,13 @@ enum TargetNamer {
             }
             return "Wi-Fi Network"
         case .net:
-            if let d = t.extra["desc"], let friendly = friendlyFromSSDP(d) {
-                return friendly
-            }
+            // niente fetch SSDP sincrono dal main (freeze): il rename friendly avviene async in Orchestrator
             if let host = t.extra["host"] {
                 return "Host \(tailIP(host))"
             }
             return "LAN Device"
         case .nfc:
-            if let rawd = t.extra["raw"], rawd.contains("MIFARE") {
+            if let rawd = t.extra["rawName"] ?? t.extra["raw"], rawd.contains("MIFARE") {
                 return "NFC \(rawd.split(separator: " ").dropFirst().first.map(String.init) ?? "Tag")"
             }
             return "NFC Tag"
@@ -66,21 +64,26 @@ enum TargetNamer {
         return "BLE Peripheral"
     }
 
-    static func friendlyFromSSDP(_ desc: String) -> String? {
-        guard let data = try? String(contentsOf: URL(string: desc)!, encoding: .utf8) else { return nil }
-        if let r = data.range(of: "<friendlyName>(.*?)</friendlyName>", options: .regularExpression) {
-            let name = String(data[r])
+    static func friendlyNameFromXML(_ xml: String) -> String? {
+        if let r = xml.range(of: "<friendlyName>(.*?)</friendlyName>", options: .regularExpression) {
+            let name = String(xml[r])
                 .replacingOccurrences(of: "<friendlyName>", with: "")
                 .replacingOccurrences(of: "</friendlyName>", with: "")
             if !name.isEmpty { return name }
         }
-        if let r = data.range(of: "<modelDescription>(.*?)</modelDescription>", options: .regularExpression) {
-            let name = String(data[r])
+        if let r = xml.range(of: "<modelDescription>(.*?)</modelDescription>", options: .regularExpression) {
+            let name = String(xml[r])
                 .replacingOccurrences(of: "<modelDescription>", with: "")
                 .replacingOccurrences(of: "</modelDescription>", with: "")
             if !name.isEmpty { return name }
         }
         return nil
+    }
+
+    static func friendlyFromSSDP(_ desc: String) -> String? {
+        guard let url = URL(string: desc),
+              let data = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        return friendlyNameFromXML(data)
     }
 
     static func tailIP(_ host: String) -> String {

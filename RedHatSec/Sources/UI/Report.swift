@@ -17,7 +17,19 @@ struct ReportView: View {
             .background(Color.bg.ignoresSafeArea())
             .navigationTitle("Report")
             .fullScreenCover(isPresented: $preview) {
-                if let url = o.reportURL { HTMLPreview(url: url) }
+                if let url = o.reportURL {
+                    HTMLPreview(url: url)
+                } else {
+                    // cover senza URL = fullscreen bloccante senza dismiss → fallback chiusibile
+                    VStack(spacing: 14) {
+                        Text("Report non disponibile").font(.headline)
+                        Text("il file HTML non è stato scritto").font(.caption).foregroundColor(.dim)
+                        Button("Chiudi") { preview = false }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.bg.ignoresSafeArea())
+                }
             }
         }
     }
@@ -92,7 +104,10 @@ struct ReportView: View {
             }
             Button {
                 Haptics.tap()
-                if let rep = o.report { _ = ReportBuilder.pdf(rep) }
+                if let rep = o.report {
+                    _ = ReportBuilder.pdf(rep)
+                    o.log("PDF generato in Documents/redhatsec-report.pdf", .good)
+                }
             } label: {
                 Label("PDF", systemImage: "doc.badge.plus")
                     .font(.system(size: 13, weight: .bold, design: .rounded))

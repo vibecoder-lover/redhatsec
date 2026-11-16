@@ -131,7 +131,7 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         frame[1] = UInt8(payload.count & 0xFF)
         frame[2] = UInt8((payload.count >> 8) & 0xFF)
         frame += payload
-        frame.append(crc8(frame))
+        frame.append(crc8(Array(frame.dropFirst())))  // CRC dopo l'header (spec firmware, come RX)
         peripheral?.writeValue(Data(frame), for: chr, type: .withResponse)
         log("TX \(cmd) (\(payload.count)B)")
     }
@@ -139,6 +139,8 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
     private func sendAwait(_ cmd: Cmd, payload: [UInt8] = [], timeout: TimeInterval = 8) async -> (UInt8, Data)? {
         guard connected else { return nil }
         return await withCheckedContinuation { c in
+            // sendAwait sovrapposti sovrascriverebbero la continuation pendente → rifiuto
+            guard responseCont == nil else { c.resume(returning: nil); return }
             responseCont = c
             send(cmd, payload: payload)
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
@@ -327,10 +329,12 @@ final class TCPBridge: NSObject, ObservableObject {
 
     func startAutoConnect() {
         guard !connected else { return }
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
             self.state = "auto-connect: sweep subnet…"
             self.retryTimer?.invalidate()
-            self.retryTimer = Timer.scheduledTimer(withTimeInterval: 18, repeats: true) { _ in
+            self.retryTimer = Timer.scheduledTimer(withTimeInterval: 18, repeats: true) { [weak self] _ in
+                guard let self else { return }
                 guard !self.connected else {
                     self.retryTimer?.invalidate()
                     self.retryTimer = nil
@@ -344,12 +348,17 @@ final class TCPBridge: NSObject, ObservableObject {
 
     // MARK: scoperta
 
+    private var sweeping = false
+
     // hotspot iOS non inoltra il multicast mDNS → sweep TCP diretto sulla /28
     func sweep() {
+        guard !sweeping, !connected else { return }
+        sweeping = true
         let candidates = (2...14).map { "172.20.10.\($0)" } + ["192.168.4.1"]
         state = "sweep subnet…"
         log("sweep TCP 3333 su subnet hotspot…")
         Task {
+            defer { sweeping = false }
             for ip in candidates {
                 DispatchQueue.main.async { self.state = "probe \(ip)…" }
                 if await probe(ip) {
@@ -367,27 +376,24 @@ final class TCPBridge: NSObject, ObservableObject {
 
     private func probe(_ ip: String) async -> Bool {
         await withCheckedContinuation { c in
+            let lock = NSLock()
             var done = false
             let conn = NWConnection(host: NWEndpoint.Host(ip), port: 3333, using: .tcp)
-            let timer = DispatchWorkItem {
-                guard !done else { return }
-                done = true
+            let finish: (Bool) -> Void = {
+                lock.lock()
+                let first = !done
+                if first { done = true }
+                lock.unlock()
+                guard first else { return }
                 conn.cancel()
-                c.resume(returning: false)
+                c.resume(returning: $0)
             }
+            let timer = DispatchWorkItem { finish(false) }
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.6, execute: timer)
             conn.stateUpdateHandler = { s in
-                guard !done else { return }
                 switch s {
-                case .ready:
-                    done = true
-                    timer.cancel()
-                    conn.cancel()
-                    c.resume(returning: true)
-                case .failed, .cancelled, .waiting:
-                    done = true
-                    timer.cancel()
-                    c.resume(returning: false)
+                case .ready: timer.cancel(); finish(true)
+                case .failed, .cancelled: timer.cancel(); finish(false)
                 default: break
                 }
             }
@@ -534,6 +540,8 @@ final class TCPBridge: NSObject, ObservableObject {
     private func sendAwait(_ cmd: UInt8, payload: [UInt8], timeout: TimeInterval = 10) async -> (UInt8, Data)? {
         guard connected else { return nil }
         return await withCheckedContinuation { c in
+            // sendAwait sovrapposti sovrascriverebbero la continuation pendente → rifiuto
+            guard responseCont == nil else { c.resume(returning: nil); return }
             responseCont = c
             send(cmd, payload: payload)
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
@@ -662,7 +670,7 @@ final class TCPBridge: NSObject, ObservableObject {
         var ip = host.split(separator: ".").compactMap { UInt8($0) }
         guard ip.count == 4 else { log("roundTrip: serve un IP numerico, non \(host)"); return nil }
         ip += [UInt8(port & 0xFF), UInt8((port >> 8) & 0xFF)]
-        ip.append(UInt8(min(25, Int(timeout * 10))))
+        ip.append(UInt8(min(250, max(10, Int(timeout * 10)))))
         ip += [UInt8(payload.count & 0xFF), UInt8((payload.count >> 8) & 0xFF)]
         ip += payload
         let r = await sendAwait(udp ? 0x12 : 0x11, payload: ip, timeout: timeout + 14)

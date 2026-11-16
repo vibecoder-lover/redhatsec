@@ -40,8 +40,20 @@ struct BridgeView: View {
             Button {
                 Haptics.heavy(); joining = true
                 Task {
-                    _ = await tcp.joinTarget(targetSSID, targetPass)
+                    // race con timeout: se joinTarget non risponde entro 20s, sblocco il bottone
+                    let j = Task { await tcp.joinTarget(targetSSID, targetPass) }
+                    let ok = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+                        let lock = NSLock()
+                        var done = false
+                        let finish: (Bool) -> Void = { v in
+                            lock.lock(); let first = !done; if first { done = true }; lock.unlock()
+                            if first { c.resume(returning: v) }
+                        }
+                        Task { finish(await j.value) }
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 20) { finish(false) }
+                    }
                     joining = false
+                    if !ok { tcp.log("join \(targetSSID): timeout o negato") }
                 }
             } label: {
                 Label(joining ? "JOIN…" : "JOIN RETE TARGET", systemImage: "arrow.turn.right.down")

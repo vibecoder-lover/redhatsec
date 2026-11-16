@@ -32,7 +32,7 @@ enum Sev: String, Codable, CaseIterable, Comparable, Identifiable {
         }
     }
     private var rank: Int { Sev.allCases.firstIndex(of: self)! }
-    static func < (l: Sev, r: Sev) -> Bool { l.rank > r.rank }
+    static func < (l: Sev, r: Sev) -> Bool { l.rank < r.rank } // critical-first coerente con rank
 }
 
 enum Haptics {

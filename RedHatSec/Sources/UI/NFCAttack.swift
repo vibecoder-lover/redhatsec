@@ -252,7 +252,7 @@ struct NFCAttackView: View {
         busy = true
         log.append(LogEntry(level: .exec, text: "ARM \(tac.name) — riavvicina il tag"))
         if tac.id == "clone" {
-            if let d = o.nfcDumps.first(where: { t.uid.hasPrefix($0.uid) }) {
+            if let d = o.nfcDumps.first(where: { !$0.uid.isEmpty && t.uid.hasPrefix($0.uid) }) {
                 o.replayDump(d)
                 log.append(LogEntry(level: .good, text: "replay lanciato — avvicina il tag target (vedi Targets › NFC DUMPS)"))
             } else {

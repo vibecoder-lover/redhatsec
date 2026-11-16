@@ -74,8 +74,13 @@ enum ReportBuilder {
     static func write(_ r: Report) -> URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let f = docs.appendingPathComponent("redhatsec-report.html")
-        try? html(r).write(to: f, atomically: true, encoding: .utf8)
-        lastHTML = f
+        do {
+            try html(r).write(to: f, atomically: true, encoding: .utf8)
+            lastHTML = f
+        } catch {
+            try? FileManager.default.removeItem(at: f)
+            lastHTML = nil
+        }
         return f
     }
 
