@@ -1329,7 +1329,7 @@ final class TCPSession {
 enum NetIO {
     static func tcpSendRecv(host: String, port: UInt16, payload: Data, timeout: TimeInterval,
                             maxRecv: Int, delaySend: TimeInterval, onResult: @escaping (Data) -> Void) {
-        guard let p = NWEndpoint.Port(rawValue: port) else { onResult(""); return }
+        guard let p = NWEndpoint.Port(rawValue: port) else { onResult(Data()); return }
         let c = NWConnection(host: NWEndpoint.Host(host), port: p, using: .tcp)
         // done/out condivisi tra NW queue e timer → tutto dietro lock (no double-finish)
         let lock = NSLock()
@@ -1340,7 +1340,7 @@ enum NetIO {
             lock.lock(); defer { lock.unlock() }
             return out
         }
-        let finish: (String) -> Void = {
+        let finish: (Data) -> Void = {
             lock.lock()
             let first = !done
             if first { done = true }
