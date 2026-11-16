@@ -39,32 +39,21 @@ enum Updater {
         return (info, info.build != current)
     }
 
-    // scarica il tipa nella tmp del container (mobile-writable al 100% — la dir
-    // /var/mobile/RedHatSec è root-owned e il move lì fallisce) e passa la palla a TrollStore
+    // TrollStore (TSSceneDelegate.m): apple-magnifier://install?url=<https> →
+    // TROLLSTORE scarica e presenta l'install lui stesso. Niente file locali.
     static func downloadAndInstall(_ info: Info) async -> String {
-        let fm = FileManager.default
-        let dest = (NSTemporaryDirectory() as NSString).appendingPathComponent("RedHatSec-\(info.build).tipa")
-        try? fm.removeItem(atPath: dest)
-        guard let (tmp, resp) = try? await URLSession.shared.download(from: info.fileURL),
-              (resp as? HTTPURLResponse)?.statusCode == 200 else {
-            return "download fallito (rete?)"
-        }
-        do {
-            try fm.moveItem(at: tmp, to: URL(fileURLWithPath: dest))
-        } catch {
-            return "move fallita: \(error.localizedDescription)"
-        }
-        // TrollStore (root) legge il container dell'app senza problemi
         var comps = URLComponents()
         comps.scheme = "apple-magnifier"
         comps.host = "install"
-        comps.queryItems = [URLQueryItem(name: "file", value: dest)]
+        comps.queryItems = [URLQueryItem(name: "url", value: info.fileURL.absoluteString)]
         guard let ts = comps.url else {
-            return "tipa in \(dest) — installa da TrollStore"
+            return "url magnifier non costruibile"
         }
-        await MainActor.run {
+        let ok = await MainActor.run { () -> Bool in
             UIApplication.shared.open(ts, options: [:], completionHandler: nil)
         }
-        return "install inviata a TrollStore (\(info.build)) — conferma lì, l'app si riavvia aggiornata"
+        return ok
+            ? "TrollStore aperto — scarica e installa \(info.build), conferma lì"
+            : "TrollStore non risponde all'URL — installa a mano dal release GitHub"
     }
 }
