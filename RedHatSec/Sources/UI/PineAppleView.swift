@@ -19,6 +19,9 @@ struct PineAppleView: View {
     @State private var results: [String] = []
     @State private var probes: [String] = []
     @State private var scanPorts: [UInt16] = [80, 443, 8080, 23, 554, 1900, 5431, 5000]
+    @State private var dnsFwd = false
+    @State private var natOn = true
+    @State private var traffic: [String] = []
 
     private let exploits = ExploitLibrary.all
 
@@ -29,6 +32,7 @@ struct PineAppleView: View {
                 rogueSection
                 clientsSection
                 reconSection
+                trafficSection
                 exploitSection
                 logSection
             }
@@ -122,6 +126,28 @@ struct PineAppleView: View {
         }
     }
 
+    private var trafficSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("TRAFFIC CLIENTI").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
+            Text("HTTPS cifrato (serve fake-CA sul client) — qui: domini via DNS, HTTP e form portal in chiaro")
+                .font(.system(size: 10)).foregroundColor(.dim)
+            HStack(spacing: 10) {
+                PineButton(label: dnsFwd ? "DNS: FORWARD" : "DNS: POISON", color: .warn) { await toggleDns() }
+                PineButton(label: "NAT \(natOn ? "OFF" : "ON")", color: .dim) { await toggleNat() }
+            }
+            PineButton(label: "AGGIORNA LOG", color: .redHat) { await refreshTraffic() }
+            if traffic.isEmpty {
+                Text("nessun traffico catturato").font(.system(size: 11)).foregroundColor(.dim)
+            }
+            ForEach(Array(traffic.enumerated()), id: \.offset) { _, l in
+                Text(l)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(l.contains("pass=") || l.contains("pwd=") || l.contains("user=") || l.contains("password") ? .warn : .white.opacity(0.85))
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
     private var exploitSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("CVE LAUNCHER").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
@@ -201,8 +227,23 @@ struct PineAppleView: View {
         busy = false
     }
 
-    private func doPortScan() async {
-        guard !targetIP.isEmpty else { results.append("[-] IP target mancante"); return }
+    private func toggleDns() async {
+        dnsFwd.toggle()
+        await tcp.nat(natOn, dnsFwd: dnsFwd)
+    }
+
+    private func toggleNat() async {
+        natOn.toggle()
+        await tcp.nat(natOn, dnsFwd: dnsFwd)
+    }
+
+    private func refreshTraffic() async {
+        busy = true
+        traffic = await tcp.trafficLog()
+        busy = false
+    }
+
+    private func doPortScan() async {        guard !targetIP.isEmpty else { results.append("[-] IP target mancante"); return }
         busy = true
         let open = await tcp.portScan(host: targetIP, ports: scanPorts)
         if open.isEmpty {

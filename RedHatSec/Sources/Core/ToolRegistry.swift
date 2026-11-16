@@ -127,7 +127,10 @@ enum ToolRegistry {
                  debURL: "https://github.com/vibecoder-lover/redhatsec/releases/download/debs/yersinia_iphoneos-arm64.deb"),
         ToolSpec(name: "hostapd", pkg: "hostapd", bins: ["hostapd"],
                  debURL: "https://github.com/vibecoder-lover/redhatsec/releases/download/debs/hostapd_iphoneos-arm64.deb"),
-        ToolSpec(name: "ettercap", pkg: "ettercap", bins: ["ettercap"]),
+        ToolSpec(name: "ettercap", pkg: "ettercap", bins: ["ettercap"],
+                 debURL: "https://github.com/vibecoder-lover/redhatsec/releases/download/debs/ettercap_iphoneos-arm64.deb"),
+        ToolSpec(name: "hcxdumptool", pkg: "hcxdumptool", bins: ["hcxdumptool"]),
+        ToolSpec(name: "hcxpcapngtool", pkg: "hcxtools", bins: ["hcxpcapngtool"]),
         ToolSpec(name: "killerbee", pkg: "killerbee", bins: ["zbdsniff"]),
         ToolSpec(name: "curl", pkg: "curl", bins: ["curl"]),
         ToolSpec(name: "python3", pkg: "python3", bins: ["python3"]),
@@ -188,18 +191,18 @@ enum ToolRegistry {
                 line("[install] apt RHS fallito (exit=\(r.exitCode)) — se il tool è in un altro repo: `repo add deb https://<host>/ ./`")
 
                 // PATH 1.5 — .deb locale: bootstrap dpkg se assente + dpkg -i; fallback estrazione tar (bsdtar legge l'ar)
-                if let url = s.debURL {
-                    line("[install] .deb locale: \(url)…")
-                    let script = "command -v dpkg >/dev/null 2>&1 || apt-get install -y --allow-unauthenticated dpkg; curl -fSL --max-time 180 -o \(workDir)/tmp/\(s.pkg).deb '\(url)' || echo CURL-FAIL; if dpkg -i \(workDir)/tmp/\(s.pkg).deb; then echo DEB-OK; elif command -v tar >/dev/null 2>&1; then rm -rf \(workDir)/tmp/x; mkdir -p \(workDir)/tmp/x; cd \(workDir)/tmp/x && tar -xf ../\(s.pkg).deb 2>/dev/null && tar xzf data.tar.gz -C / && echo TAR-OK; fi"
-                    let d = RootShell.shared.runSync(script, timeout: 300)
-                    let dout = (d.stdout.isEmpty ? d.stderr : d.stdout)
-                    line(String(dout.suffix(400)))
-                    if d.exitCode == 0, s.bins.first(where: { sh.resolve($0) != nil }) != nil {
-                        sh.rescanTools()
-                        line("[install] \(tool) installato da .deb ✓ — ridigita il comando")
-                        done(true)
-                        return
-                    }
+                // se lo spec non ha debURL, prova il nome convenzionale nella release (future crossbuild)
+                let debUrl = s.debURL ?? "https://github.com/vibecoder-lover/redhatsec/releases/download/debs/\(s.pkg)_iphoneos-arm64.deb"
+                line("[install] .deb locale: \(debUrl)…")
+                let script = "command -v dpkg >/dev/null 2>&1 || apt-get install -y --allow-unauthenticated dpkg; curl -fSL --max-time 180 -o \(workDir)/tmp/\(s.pkg).deb '\(debUrl)' || echo CURL-FAIL; if dpkg -i \(workDir)/tmp/\(s.pkg).deb; then echo DEB-OK; elif command -v tar >/dev/null 2>&1; then rm -rf \(workDir)/tmp/x; mkdir -p \(workDir)/tmp/x; cd \(workDir)/tmp/x && tar -xf ../\(s.pkg).deb 2>/dev/null && tar xzf data.tar.gz -C / && echo TAR-OK; fi"
+                let d = RootShell.shared.runSync(script, timeout: 300)
+                let dout = (d.stdout.isEmpty ? d.stderr : d.stdout)
+                line(String(dout.suffix(400)))
+                if d.exitCode == 0, s.bins.first(where: { sh.resolve($0) != nil }) != nil {
+                    sh.rescanTools()
+                    line("[install] \(tool) installato da .deb ✓ — ridigita il comando")
+                    done(true)
+                    return
                 }
             }
 

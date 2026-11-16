@@ -43,7 +43,12 @@ enum RootdClient {
         conn.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                conn.send(content: Data("RHSROOT:{ \(cmd) ; }; echo __RHS_RC_$?\n".utf8), completion: .contentProcessed { _ in
+                // PATH + LD_LIBRARY_PATH: il sh di launchd parte senza /var/jb/usr/bin
+                // → i tool installati root risultano "not found" (127) via RootShell
+                let pre = "export PATH=/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH; " +
+                          "export LD_LIBRARY_PATH=/var/jb/usr/lib:$LD_LIBRARY_PATH; " +
+                          "export DEBIAN_FRONTEND=noninteractive; "
+                conn.send(content: Data("RHSROOT:{ \(pre)\(cmd) ; }; echo __RHS_RC_$?\n".utf8), completion: .contentProcessed { _ in
                     recvAll(conn, st)
                 })
             case .failed(let e):
