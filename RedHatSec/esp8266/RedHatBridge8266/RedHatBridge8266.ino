@@ -282,6 +282,27 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
     }
 
+    case 0x03: {  // wifiResults esplicito: ultimi risultati, o avvia scan se vuoti
+      if (apCount > 0) {
+        uint8_t payload[900];
+        int i = 0;
+        for (int k = 0; k < apCount && i < 880; k++) {
+          payload[i++] = (uint8_t)aps[k].rssi;
+          payload[i++] = aps[k].ch;
+          memcpy(payload + i, aps[k].bssid, 6); i += 6;
+          payload[i++] = aps[k].sec;
+          int sl = strlen(aps[k].ssid);
+          if (sl > 32) sl = 32;
+          payload[i++] = (uint8_t)sl;
+          memcpy(payload + i, aps[k].ssid, sl); i += sl;
+        }
+        sendFrame(0x03, 0x00, payload, i);
+      } else {
+        startScan(8);
+      }
+      break;
+    }
+
     case 0x04:
       if (plen >= 8) {
         sendDeauth(pl, pl[6], pl[7]);
