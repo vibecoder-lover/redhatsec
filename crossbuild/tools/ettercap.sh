@@ -10,6 +10,20 @@ cd "$SRC"
 # CMake 4 (runner 2026): respinge cmake_minimum_required(VERSION 2.8)
 sed -i '' 's|cmake_minimum_required(VERSION 2.8)|cmake_minimum_required(VERSION 3.10)|' CMakeLists.txt
 grep -n "cmake_minimum_required" CMakeLists.txt | head -2
+
+# system() è __API_UNAVAILABLE su iOS → wrapper fork/exec inline (come reaver)
+grep -q rhs_system include/ec.h 2>/dev/null || cat >> include/ec.h <<'EOF'
+/* iOS: system() non disponibile → fork/exec inline (RedHatSec) */
+#include <unistd.h>
+#include <sys/wait.h>
+static inline int rhs_system(const char *cmd) {
+    pid_t p = fork();
+    if (p == 0) { execl("/bin/sh", "sh", "-c", cmd, (char *)NULL); _exit(127); }
+    int st = 0; waitpid(p, &st, 0);
+    return st;
+}
+#define system rhs_system
+EOF
 mkdir -p "$DEPS/usr/include/net" "$DEPS/usr/include/netinet"
 for h in net/if_arp.h net/ethernet.h net/route.h net/bpf.h netinet/if_ether.h netinet/ip_var.h; do
   [ -f "$DEPS/usr/include/$h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/$h" -o "$DEPS/usr/include/$h"
