@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @EnvironmentObject var o: Orchestrator
+    @ObservedObject private var sr = ShellRunner.shared
     @State private var showConsole = false
     @State private var showSettings = false
     @State private var confirmExec = false
@@ -70,7 +71,7 @@ struct DashboardView: View {
         HStack(spacing: 8) {
             Pill(text: ShellRunner.shared.isJailbroken ? "JB OK" : "NO JB",
                  color: ShellRunner.shared.isJailbroken ? .ok : .bad)
-            Pill(text: "tools: \(ShellRunner.shared.availableTools.count)", color: .info)
+            Pill(text: "tools: \(sr.availableTools.count)", color: .info)
             Pill(text: o.tcpBridge.connected ? "BRIDGE ✓" : "BRIDGE ✗",
                  color: o.tcpBridge.connected ? .ok : .bad)
             Spacer()

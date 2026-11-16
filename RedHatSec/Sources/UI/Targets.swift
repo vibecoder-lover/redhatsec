@@ -19,6 +19,7 @@ func outcomeMark(_ outcome: String) -> String {
 
 struct TargetsView: View {
     @EnvironmentObject var o: Orchestrator
+    @ObservedObject private var sr = ShellRunner.shared
     @State private var filter: Proto?
     @State private var selected: TargetDevice?
     @State private var dumpDetail: NFCDump?

@@ -30,18 +30,26 @@ struct ShellResult {
     var stderr: String
 }
 
-final class ShellRunner {
+final class ShellRunner: ObservableObject {
     static let shared = ShellRunner()
 
     private let bootstrapRoots = ["/var/jb", "", "/usr/local", "/opt/jb"]
 
-    private(set) lazy var availableTools: [String] = {
-        let names = ["nmap", "tcpdump", "aireplay-ng", "airodump-ng", "aircrack-ng",
-                     "hcxpcapngtool", "hcxdumptool", "hostapd", "mdk3", "reaver",
-                     "pixiewps", "yersinia", "ettercap", "killerbee", "zbdsniff",
-                     "zbjam", "dns-sd", "curl", "python3", "scapy"]
-        return names.filter { resolve($0) != nil }
-    }()
+    private static let toolNames = ["nmap", "tcpdump", "aireplay-ng", "airodump-ng", "aircrack-ng",
+                                    "hcxpcapngtool", "hcxdumptool", "hostapd", "mdk3", "reaver",
+                                    "pixiewps", "yersinia", "ettercap", "killerbee", "zbdsniff",
+                                    "zbjam", "dns-sd", "curl", "python3", "scapy"]
+
+    @Published private(set) var availableTools: [String] = []
+
+    // re-scan dopo ogni install: i pill "TOOL ✓/✗" e il contatore si aggiornano live
+    func rescanTools() {
+        availableTools = Self.toolNames.filter { resolve($0) != nil }
+    }
+
+    private init() {
+        rescanTools()
+    }
 
     private var pathEnv: String {
         var parts: [String] = ["/var/mobile/RedHatSec/bin"]

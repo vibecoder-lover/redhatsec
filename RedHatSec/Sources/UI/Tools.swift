@@ -131,6 +131,7 @@ struct ToolsTab: View {
 struct TerminalView: View {
     @EnvironmentObject var tm: TerminalModel
     @ObservedObject private var sess = RootdSession.shared
+    @ObservedObject private var sr = ShellRunner.shared
     @State private var input = ""
     @FocusState private var focused: Bool
     @State private var hist: [String] = []
@@ -154,7 +155,7 @@ struct TerminalView: View {
         VStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    ForEach(ShellRunner.shared.availableTools, id: \.self) { t in
+                    ForEach(sr.availableTools, id: \.self) { t in
                         Chip(text: t, active: false) { input = "\(t) " ; focused = true }
                     }
                     ForEach(ToolRegistry.specs, id: \.name) { s in
@@ -668,6 +669,13 @@ struct ForgeView: View {
                         .frame(width: 220, height: 220)
                         .padding(14).background(Color.white)
                         .cornerRadius(14)
+                        .frame(maxWidth: .infinity)
+                } else {
+                    Text(payload.count >= 400
+                         ? "QR PAYLOAD — payload \(payload.count) char: oltre il limite QR, usa QR→FILE"
+                         : "QR PAYLOAD — generazione fallita (payload non valido)")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(payload.count >= 400 ? .dim : .bad)
                         .frame(maxWidth: .infinity)
                 }
 

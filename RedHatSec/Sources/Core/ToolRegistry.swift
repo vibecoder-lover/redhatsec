@@ -180,6 +180,7 @@ enum ToolRegistry {
                 let out = (r.stdout.isEmpty ? r.stderr : r.stdout)
                 line(String(out.suffix(400)))
                 if r.exitCode == 0, s.bins.first(where: { sh.resolve($0) != nil }) != nil {
+                    sh.rescanTools()
                     line("[install] \(tool) installato ROOT in /var/jb ✓ — ridigita il comando")
                     done(true)
                     return
@@ -194,6 +195,7 @@ enum ToolRegistry {
                     let dout = (d.stdout.isEmpty ? d.stderr : d.stdout)
                     line(String(dout.suffix(400)))
                     if d.exitCode == 0, s.bins.first(where: { sh.resolve($0) != nil }) != nil {
+                        sh.rescanTools()
                         line("[install] \(tool) installato da .deb ✓ — ridigita il comando")
                         done(true)
                         return
@@ -211,6 +213,7 @@ enum ToolRegistry {
                     "cd \(workDir)/tmp && ls *.deb >/dev/null 2>&1 && for d in *.deb; do dpkg-deb -x \"\(workDir)/tmp/$d\" \(workDir)/extracted; done && cp \(workDir)/extracted/var/jb/usr/bin/* \(appBinDir)/ 2>/dev/null; cp \(workDir)/extracted/usr/bin/* \(appBinDir)/ 2>/dev/null; cp \(workDir)/extracted/usr/local/bin/* \(appBinDir)/ 2>/dev/null; chmod 755 \(appBinDir)/* 2>/dev/null; rm -f \(workDir)/tmp/*.deb; true"], timeout: 120)
                 let found = s.bins.first { sh.resolve($0) != nil } != nil
                 if found {
+                    sh.rescanTools()
                     line("[install] \(tool) estratto in \(appBinDir) ✓ — exec senza root")
                     done(true)
                     return

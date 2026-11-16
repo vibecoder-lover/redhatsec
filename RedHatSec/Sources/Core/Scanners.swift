@@ -23,6 +23,8 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private var writableChars: [(svc: String, chr: String)] = []
     private var ssidCandidates: [String] = []
     private var ssidSeen = Set<String>()
+    private var pendingReads = 0
+    private var discoveryDone = false
 
     var isReady: Bool { central?.state == .poweredOn }
 
@@ -121,6 +123,8 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         writableChars = []
         ssidCandidates = []
         ssidSeen = []
+        pendingReads = 0
+        discoveryDone = false
         return await withCheckedContinuation { cont in
             enumContinuation = cont
             per.delegate = self
@@ -150,7 +154,10 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             }
             peripheral.discoverCharacteristics(nil, for: s)
         }
-        if peripheral.services?.isEmpty ?? true { finishEnum() }
+        if peripheral.services?.isEmpty ?? true {
+            discoveryDone = true
+            tryFinishEnum()
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
@@ -158,16 +165,24 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             var line = "  CHR \(c.uuid.uuidString) [\(propsText(c.properties))]"
             if c.value != nil { line += " val=\((c.value ?? Data()).hexPreview)" }
             enumBuffer.append(line)
-            if c.properties.contains(.read) { peripheral.readValue(for: c) }
+            if c.properties.contains(.read) {
+                pendingReads += 1
+                peripheral.readValue(for: c)
+            }
             if c.properties.contains(.write) || c.properties.contains(.writeWithoutResponse) {
                 writableChars.append((service.uuid.uuidString, c.uuid.uuidString))
                 enumBuffer.append("  ↳ WRITABLE → svc=\(service.uuid.uuidString) chr=\(c.uuid.uuidString)")
             }
         }
-        if service == peripheral.services?.last { finishEnum() }
+        if service == peripheral.services?.last {
+            discoveryDone = true
+            tryFinishEnum()
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        // i readValue sono in volo: il report chiude SOLO quando sono tutti rientrati
+        if pendingReads > 0 { pendingReads -= 1 }
         if let v = characteristic.value, !v.isEmpty {
             enumBuffer.append("    val \(characteristic.uuid.uuidString): \(v.hexPreview)")
             if let s = Self.ssidCandidate(v) {
@@ -179,6 +194,12 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                 }
             }
         }
+        tryFinishEnum()
+    }
+
+    private func tryFinishEnum() {
+        guard discoveryDone, pendingReads == 0 else { return }
+        finishEnum()
     }
 
     // servizi di provisioning Wi-Fi noti (SSID via GATT)
@@ -637,7 +658,7 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
     private var replayBuffer: [String] = []
     private var replayDumpRef: NFCDump?
 
-    func fullScan(timeout: TimeInterval = 25) async -> NFCDump? {
+    func fullScan(timeout: TimeInterval = 60) async -> NFCDump? {
         guard NFCNDEFReaderSession.readingAvailable else { return nil }
         return await withCheckedContinuation { c in
             scanCont = c
@@ -651,7 +672,7 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
         }
     }
 
-    func replay(_ dump: NFCDump, timeout: TimeInterval = 25) async -> [String] {
+    func replay(_ dump: NFCDump, timeout: TimeInterval = 60) async -> [String] {
         guard NFCNDEFReaderSession.readingAvailable else { return ["NFC reader unavailable"] }
         replayBuffer = ["replay \(dump.title) — \(dump.ndefHex.count) NDEF record(s)"]
         replayDumpRef = dump
@@ -717,7 +738,7 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
         }
     }
 
-    func attack(_ vector: String, config: [String: String], timeout: TimeInterval = 25) async -> [String] {
+    func attack(_ vector: String, config: [String: String], timeout: TimeInterval = 60) async -> [String] {
         guard NFCNDEFReaderSession.readingAvailable else { return ["NFC reader unavailable"] }
         goal = .attack(vector, config)
         attackBuffer = []

@@ -109,19 +109,32 @@ enum ReportBuilder {
             func newPageIfNeeded(_ needed: CGFloat) {
                 if y + needed > pageRect.height - margin { ctx.beginPage(); y = margin }
             }
+            // misura l'altezza reale di una riga (stesso layout di text) per il page-break esatto
+            func measure(_ s: String, font: UIFont, size: CGFloat = 300) -> CGFloat {
+                let para = NSMutableParagraphStyle(); para.lineSpacing = 3
+                let attr: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: para]
+                let w = pageRect.width - margin * 2
+                return (s as NSString).boundingRect(with: CGSize(width: w, height: size),
+                                                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                                                    attributes: attr, context: nil).height + 10
+            }
             text("RedHat Sec — IoT Assessment Report", font: .systemFont(ofSize: 22, weight: .bold), color: .black, size: 60)
             text(r.title, font: .systemFont(ofSize: 11), color: .darkGray)
             text("Targets: \(r.targets.count)   Findings: \(r.findings.count)", font: .systemFont(ofSize: 12, weight: .semibold), color: .black)
 
             for f in r.findings.sorted(by: { $0.sev < $1.sev }) {
-                newPageIfNeeded(120)
-                text("\(f.sev.rawValue.uppercased()) · CVSS \(f.cvss) · ATT&CK \(f.attack)",
-                     font: .systemFont(ofSize: 9, weight: .semibold), color: UIColor(hex: 0xEE0000))
-                text(f.title, font: .systemFont(ofSize: 15, weight: .bold), color: .black)
-                text("target: \(f.target)", font: .systemFont(ofSize: 10), color: .darkGray)
-                text("Evidence: \(f.evidence.prefix(600))", font: .systemFont(ofSize: 10), color: .black)
-                text("Repro: \(f.repro.joined(separator: " — "))", font: .systemFont(ofSize: 10), color: .darkGray)
-                text("Remediation: \(f.remediation)", font: .systemFont(ofSize: 10), color: .black)
+                let lines: [(String, UIFont, CGFloat)] = [
+                    ("\(f.sev.rawValue.uppercased()) · CVSS \(f.cvss) · ATT&CK \(f.attack)", .systemFont(ofSize: 9, weight: .semibold), 300),
+                    (f.title, .systemFont(ofSize: 15, weight: .bold), 300),
+                    ("target: \(f.target)", .systemFont(ofSize: 10), 300),
+                    ("Evidence: \(f.evidence.prefix(600))", .systemFont(ofSize: 10), 300),
+                    ("Repro: \(f.repro.joined(separator: " — "))", .systemFont(ofSize: 10), 300),
+                    ("Remediation: \(f.remediation)", .systemFont(ofSize: 10), 300),
+                ]
+                let block = lines.reduce(CGFloat(0)) { $0 + measure($1.0, font: $1.1, size: $1.2) }
+                newPageIfNeeded(block)
+                for (s, fnt, sz) in lines { text(s, font: fnt, size: sz) }
+                y += 8
             }
         }
         lastPDF = url
