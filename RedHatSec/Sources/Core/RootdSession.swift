@@ -19,6 +19,7 @@ final class RootdSession: ObservableObject {
     private var inBuf: [UInt8] = []
     private var queue: [String] = []            // comandi in attesa (FIFO)
     private var current = ""                    // comando in volo (1 connessione)
+    private var consumed = false                // conn già servita (one-shot): in attesa di CWD+EOF
     private var tries = 0
     private var cwd = "/"
     private var envLines: [String]
@@ -65,11 +66,12 @@ final class RootdSession: ObservableObject {
         current = queue.removeFirst()
         tries = 0
         syncBusy()
-        if ready, let c = conn {
+        if ready, let c = conn, !consumed {
             fire(current, on: c)
-        } else {
+        } else if conn == nil {
             connect()   // on ready → fire(current)
         }
+        // conn consumata ma ancora aperta: il fire avviene dopo silentClose → pump
     }
 
     private func fire(_ t: String, on c: NWConnection) {
@@ -97,6 +99,7 @@ final class RootdSession: ObservableObject {
         ready = false
         conn?.cancel()
         conn = nil
+        consumed = false
         inBuf.removeAll()
     }
 
@@ -127,6 +130,7 @@ final class RootdSession: ObservableObject {
         case .cancelled:
             ready = false
             conn = nil
+            consumed = false
             DispatchQueue.main.async { self.connected = false }
         default:
             break
@@ -184,7 +188,6 @@ final class RootdSession: ObservableObject {
             connect()   // on ready → fire(current) di nuovo
         }
     }
-
     private func silentClose() {
         ready = false
         conn?.cancel()
@@ -194,7 +197,9 @@ final class RootdSession: ObservableObject {
             inBuf.removeAll()
             if !txt.isEmpty { DispatchQueue.main.async { self.onChunk?(txt) } }
         }
+        consumed = false
         DispatchQueue.main.async { self.connected = false }
+        pump()   // il conn consumato si è chiuso: si può sparare il prossimo
     }
 
     // MARK: parse
@@ -230,11 +235,10 @@ final class RootdSession: ObservableObject {
         }
         if let e = Int32(digits) {
             current = ""
+            consumed = true
             syncBusy()
             DispatchQueue.main.async { self.onDone?(e, cmd) }
-            // one-shot: il conn è consumato → ricicla e pompa il prossimo
-            recycle()
-            DispatchQueue.main.async { self.connected = false }
+            // il conn rimane aperto fino a CWD+EOF (one-shot): lì silentClose → pump
             pump()
         }
     }
