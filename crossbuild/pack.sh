@@ -34,7 +34,7 @@ OUT="$ROOT/deb/${TOOL}_iphoneos-arm64.deb"
 {
   printf '!<arch>\n'
   m() {
-    printf '%-16s%-12s%-6s%-6s%-8s%-10s\`\n' "$1" '0' '0' '0' '644' "$2"
+    printf '%-16s%-12s%-6s%-6s%-8s%-10s\140\n' "$1" '0' '0' '0' '644' "$2"
     cat "$3"
     if [ $(($4 % 2)) -eq 1 ]; then printf '\n'; fi
   }
