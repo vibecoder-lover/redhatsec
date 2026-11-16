@@ -25,6 +25,7 @@ struct DashboardView: View {
                     recentLogs
                 }
                 .padding(16)
+                .animation(.easeInOut(duration: 0.25), value: o.phase)
             }
             .background(Color.bg.ignoresSafeArea())
             .navigationTitle("RedHat Sec")
