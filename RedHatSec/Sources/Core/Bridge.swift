@@ -747,4 +747,74 @@ final class TCPBridge: NSObject, ObservableObject {
         log("join rete target fallita")
         return false
     }
+
+    // MARK: PineApple (rogue AP sull'ESP — AP+STA, il bridge resta su hotspot)
+
+    struct RogueClient: Identifiable {
+        var id: String { mac }
+        let mac: String
+        let ip: String
+    }
+
+    @Published var rogueClients: [RogueClient] = []
+    @Published var rogueOn = false
+
+    func rogueStart(ssid: String, pass: String, dnsPoison: Bool) async -> Bool {
+        guard connected else { return false }
+        var p: [UInt8] = [UInt8(min(32, ssid.utf8.count))] + Array(ssid.utf8.prefix(32))
+        let pw = Array(pass.utf8.prefix(64))
+        p += [UInt8(pw.count)] + pw
+        p.append(dnsPoison ? 1 : 0)
+        let ok = await sendAwait(0x13, payload: p, timeout: 12)?.0 == 0
+        rogueOn = ok
+        log(ok ? "rogue AP '\(ssid)' ON (dns=\(dnsPoison))" : "rogue AP start fallito")
+        return ok
+    }
+
+    func rogueStop() async -> Bool {
+        guard connected else { return false }
+        let ok = await sendAwait(0x14, payload: [], timeout: 10)?.0 == 0
+        rogueOn = !ok
+        if ok { rogueClients = [] }
+        log(ok ? "rogue AP OFF" : "rogue stop fallito")
+        return ok
+    }
+
+    func rogueClientsRefresh() async {
+        guard connected else { return }
+        guard let r = await sendAwait(0x15, payload: [], timeout: 8), r.0 == 0,
+              r.1.count >= 1 else { return }
+        let cnt = Int(r.1[0])
+        var out: [RogueClient] = []
+        var o = 1
+        for _ in 0..<cnt where o + 10 <= r.1.count {
+            let mac = r.1[o..<(o + 6)].map { String(format: "%02X", $0) }.joined(separator: ":")
+            o += 6
+            let ip = "\(r.1[o]).\(r.1[o+1]).\(r.1[o+2]).\(r.1[o+3])"
+            o += 4
+            out.append(RogueClient(mac: mac, ip: ip))
+        }
+        rogueClients = out
+        log("rogue clients: \(cnt)")
+    }
+
+    func karma(_ on: Bool) async -> [String] {
+        guard connected else { return [] }
+        guard let r = await sendAwait(0x16, payload: [on ? 1 : 0], timeout: on ? 8 : 12), r.0 == 0 else { return [] }
+        guard !on else { return [] }
+        let csv = String(decoding: r.1, as: UTF8.self)
+        let ssids = csv.isEmpty ? [] : csv.split(separator: ",").map(String.init)
+        log("karma probe trovati: \(ssids.count)")
+        return ssids
+    }
+
+    func portalSet(_ html: String) async -> Bool {
+        guard connected else { return false }
+        let b = Array(html.utf8.prefix(780))
+        var p: [UInt8] = [UInt8(b.count & 0xFF), UInt8((b.count >> 8) & 0xFF)]
+        p += b
+        let ok = await sendAwait(0x17, payload: p, timeout: 8)?.0 == 0
+        log(ok ? "portal impostato (\(b.count)B)" : "portal fallito")
+        return ok
+    }
 }
