@@ -862,6 +862,12 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED) {
     int ch = WiFi.channel();
     if (ch > 0 && apChannel != (uint8_t)ch) apChannel = (uint8_t)ch;
+    // insurance: un reset del link STA azzera il NAPT → riarmo ogni 30s mentre rogue attivo
+    static uint32_t lastNapt = 0;
+    if (rogue && millis() - lastNapt > 30000) {
+      lastNapt = millis();
+      ip_napt_enable((uint32_t)WiFi.localIP(), 1);
+    }
   }
 
   if (beaconActive) beaconLoop();
