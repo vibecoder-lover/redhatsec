@@ -6,6 +6,12 @@ SRC="$SRCROOT/hping3-master"
 [ -d "$SRC" ] || tar xzf "$SRCROOT/hping3.tar.gz" -C "$SRCROOT"
 cd "$SRC"
 
+# bytesex.h non conosce aarch64/arm64 (little endian) → #error di byteorder
+sed -i '' 's|defined(__i386__)|defined(__i386__) \|\| defined(__aarch64__) \|\| defined(__arm64__)|' bytesex.h
+grep -n "aarch64" bytesex.h
+
+SRC="$SRCROOT/hping3-master"
+
 # shim header rimosse dall'SDK 26 (xnu): bpf/route/ip_var/in_systm — if_arp/if_ether/ethernet già da reaver
 mkdir -p "$DEPS/usr/include/net" "$DEPS/usr/include/netinet"
 for h in net/bpf.h net/route.h netinet/ip_var.h netinet/in_systm.h; do
@@ -23,7 +29,7 @@ sed -i '' 's/^CC= gcc/CC= cc/' Makefile
 sed -i '' "s|-L/usr/local/lib|-L$DEPS/usr/lib|g" Makefile
 sed -i '' 's/-ltcl[^ ]*//g' Makefile
 sed -i '' '/\.\/hping3 -v/d' Makefile
-make -j8 CC="$CC" CCOPT="-I$DEPS/usr/include -O2 -DBYTE_ORDER_LITTLE_ENDIAN"
+make -j8 CC="$CC" CCOPT="-I$DEPS/usr/include -O2"
 echo "make done"
 mkdir -p "$STAGE/var/jb/usr/bin"
 cp hping3 "$STAGE/var/jb/usr/bin/"
