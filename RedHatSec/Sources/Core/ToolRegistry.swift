@@ -180,7 +180,7 @@ enum BuiltinExec {
 }
 
 enum ToolRegistry {
-    static let buildTag = "b4-1f05945"
+    static let buildTag = "b5-549d312+updater"
     static let appBinDir = "/var/mobile/RedHatSec/bin"
     static let workDir = "/var/mobile/RedHatSec"
     static let sourcesPath = workDir + "/etc/apt/sources.list.d/rhs.list"

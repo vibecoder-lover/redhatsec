@@ -5,12 +5,16 @@ struct DashboardView: View {
     @State private var showConsole = false
     @State private var showSettings = false
     @State private var confirmExec = false
+    @State private var updInfo: Updater.Info?
+    @State private var updStatus = ""
+    @State private var updBusy = false
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
                     statusRow
+                    updaterRow
                     RadarView(targets: o.targets, scanning: o.phase == .scan || o.phase == .enumerate)
                         .frame(height: 300)
                         .overlay(radarButton)
@@ -73,6 +77,66 @@ struct DashboardView: View {
             if o.phase == .execute {
                 Pill(text: o.currentStep, color: .warn).shimmering()
             }
+        }
+    }
+
+    private var hasUpdate: Bool { updInfo != nil && updInfo!.build != ToolRegistry.buildTag }
+
+    private var updaterRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: hasUpdate ? "arrow.down.circle.fill" : "checkmark.seal")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(hasUpdate ? .warn : .ok)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("build \(ToolRegistry.buildTag)")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                if !updStatus.isEmpty {
+                    Text(updStatus).font(.caption2).foregroundColor(.dim)
+                }
+            }
+            Spacer()
+            if hasUpdate, let info = updInfo {
+                Button {
+                    Haptics.heavy()
+                    Task {
+                        updBusy = true
+                        updStatus = await Updater.downloadAndInstall(info)
+                        updBusy = false
+                    }
+                } label: {
+                    Text(updBusy ? "…" : "AGGIORNA")
+                        .font(.system(size: 11, weight: .heavy, design: .rounded))
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                }
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.warn))
+                .foregroundColor(.black)
+                .disabled(updBusy)
+            } else if !updBusy {
+                Button("check") {
+                    Task { await checkUpdate() }
+                }
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundColor(.dim)
+            }
+        }
+        .padding(14).card()
+        .task {
+            // check silenzioso al primo avvio
+            if updInfo == nil && !updBusy { await checkUpdate() }
+        }
+    }
+
+    private func checkUpdate() async {
+        updBusy = true
+        let r = await Updater.check()
+        updBusy = false
+        if let r {
+            updInfo = r.info
+            updStatus = r.update
+                ? "disponibile \(r.info.build) — \(r.info.date)"
+                : "già aggiornata (\(r.info.build))"
+        } else {
+            updStatus = "release tipa non raggiungibile"
         }
     }
 

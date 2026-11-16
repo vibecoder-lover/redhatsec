@@ -109,3 +109,21 @@ jobs:
         with:
           name: RedHatSec-${{ matrix.os }}
           path: RedHatSec/build/Build/Products/Release-iphoneos/RedHatSec.tipa
+
+      - name: Publish tipa release (updater)
+        if: matrix.os == 'macos-26'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TIPA=$(find RedHatSec/build -name 'RedHatSec.tipa' | head -1)
+          test -f "$TIPA" || { echo "tipa non trovato"; exit 1; }
+          # il buildTag compilato nell'app è LA verità: latest.json lo legge dal sorgente
+          APPTAG=$(grep -o 'buildTag = "[^"]*"' RedHatSec/Sources/Core/ToolRegistry.swift | sed 's/.*"\(.*\)".*/\1/')
+          test -n "$APPTAG" || APPTAG="unknown-${GITHUB_SHA::7}"
+          SHA="${GITHUB_SHA::7}"
+          cp "$TIPA" "RedHatSec-${SHA}.tipa"
+          printf '{"build":"%s","sha":"%s","date":"%s","file":"RedHatSec-%s.tipa"}\n' \
+            "$APPTAG" "$SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SHA" > latest.json
+          gh release create tipa --title "RedHatSec tipa (updater)" --notes "auto: latest build" 2>/dev/null || true
+          gh release upload tipa "RedHatSec-${SHA}.tipa" latest.json --clobber
+          echo "published: build=$APPTAG sha=$SHA"
