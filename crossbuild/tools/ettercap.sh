@@ -14,6 +14,8 @@ grep -n "cmake_minimum_required" CMakeLists.txt | head -2
 # system() è __API_UNAVAILABLE su iOS → wrapper fork/exec inline (come reaver)
 grep -q rhs_system include/ec.h 2>/dev/null || cat >> include/ec.h <<'EOF'
 /* iOS: system() non disponibile → fork/exec inline (RedHatSec) */
+#ifndef RHS_SYSTEM_WRAPPER
+#define RHS_SYSTEM_WRAPPER
 #include <unistd.h>
 #include <sys/wait.h>
 static inline int rhs_system(const char *cmd) {
@@ -23,6 +25,7 @@ static inline int rhs_system(const char *cmd) {
     return st;
 }
 #define system rhs_system
+#endif /* RHS_SYSTEM_WRAPPER */
 EOF
 mkdir -p "$DEPS/usr/include/net" "$DEPS/usr/include/netinet"
 for h in net/if_arp.h net/ethernet.h net/route.h net/bpf.h netinet/if_ether.h netinet/ip_var.h; do
