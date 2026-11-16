@@ -50,6 +50,7 @@ bool scanPending = false;
 uint32_t scanStart = 0;
 bool joinPending = false;
 uint32_t joinStart = 0;
+String joinTargetSsid;
 
 bool beaconActive = false;
 uint8_t beaconSsids[16][33];
@@ -372,15 +373,23 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       int p = 0;
       if (plen < 2) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
       int sl = pl[p++];
-      if (p + sl > plen) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
+      if (p + sl > plen || sl > 32) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
       char ssid[33]; memcpy(ssid, pl + p, sl); ssid[sl] = 0; p += sl;
       if (p >= plen) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
       int pw = pl[p++];
-      if (p + pw > plen) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
+      if (p + pw > plen || pw > 64) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
       char pass[65]; memcpy(pass, pl + p, pw); pass[pw] = 0;
+
       wifi_promiscuous_enable(0);
-      WiFi.mode(WIFI_AP_STA);
+      beaconActive = false;
+      pmkidArmed = false;
+
+      WiFi.disconnect(true);      // stacca dalla rete corrente, altrimenti begin è ignorato
+      delay(200);
+      WiFi.mode(WIFI_STA);
       WiFi.begin(ssid, pass[0] ? pass : NULL);
+
+      joinTargetSsid = String(ssid);  // per la race: status=CONNECTED subito se già connessi
       joinPending = true;
       joinStart = millis();
       Serial.printf("[join] %s\n", ssid);
@@ -472,8 +481,9 @@ void setup() {
   pinMode(2, OUTPUT);
   digitalWrite(2, LOW);
 
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
+  WiFi.setAutoReconnect(false);
   WiFi.begin(STA_SSID, STA_PASS);
   Serial.printf("[STA] connecting to %s\n", STA_SSID);
 
@@ -485,7 +495,20 @@ void setup() {
     Serial.printf("[STA] ok ip=%s ch=%d\n",
                   WiFi.localIP().toString().c_str(), apChannel);
   } else {
-    Serial.println("[STA] FAIL — il bridge parte lo stesso, ma TCP non raggiungibile");
+    // debug: stampo lo scan per vedere cosa c'è in onda (se l'SSID non c'è = 5GHz)
+    Serial.println("[STA] FAIL — scan diagnostico…");
+    WiFi.scanNetworks(true, true);
+    uint32_t t1 = millis();
+    while (WiFi.scanComplete() == WIFI_SCAN_RUNNING && millis() - t1 < 8000) delay(100);
+    int n = WiFi.scanComplete();
+    if (n < 0) n = 0;
+    Serial.printf("[STA] scan: %d reti\n", n);
+    for (int k = 0; k < n && k < 15; k++) {
+      Serial.printf("  - %s ch%d rssi%d enc%d%s\n",
+                    WiFi.SSID(k).c_str(), WiFi.channel(k), WiFi.RSSI(k),
+                    (int)WiFi.encryptionType(k),
+                    WiFi.SSID(k) == STA_SSID ? "  <<<< TROVATA" : "");
+    }
   }
 
   wifi_set_promiscuous_rx_cb(snifferCb);
@@ -525,9 +548,9 @@ void loop() {
   // scan async
   pollScan();
 
-  // join rete target (STA) — risposta asincrona
+  // join rete target (STA) — risposta asincrona, con verifica SSID (race fix)
   if (joinPending) {
-    if (WiFi.status() == WL_CONNECTED) {
+    if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == joinTargetSsid) {
       joinPending = false;
       apChannel = WiFi.channel();
       String ips = WiFi.localIP().toString();
@@ -536,6 +559,17 @@ void loop() {
       joinPending = false;
       sendFrame(0x08, 0x02, (const uint8_t *)"join failed", 11);
     }
+  }
+
+  // reconnect STA a mano (autoReconnect off) + refresh canale hotspot
+  static uint32_t lastReconnect = 0;
+  if (!joinPending && !pmkidArmed && !beaconActive &&
+      WiFi.status() != WL_CONNECTED && millis() - lastReconnect > 10000) {
+    lastReconnect = millis();
+    WiFi.reconnect();
+  }
+  if (WiFi.status() == WL_CONNECTED && apChannel != WiFi.channel()) {
+    apChannel = WiFi.channel();   // il canale hotspot può cambiare tra sessioni
   }
 
   // beacon spam
