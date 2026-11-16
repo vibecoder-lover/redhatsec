@@ -39,22 +39,35 @@ enum Updater {
         return (info, info.build != current)
     }
 
-    // TrollStore (TSSceneDelegate.m): apple-magnifier://install?url=<https> →
-    // TROLLSTORE scarica e presenta l'install lui stesso. Niente file locali.
+    // Flusso GARANTITO (niente URL scheme): download nel container → share sheet
+    // "Open in TrollStore". TrollStore esporta l'UTI com.opa334.trollstore.tipa
+    // e TSSceneDelegate prende i file:// direttamente (presentInstallationAlert).
+    static var dic: UIDocumentInteractionController?
+
     static func downloadAndInstall(_ info: Info) async -> String {
-        var comps = URLComponents()
-        comps.scheme = "apple-magnifier"
-        comps.host = "install"
-        comps.queryItems = [URLQueryItem(name: "url", value: info.fileURL.absoluteString)]
-        guard let ts = comps.url else {
-            return "url magnifier non costruibile"
+        let fm = FileManager.default
+        let dest = (NSTemporaryDirectory() as NSString).appendingPathComponent("RedHatSec-\(info.build).tipa")
+        try? fm.removeItem(atPath: dest)
+        guard let (tmp, resp) = try? await URLSession.shared.download(from: info.fileURL),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else {
+            return "download fallito (rete?)"
         }
-        let ok: Bool = await withCheckedContinuation { c in
-            UIApplication.shared.open(ts, options: [:]) { c.resume(returning: $0) }
+        do {
+            try fm.moveItem(at: tmp, to: URL(fileURLWithPath: dest))
+        } catch {
+            return "move fallita: \(error.localizedDescription)"
         }
-        return ok
-            ? "TrollStore aperto — scarica e installa \(info.build), conferma lì"
-            : "TrollStore non risponde all'URL — installa a mano dal release GitHub"
+        await MainActor.run {
+            let d = UIDocumentInteractionController(url: URL(fileURLWithPath: dest))
+            d.uti = "com.opa334.trollstore.tipa"
+            dic = d   // DIC va trattenuta, altrimenti il pannello chiude subito
+            if let scene = UIApplication.shared.connectedScenes
+                .first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
+               let win = scene.windows.first(where: { $0.isKeyWindow }) {
+                d.presentOpenInMenu(from: win.bounds, in: win, animated: true)
+            }
+        }
+        return "tipa pronto (\(info.build)) — tocca \"TrollStore\" nel pannello e conferma"
     }
 }
 // build trigger 28c1cb6-cancelled
