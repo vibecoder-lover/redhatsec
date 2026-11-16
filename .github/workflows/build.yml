@@ -9,9 +9,6 @@ concurrency:
   group: redhatsec-build
   cancel-in-progress: true
 
-permissions:
-  contents: write
-
 jobs:
   build:
     strategy:
@@ -21,6 +18,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Stamp buildTag (sha per commit, univoco per updater)
+        run: |
+          SHA="${GITHUB_SHA::7}"
+          sed -i '' "s|static let buildTag = \".*\"|static let buildTag = \"b6-${SHA}\"|" RedHatSec/Sources/Core/ToolRegistry.swift
+          grep 'buildTag =' RedHatSec/Sources/Core/ToolRegistry.swift
 
       - name: Install tools
         run: brew install xcodegen ldid

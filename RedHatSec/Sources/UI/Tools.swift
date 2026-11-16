@@ -18,6 +18,7 @@ final class TerminalModel: ObservableObject {
 
     func append(_ text: String, _ level: LogEntry.Level = .info) {
         lines.append(LogEntry(level: level, text: text))
+        if lines.count > 1600 { lines.removeFirst(lines.count - 1200) }
     }
 
     // streaming live: i chunk arrivano spezzati, la riga incompleta resta in partial
@@ -33,6 +34,7 @@ final class TerminalModel: ObservableObject {
                 lines.append(LogEntry(level: .info, text: String(p)))
             }
         }
+        if lines.count > 1600 { lines.removeFirst(lines.count - 1200) }
     }
 
     private func done(_ exit: Int32, _ cmd: String) {
