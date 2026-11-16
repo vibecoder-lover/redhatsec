@@ -46,9 +46,6 @@
 #define BRIDGE_PORT 3333
 #define AP_SSID     "RHS-Bridge"
 #define AP_PASS     "rhsbridge"
-// hotspot del telefono: il bridge principale è QUI (STA), l'AP resta come fallback
-#define PH_SSID     "Hexxeted"
-#define PH_PASS     "lwae9180"
 #define MAX_NETS    14
 #define MAX_SSIDS   16
 
@@ -395,17 +392,14 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   // boot: 3 blink rapidi
   for (int i = 0; i < 3; i++) { LED_ON(); delay(90); LED_OFF(); delay(90); }
-  WiFi.mode(WIFI_AP_STA);
-  // ponte principale: l'ESP entra nell'hotspot del telefono (stessa rete → TCP diretto)
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(PH_SSID, PH_PASS, 0, nullptr, true);
-  // fallback: AP proprio (se l'hotspot manca, il telefono si aggancia qui)
+  // AP puro: il telefono entra nell'AP, app → 192.168.4.1:3333
+  WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
   WiFi.softAP(AP_SSID, AP_PASS);
   WiFi.scanNetworks(true);
   server.begin();
   server.setNoDelay(true);
-  Serial.println("[rhs] bridge :3333 — hotspot " PH_SSID " + AP fallback");
+  Serial.println("[rhs] AP " AP_SSID " (pass " AP_PASS ") — server :3333");
 }
 
 void loop() {
@@ -435,60 +429,19 @@ void loop() {
     }
   }
 
-  // retry hotspot ogni 30s se disconnesso
-  static uint32_t lastJoinTry = 0;
-  if (WiFi.status() != WL_CONNECTED && millis() - lastJoinTry > 30000) {
-    lastJoinTry = millis();
-    WiFi.begin(PH_SSID, PH_PASS, 0, nullptr, true);
-    Serial.println("[rhs] retry hotspot");
-  }
-
-  // debug: a 60s senza hotspot, stampo lo scan (cerco l'SSID del telefono)
-  static bool debugScanDone = false;
-  if (!debugScanDone && millis() > 60000 && WiFi.status() != WL_CONNECTED) {
-    debugScanDone = true;
-    int n = WiFi.scanComplete();
-    if (n < 0) { Serial.println("[rhs] DEBUG scan: non ancora pronto"); n = 0; }
-    Serial.print("[rhs] DEBUG scan: "); Serial.print(n); Serial.println(" reti");
-    for (int i = 0; i < n; i++) {
-      bool hit = WiFi.SSID(i) == PH_SSID;
-      Serial.print(hit ? "[rhs] >>> TROVATA: " : "[rhs]   - ");
-      Serial.print(WiFi.SSID(i));
-      Serial.print(" ch"); Serial.print(WiFi.channel(i));
-      Serial.print(" rssi "); Serial.print(WiFi.RSSI(i));
-      Serial.print(" enc "); Serial.println((int)WiFi.encryptionType(i));
-    }
-    if (n == 0) Serial.println("[rhs] nessuna rete vista — hotspot OFF o 5GHz? attiva \"Massimizza compatibilita\"");
-  }
-
-  // LED di stato
+  // LED di stato (AP puro): ON fisso = client collegato, blink 1Hz = in attesa
   static uint32_t lastLedT = 0;
   static bool ledPhase = false;
   uint32_t now = millis();
   if (client && client.connected()) {
-    LED_ON();                                        // ON fisso: ponte pronto
-  } else if (WiFi.status() == WL_CONNECTED) {
-    if (now - lastLedT > 2000) { lastLedT = now; ledPhase = true; LED_ON(); }
-    else if (now - lastLedT > 1800) LED_OFF();       // flash breve ogni 2s: hotspot ok, in attesa
-  } else {
-    if (now - lastLedT > 600) { lastLedT = now; ledPhase = !ledPhase; }
-    digitalWrite(LED_PIN, ledPhase ? LOW : HIGH);    // blink 1Hz: cerco l'hotspot
+    LED_ON();
+  } else if (now - lastLedT > 600) {
+    lastLedT = now;
+    ledPhase = !ledPhase;
+    digitalWrite(LED_PIN, ledPhase ? LOW : HIGH);
   }
 
   MDNS.update();
-
-  // mDNS quando l'hotspot è raggiunto (le app lo scoprono via _rhsbridge._tcp)
-  static bool mdnsUp = false;
-  if (!mdnsUp && WiFi.status() == WL_CONNECTED) {
-    if (MDNS.begin("rhsbridge")) {
-      MDNS.addService("rhsbridge", "tcp", BRIDGE_PORT);
-      mdnsUp = true;
-      Serial.print("[rhs] hotspot OK, IP: ");
-      Serial.println(WiFi.localIP());
-    }
-  } else if (mdnsUp && WiFi.status() != WL_CONNECTED) {
-    mdnsUp = false;
-  }
 
   // scan async completa
   if (state == SCANNING && WiFi.scanComplete() >= 0) {
