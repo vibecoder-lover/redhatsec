@@ -49,8 +49,8 @@ enum Updater {
         guard let ts = comps.url else {
             return "url magnifier non costruibile"
         }
-        let ok = await MainActor.run { () -> Bool in
-            UIApplication.shared.open(ts, options: [:], completionHandler: nil)
+        let ok: Bool = await withCheckedContinuation { c in
+            UIApplication.shared.open(ts, options: [:]) { c.resume(returning: $0) }
         }
         return ok
             ? "TrollStore aperto — scarica e installa \(info.build), conferma lì"
