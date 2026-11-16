@@ -371,7 +371,7 @@ struct BuilderView: View {
     ]
 
     private var template: Template {
-        templates.first { $0.tool == selectedTool } ?? templates.last!
+        templates.first { $0.tool == selectedTool } ?? templates[0]
     }
 
     private var command: String {

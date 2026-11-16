@@ -9,13 +9,12 @@ concurrency:
   group: redhatsec-build
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    strategy:
-      fail-fast: true
-      matrix:
-        os: [macos-15, macos-26]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
@@ -113,11 +112,11 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: RedHatSec-${{ matrix.os }}
+          name: RedHatSec-tipa
           path: RedHatSec/build/Build/Products/Release-iphoneos/RedHatSec.tipa
 
       - name: Publish tipa release (updater)
-        if: matrix.os == 'macos-26'
+        if: runner.os == 'macos'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
