@@ -232,6 +232,11 @@ extension TerminalModel {
         let parts = cmd.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         guard let head = parts.first else { return }
         if head == "clear" { lines.removeAll(); return }
+        if head == "exit" {
+            RootdSession.shared.close()
+            append("sessione rootd chiusa — al prossimo comando si riconnette", .warn)
+            return
+        }
         if head == "install", parts.count > 1 {
             installTool(parts[1])
             return
@@ -252,10 +257,8 @@ extension TerminalModel {
             for l in out { append(l) }
             return
         }
-        if ShellRunner.shared.resolve(head) == nil {
-            installTool(head, then: cmd)
-            return
-        }
+        // TUTTO il resto → sh root reale. L'auto-install scatta solo sul 127 reale
+        // della sh (command not found), niente pre-check fittizi sul PATH dell'app
         run(cmd)
     }
 
