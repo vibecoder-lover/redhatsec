@@ -759,15 +759,15 @@ final class TCPBridge: NSObject, ObservableObject {
     @Published var rogueClients: [RogueClient] = []
     @Published var rogueOn = false
 
-    func rogueStart(ssid: String, pass: String, dnsPoison: Bool) async -> Bool {
+    func rogueStart(ssid: String, pass: String, dnsFwd: Bool) async -> Bool {
         guard connected else { return false }
         var p: [UInt8] = [UInt8(min(32, ssid.utf8.count))] + Array(ssid.utf8.prefix(32))
         let pw = Array(pass.utf8.prefix(64))
         p += [UInt8(pw.count)] + pw
-        p.append(dnsPoison ? 1 : 0)
+        p.append(dnsFwd ? 1 : 0)   // 1 = internet reale + log qname, 0 = poison/portal
         let ok = await sendAwait(0x13, payload: p, timeout: 12)?.0 == 0
         rogueOn = ok
-        log(ok ? "rogue AP '\(ssid)' ON (dns=\(dnsPoison))" : "rogue AP start fallito")
+        log(ok ? "rogue AP '\(ssid)' ON (dns=\(dnsFwd ? "internet" : "poison"))" : "rogue AP start fallito")
         return ok
     }
 

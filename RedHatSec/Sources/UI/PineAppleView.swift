@@ -10,7 +10,6 @@ struct PineAppleView: View {
 
     @State private var rogueSsid = "WiFi Gratis"
     @State private var roguePass = ""
-    @State private var dnsPoison = true
     @State private var portalHTML = "<html><body><h2>Benvenuto</h2><p>Connessione acquisita.</p></body></html>"
     @State private var targetIP = ""
     @State private var cmd = "id > /tmp/o 2>&1; cat /tmp/o"
@@ -19,7 +18,7 @@ struct PineAppleView: View {
     @State private var results: [String] = []
     @State private var probes: [String] = []
     @State private var scanPorts: [UInt16] = [80, 443, 8080, 23, 554, 1900, 5431, 5000]
-    @State private var dnsFwd = false
+    @State private var dnsFwd = true   // default: internet reale + log (poison su richiesta)
     @State private var natOn = true
     @State private var traffic: [String] = []
 
@@ -58,8 +57,9 @@ struct PineAppleView: View {
             Text("ROGUE AP").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
             PineField("SSID evil-twin", $rogueSsid)
             PineField("password (vuota = open)", $roguePass)
-            Toggle(isOn: $dnsPoison) {
-                Text("DNS poison → captive portal").font(.system(size: 12)).foregroundColor(.white.opacity(0.85))
+            Toggle(isOn: $dnsFwd) {
+                Text(dnsFwd ? "DNS: internet reale + log domini" : "DNS: portal avvelenato (cattura credenziali)")
+                    .font(.system(size: 12)).foregroundColor(.white.opacity(0.85))
             }
             .tint(.redHat)
             HStack(spacing: 10) {
@@ -194,7 +194,7 @@ struct PineAppleView: View {
     private func startRogue() async {
         guard tcp.connected else { results.append("[-] bridge offline"); return }
         busy = true
-        let ok = await tcp.rogueStart(ssid: rogueSsid, pass: roguePass, dnsPoison: dnsPoison)
+        let ok = await tcp.rogueStart(ssid: rogueSsid, pass: roguePass, dnsFwd: dnsFwd)
         if ok { await tcp.rogueClientsRefresh() }
         busy = false
     }
