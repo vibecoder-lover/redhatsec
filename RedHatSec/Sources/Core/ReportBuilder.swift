@@ -133,7 +133,7 @@ enum ReportBuilder {
                 ]
                 let block = lines.reduce(CGFloat(0)) { $0 + measure($1.0, font: $1.1, size: $1.2) }
                 newPageIfNeeded(block)
-                for (s, fnt, sz) in lines { text(s, font: fnt, size: sz) }
+                for (s, fnt, sz) in lines { text(s, font: fnt, color: .black, size: sz) }
                 y += 8
             }
         }
