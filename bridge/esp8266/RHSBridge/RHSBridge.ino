@@ -44,8 +44,9 @@
 #pragma GCC diagnostic pop
 
 #define BRIDGE_PORT 3333
-#define AP_SSID     "RHS-Bridge"
-#define AP_PASS     "rhsbridge"
+// STA puro: credenziali hotspot del telefono
+#define PH_SSID     "Hexxeted"
+#define PH_PASS     "lwae9180"
 #define MAX_NETS    14
 #define MAX_SSIDS   16
 
@@ -105,10 +106,11 @@ uint16_t rxLen = 0;
 // ============ radio helper ============
 
 static void apOnChannel(uint8_t ch) {
-  // riporta l'AP sul canale target (il telefono segue, il TCP sopravvive)
+  // STA-only: solo cambio canale radio (il link hotspot salta durante il burst
+  // e l'AutoReconnect lo riaggancia)
   if (WiFi.channel() != ch) {
-    WiFi.softAP(AP_SSID, AP_PASS, ch);
-    delay(300);
+    wifi_set_channel(ch);
+    delay(50);
   }
 }
 
@@ -392,14 +394,14 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   // boot: 3 blink rapidi
   for (int i = 0; i < 3; i++) { LED_ON(); delay(90); LED_OFF(); delay(90); }
-  // AP puro: il telefono entra nell'AP, app → 192.168.4.1:3333
-  WiFi.mode(WIFI_AP);
-  WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
-  WiFi.softAP(AP_SSID, AP_PASS);
+  // STA puro: l'ESP entra nell'hotspot del telefono con credenziali fisse
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(PH_SSID, PH_PASS);
   WiFi.scanNetworks(true);
   server.begin();
   server.setNoDelay(true);
-  Serial.println("[rhs] AP " AP_SSID " (pass " AP_PASS ") — server :3333");
+  Serial.println("[rhs] STA " PH_SSID " — server :3333 (attendo hotspot…)");
 }
 
 void loop() {
@@ -429,16 +431,32 @@ void loop() {
     }
   }
 
-  // LED di stato (AP puro): ON fisso = client collegato, blink 1Hz = in attesa
+  // LED di stato (STA): blink 1Hz = cerco hotspot, flash ogni 2s = hotspot ok,
+  // ON fisso = client collegato
   static uint32_t lastLedT = 0;
   static bool ledPhase = false;
   uint32_t now = millis();
   if (client && client.connected()) {
     LED_ON();
-  } else if (now - lastLedT > 600) {
-    lastLedT = now;
-    ledPhase = !ledPhase;
+  } else if (WiFi.status() == WL_CONNECTED) {
+    if (now - lastLedT > 2000) { lastLedT = now; ledPhase = true; LED_ON(); }
+    else if (now - lastLedT > 1800) LED_OFF();
+  } else {
+    if (now - lastLedT > 600) { lastLedT = now; ledPhase = !ledPhase; }
     digitalWrite(LED_PIN, ledPhase ? LOW : HIGH);
+  }
+
+  // mDNS quando l'hotspot è raggiunto (le app lo scoprono via _rhsbridge._tcp)
+  static bool mdnsUp = false;
+  if (!mdnsUp && WiFi.status() == WL_CONNECTED) {
+    if (MDNS.begin("rhsbridge")) {
+      MDNS.addService("rhsbridge", "tcp", BRIDGE_PORT);
+      mdnsUp = true;
+      Serial.print("[rhs] hotspot OK, IP: ");
+      Serial.println(WiFi.localIP());
+    }
+  } else if (mdnsUp && WiFi.status() != WL_CONNECTED) {
+    mdnsUp = false;
   }
 
   MDNS.update();
