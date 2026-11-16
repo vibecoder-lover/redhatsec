@@ -79,7 +79,7 @@ struct BridgeView: View {
                      color: tcp.connected ? .ok : (tcp.state.hasPrefix("auto") ? .warn : .bad))
             }
             KV(k: "stato", val: tcp.state)
-            KV(k: "rete", val: "STA: l'ESP si aggancia al tuo hotspot → sweep 172.20.10.2-14 / 192.168.4.1")
+            KV(k: "rete", val: "AP puro: entra nell'AP \"RHS-Bridge\" (pass rhsbridge) → connect 192.168.4.1")
             if tcp.connected {
                 KV(k: "stato radio", val: "i vettori PLAN (deauth/PMKID/beacon) sono eseguibili")
             }
