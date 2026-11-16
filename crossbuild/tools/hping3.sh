@@ -23,7 +23,7 @@ sed -i '' 's/^CC= gcc/CC= cc/' Makefile
 sed -i '' "s|-L/usr/local/lib|-L$DEPS/usr/lib|g" Makefile
 sed -i '' 's/-ltcl[^ ]*//g' Makefile
 sed -i '' '/\.\/hping3 -v/d' Makefile
-make -j8 CC="$CC" CCOPT="-I$DEPS/usr/include -O2"
+make -j8 CC="$CC" CCOPT="-I$DEPS/usr/include -O2 -DBYTE_ORDER_LITTLE_ENDIAN"
 echo "make done"
 mkdir -p "$STAGE/var/jb/usr/bin"
 cp hping3 "$STAGE/var/jb/usr/bin/"
