@@ -41,10 +41,10 @@ struct PineAppleView: View {
 
     private var statusRow: some View {
         HStack {
-            Pill(text: tcp.connected ? "BRIDGE ONLINE" : "BRIDGE OFFLINE",
+            Pill(label: tcp.connected ? "BRIDGE ONLINE" : "BRIDGE OFFLINE",
                  color: tcp.connected ? .ok : .bad)
             Spacer()
-            Pill(text: tcp.rogueOn ? "ROGUE ATTIVO" : "ROGUE OFF",
+            Pill(label: tcp.rogueOn ? "ROGUE ATTIVO" : "ROGUE OFF",
                  color: tcp.rogueOn ? .warn : .dim)
         }
     }
@@ -261,7 +261,7 @@ struct PineField: View {
 
     init(_ ph: String, _ text: Binding<String>) {
         self.ph = ph
-        self.text = text
+        self._text = text
     }
 
     var body: some View {
