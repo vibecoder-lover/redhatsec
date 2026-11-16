@@ -48,3 +48,4 @@ Trigger: il workflow parte su push di crossbuild/** — failure stampa primo err
 - rerun trigger: 2026-11-16 (2132b1d cancellata dal runner)
 - trigger bpf ioctl + curl off
 - trigger find_root_path deps
+- trigger ncursesw include
