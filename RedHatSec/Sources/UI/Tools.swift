@@ -98,6 +98,7 @@ final class TerminalModel: ObservableObject {
 
 struct ToolsTab: View {
     @StateObject private var tm = TerminalModel()
+    @EnvironmentObject private var o: Orchestrator
     @State private var mode = 0
 
     var body: some View {
@@ -108,6 +109,7 @@ struct ToolsTab: View {
                     Text("Builder").tag(1)
                     Text("Forge").tag(2)
                     Text("NFC").tag(3)
+                    Text("PineApple").tag(4)
                 }
                 .pickerStyle(.segmented)
                 .padding(10)
@@ -115,6 +117,7 @@ struct ToolsTab: View {
                 case 0: TerminalView().environmentObject(tm)
                 case 1: BuilderView().environmentObject(tm)
                 case 2: ForgeView()
+                case 4: PineAppleView().environmentObject(o)
                 default: NFCAttackView()
                 }
             }
