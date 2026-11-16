@@ -6,6 +6,13 @@ set -e
 cd "$(dirname "$0")"
 source ./env.sh
 
+# shim header xnu rimosse dall'SDK 26 — fetch centrali PRIMA del deps loop
+# (libnet libera net/route.h + net/bpf.h DURANTE la build della dep)
+mkdir -p "$DEPS/usr/include/net" "$DEPS/usr/include/netinet"
+for h in net/bpf.h net/route.h net/if_arp.h net/ethernet.h netinet/if_ether.h netinet/ip_var.h netinet/in_systm.h; do
+  [ -f "$DEPS/usr/include/$h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/$h" -o "$DEPS/usr/include/$h" || true
+done
+
 if [ "$1" = "--all" ]; then
     TOOLS=$(for f in tools/*.sh; do basename "$f" .sh; done)
 else

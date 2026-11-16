@@ -7,7 +7,9 @@ SRC="$SRCROOT/ettercap"
 [ -d "$SRC" ] || { mkdir -p "$SRC" && tar xzf "$SRCROOT/ettercap.tar.gz" -C "$SRC" --strip-components 1; }
 cd "$SRC"
 
-# shim header rimosse dall'SDK 26 (idempotenti — già da reaver/hostapd se presenti)
+# CMake 4 (runner 2026): respinge cmake_minimum_required(VERSION 2.8)
+sed -i '' 's|cmake_minimum_required(VERSION 2.8)|cmake_minimum_required(VERSION 3.10)|' CMakeLists.txt
+grep -n "cmake_minimum_required" CMakeLists.txt | head -2
 mkdir -p "$DEPS/usr/include/net" "$DEPS/usr/include/netinet"
 for h in net/if_arp.h net/ethernet.h net/route.h net/bpf.h netinet/if_ether.h netinet/ip_var.h; do
   [ -f "$DEPS/usr/include/$h" ] || curl -fSL "https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/$h" -o "$DEPS/usr/include/$h"
@@ -24,6 +26,7 @@ cmake .. \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DCMAKE_INSTALL_PREFIX=/var/jb \
   -DCMAKE_C_FLAGS="-I$DEPS/usr/include -DBYTE_ORDER_LITTLE_ENDIAN" \
   -DCMAKE_EXE_LINKER_FLAGS="-L$DEPS/usr/lib" \
