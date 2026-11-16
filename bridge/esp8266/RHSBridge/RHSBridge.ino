@@ -400,14 +400,14 @@ void loop() {
   if (!client || !client.connected()) {
     if (server.hasClient()) {
       if (client) client.stop();
-      client = server.accept();
+      client = server.available();
       client.setNoDelay(true);
       rxLen = 0;
       Serial.println("[rhs] client connesso");
     }
   } else if (server.hasClient()) {
     // un solo client: rifiuta gli extra
-    WiFiClient junk = server.accept();
+    WiFiClient junk = server.available();
     junk.stop();
   }
 
