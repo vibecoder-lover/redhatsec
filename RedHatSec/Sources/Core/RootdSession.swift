@@ -1,8 +1,9 @@
 import Foundation
 import Network
 
-// sessione rootd PERSISTENTE: una TCP a 127.0.0.1:4444 = una sh root viva (launchd inetd).
-// cwd/env/export persistono tra i comandi, output streaming live, niente reconnect per comando.
+// rootd è ONE-SHOT: launchd inetd spawna sh che legge UNA riga (RHSROOT:{...}) ed esce.
+// Quindi: connessione per comando + persistenza cwd/env tracciata APP-SIDE e
+// re-iniettata nel wrapper. EOF dopo il marker = normale, non è un errore.
 final class RootdSession: ObservableObject {
     static let shared = RootdSession()
 
@@ -10,8 +11,8 @@ final class RootdSession: ObservableObject {
     @Published private(set) var busy = false
 
     var onChunk: ((String) -> Void)?            // output streaming (main)
-    var onDone: ((Int32, String) -> Void)?      // marker trovato: (exit reale, cmd) (main)
-    var onFail: ((String, String) -> Void)?     // rootd giu: (msg, cmd) (main)
+    var onDone: ((Int32, String) -> Void)?      // (exit reale, cmd) (main)
+    var onFail: ((String, String) -> Void)?     // (msg, cmd) (main)
 
     private var conn: NWConnection?
     private var ready = false
@@ -19,18 +20,41 @@ final class RootdSession: ObservableObject {
     private var inBuf: [UInt8] = []
     private var pending = 0
     private var lastCmd = ""
+    private var cwd = "/"
+    private var envLines: [String]
     private let q = DispatchQueue(label: "rhs.rootd.session")
     private let marker: [UInt8]
+    private static let cwdMark = "__RHSCWD_"
+    private static let envKey = "rhs.env"
 
     private init() {
         let mk = "RHS_RC_" + UUID().uuidString.prefix(6).uppercased()
         marker = Array(("__" + mk + "_").utf8)
+        envLines = UserDefaults.standard.stringArray(forKey: Self.envKey) ?? []
+    }
+
+    // pre-connect per il pallino verde: rootd spawn la sh che resta in attesa
+    func warm() {
+        q.async {
+            if self.conn == nil, !self.ready { self.connect() }
+        }
     }
 
     func send(_ line: String) {
-        let cmd = "RHSROOT:{ \(line) ; }; echo \(String(decoding: marker, as: UTF8.self))$?\n"
+        let t = line.trimmingCharacters(in: .whitespaces)
         q.async {
-            self.lastCmd = line
+            // export/unset persistono app-side (ri-iniettati nel wrapper di ogni comando)
+            if t.hasPrefix("export ") || t.hasPrefix("unset ") {
+                self.envLines.append(t.replacingOccurrences(of: "\n", with: " "))
+                UserDefaults.standard.set(self.envLines, forKey: Self.envKey)
+            }
+            var pre = ""
+            let cq = self.cwd.replacingOccurrences(of: "'", with: "'\\''")
+            pre += "cd '\(cq)' 2>/dev/null; "
+            for l in self.envLines { pre += "\(l.replacingOccurrences(of: "'", with: "")); " }
+            let mk = String(decoding: self.marker, as: UTF8.self)
+            let cmd = "RHSROOT:{ \(pre)\(t) ; __rhs_rc=$?; echo \"\(mk)$__rhs_rc\"; echo \"\(Self.cwdMark)$PWD\"; }\n"
+            self.lastCmd = t
             if self.ready, let c = self.conn {
                 self.pending += 1
                 self.syncBusy()
@@ -70,7 +94,11 @@ final class RootdSession: ObservableObject {
             flushOut()
             recv()
         case .failed(let e):
-            drop("rootd: connessione fallita (\(e)) — jailbreak attivo? rhs-sudoers v1.1 installato?")
+            if pending > 0 {
+                drop("rootd: connessione fallita (\(e)) — jailbreak attivo? rhs-sudoers v1.1 installato?")
+            } else {
+                silentClose()
+            }
         case .cancelled:
             ready = false
             conn = nil
@@ -111,6 +139,19 @@ final class RootdSession: ObservableObject {
         }
     }
 
+    // chiusura normale (one-shot: il server chiude dopo il marker) — niente fallback
+    private func silentClose() {
+        ready = false
+        conn?.cancel()
+        conn = nil
+        if !inBuf.isEmpty {
+            let txt = String(decoding: inBuf, as: UTF8.self)
+            inBuf.removeAll()
+            if !txt.isEmpty { DispatchQueue.main.async { self.onChunk?(txt) } }
+        }
+        DispatchQueue.main.async { self.connected = false }
+    }
+
     private func recv() {
         guard let c = conn else { return }
         c.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isEOF, err in
@@ -124,39 +165,70 @@ final class RootdSession: ObservableObject {
             inBuf += Array(data)
             parseMarkers()
         }
-        if isEOF { drop("rootd: stream chiuso dal lato server"); return }
-        if let err { drop("rootd: recv err (\(err)) — reinstalla rhs-sudoers v1.1"); return }
+        if isEOF {
+            if pending > 0 { drop("rootd: stream chiuso a comando incompleto") }
+            else { silentClose() }
+            return
+        }
+        if let err {
+            if pending > 0 { drop("rootd: recv err (\(err)) — reinstalla rhs-sudoers v1.1") }
+            else { silentClose() }
+            return
+        }
         recv()
     }
 
     private func parseMarkers() {
+        let cwdB = Array(Self.cwdMark.utf8)
         while true {
-            guard let mi = indexOf(marker, in: inBuf) else { break }
-            var end = mi + marker.count
-            var digits = ""
-            while end < inBuf.count, inBuf[end] >= 48, inBuf[end] <= 57 {
-                digits.append(Character(UnicodeScalar(inBuf[end])))
-                end += 1
-            }
-            if end < inBuf.count, inBuf[end] == 10 { end += 1 }
-            let head = String(decoding: inBuf[0..<mi], as: UTF8.self)
-            inBuf.removeFirst(end)
-            let cmd = lastCmd
-            if !head.isEmpty, let cb = onChunk {
-                DispatchQueue.main.async { cb(head) }
-            }
-            if let e = Int32(digits) {
-                pending = max(0, pending - 1)
-                syncBusy()
-                DispatchQueue.main.async { self.onDone?(e, cmd) }
+            let iRC = indexOf(marker, in: inBuf)
+            let iCWD = indexOf(cwdB, in: inBuf)
+            if iRC == nil && iCWD == nil { break }
+            if let a = iRC, (iCWD == nil || a < iCWD!) {
+                takeRC(at: a)
+            } else if let b = iCWD {
+                takeCWD(at: b)
             }
         }
         emitPartial()
     }
 
+    private func takeRC(at mi: Int) {
+        var end = mi + marker.count
+        var digits = ""
+        while end < inBuf.count, inBuf[end] >= 48, inBuf[end] <= 57 {
+            digits.append(Character(UnicodeScalar(inBuf[end])))
+            end += 1
+        }
+        if end < inBuf.count, inBuf[end] == 10 { end += 1 }
+        let head = String(decoding: inBuf[0..<mi], as: UTF8.self)
+        inBuf.removeFirst(end)
+        let cmd = lastCmd
+        if !head.isEmpty, let cb = onChunk {
+            DispatchQueue.main.async { cb(head) }
+        }
+        if let e = Int32(digits) {
+            pending = max(0, pending - 1)
+            syncBusy()
+            DispatchQueue.main.async { self.onDone?(e, cmd) }
+        }
+    }
+
+    private func takeCWD(at mi: Int) {
+        var end = mi + Self.cwdMark.utf8.count
+        var path = ""
+        while end < inBuf.count, inBuf[end] != 10 {
+            path.append(Character(UnicodeScalar(inBuf[end])))
+            end += 1
+        }
+        if end < inBuf.count, inBuf[end] == 10 { end += 1 }
+        inBuf.removeFirst(end)
+        if !path.isEmpty { cwd = path }
+    }
+
     // streaming live: emetti tutto tranne una coda che potrebbe contenere un marker spezzato
     private func emitPartial() {
-        let hold = marker.count - 1
+        let hold = max(marker.count, Self.cwdMark.utf8.count + 1) - 1
         guard inBuf.count > hold else { return }
         let cut = inBuf.count - hold
         let slice = Array(inBuf[0..<cut])

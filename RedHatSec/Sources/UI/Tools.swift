@@ -263,6 +263,7 @@ struct TerminalView: View {
         }
         .onAppear {
             focused = true
+            sess.warm()
             if tm.lines.isEmpty { tm.append("rhs build \(ToolRegistry.buildTag)", .info) }
         }
     }
@@ -280,10 +281,15 @@ extension TerminalModel {
             append("sessione rootd chiusa — al prossimo comando si riconnette", .warn)
             return
         }
-        // tui <cmd> → PTY reale via util-linux script -q -c (per top/yersinia/programmi interattivi)
+        // tui <cmd> → PTY reale via script di util-linux (/var/jb — quello BSD di iOS non ha -c)
         if head == "tui", parts.count > 1 {
             let inner = parts.dropFirst().joined(separator: " ").replacingOccurrences(of: "'", with: "")
-            run("script -q -c '\(inner)' /dev/null")
+            let sc = "/var/jb/usr/bin/script"
+            guard FileManager.default.fileExists(atPath: sc) else {
+                installTool("util-linux", then: "tui \(inner)")
+                return
+            }
+            run("\(sc) -q -c '\(inner)' /dev/null")
             return
         }
         if head == "install", parts.count > 1 {
