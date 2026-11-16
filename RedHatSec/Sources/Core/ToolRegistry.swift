@@ -111,6 +111,8 @@ enum ToolRegistry {
     static let specs: [ToolSpec] = [
         ToolSpec(name: "nmap", pkg: "nmap", bins: ["nmap"]),
         ToolSpec(name: "tcpdump", pkg: "tcpdump", bins: ["tcpdump"]),
+        ToolSpec(name: "hping3", pkg: "hping", bins: ["hping3"],
+                 debURL: "https://github.com/vibecoder-lover/redhatsec/releases/download/debs/hping3_iphoneos-arm64.deb"),
         ToolSpec(name: "aircrack-ng", pkg: "aircrack-ng", bins: ["aircrack-ng", "aireplay-ng", "airodump-ng"],
                  debURL: "https://github.com/vibecoder-lover/redhatsec/releases/download/debs/aircrack-ng_iphoneos-arm64.deb"),
         ToolSpec(name: "socat", pkg: "socat", bins: ["socat"],

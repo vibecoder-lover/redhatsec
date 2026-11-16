@@ -833,15 +833,16 @@ final class Orchestrator: ObservableObject {
         guard up else { return "MS17-010: 445 non raggiungibile" }
         defer { s.close() }
         _ = await rt(s, neg)
-        guard let sr = await rt(s, sess), sr.count >= 34, sr[4] == 0xff else {
+        guard let sr = await rt(s, sess), sr.count >= 32, sr[4] == 0xff else {
             return "MS17-010: session setup anon non conclusiva — server SMB1 filtrato o SMB2-only"
         }
-        let treeP = patch(tree, 32..<34, sr.subdata(in: 32..<34)) // UID
-        guard let tr = await rt(s, treeP), tr.count >= 30, tr[4] == 0xff else {
+        // NBSS 4B davanti: UID SMB 26..27 → frame 30..31, TID SMB 22..23 → frame 26..27
+        let treeP = patch(tree, 30..<32, sr.subdata(in: 30..<32)) // UID
+        guard let tr = await rt(s, treeP), tr.count >= 32, tr[4] == 0xff else {
             return "MS17-010: tree connect IPC$ fallita — share restritte"
         }
-        let transP = patch(patch(trans, 28..<30, tr.subdata(in: 28..<30)), // TID
-                           32..<34, tr.subdata(in: 32..<34))               // UID
+        let transP = patch(patch(trans, 26..<28, tr.subdata(in: 26..<28)), // TID
+                           30..<32, tr.subdata(in: 30..<32))               // UID
         guard let fin = await rt(s, transP), fin.count >= 13, fin[4] == 0xff else {
             return "MS17-010: trans2 senza risposta — check non conclusivo"
         }
