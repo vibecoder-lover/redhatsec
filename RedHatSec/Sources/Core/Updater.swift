@@ -57,3 +57,4 @@ enum Updater {
             : "TrollStore non risponde all'URL — installa a mano dal release GitHub"
     }
 }
+// build trigger 28c1cb6-cancelled

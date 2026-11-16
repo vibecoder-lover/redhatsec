@@ -25,6 +25,17 @@ for dep in deps/*.sh; do
     bash "$dep" || echo "=== DEP $(basename "$dep" .sh) FAILED (tolerata, tool che la usa fara SKIP) ==="
 done
 
+# dopo i deps: lo shim xnu net/bpf.h colliderebbe con pcap/bpf.h di libpcap
+# (stessi struct bpf_program/bpf_insn) → trampoline sull'header di libpcap
+if [ -f "$DEPS/usr/include/pcap/bpf.h" ]; then
+  cat > "$DEPS/usr/include/net/bpf.h" <<'EOF'
+#ifndef _RHS_NET_BPF_TRAMPOLINE
+#define _RHS_NET_BPF_TRAMPOLINE
+#include <pcap/bpf.h>
+#endif
+EOF
+fi
+
 # smoke: il wrapper produce arm64-ios?
 echo 'int main(void){return 0;}' > "$ROOT/smoke.c"
 echo "SMOKE: $CC $CFLAGS"
