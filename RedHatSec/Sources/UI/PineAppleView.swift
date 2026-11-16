@@ -64,7 +64,7 @@ struct PineAppleView: View {
             }
             HStack(spacing: 10) {
                 PineButton(label: "IMPOSTA PORTAL", color: .warn) { await setPortal() }
-                PineButton(probes.isEmpty ? "KARMA ARM" : "KARMA STOP", color: .warn) { await karma() }
+                PineButton(label: probes.isEmpty ? "KARMA ARM" : "KARMA STOP", color: .warn) { await karma() }
             }
             TextEditor(text: $portalHTML)
                 .font(.system(size: 11, design: .monospaced))
