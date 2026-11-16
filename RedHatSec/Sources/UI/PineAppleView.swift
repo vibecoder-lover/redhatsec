@@ -41,10 +41,10 @@ struct PineAppleView: View {
 
     private var statusRow: some View {
         HStack {
-            Pill(label: tcp.connected ? "BRIDGE ONLINE" : "BRIDGE OFFLINE",
+            Pill(text: tcp.connected ? "BRIDGE ONLINE" : "BRIDGE OFFLINE",
                  color: tcp.connected ? .ok : .bad)
             Spacer()
-            Pill(label: tcp.rogueOn ? "ROGUE ATTIVO" : "ROGUE OFF",
+            Pill(text: tcp.rogueOn ? "ROGUE ATTIVO" : "ROGUE OFF",
                  color: tcp.rogueOn ? .warn : .dim)
         }
     }
@@ -59,11 +59,11 @@ struct PineAppleView: View {
             }
             .tint(.redHat)
             HStack(spacing: 10) {
-                PineButton("AVVIA", color: .redHat) { await startRogue() }
-                PineButton("STOP", color: .dim) { await stopRogue() }
+                PineButton(label: "AVVIA", color: .redHat) { await startRogue() }
+                PineButton(label: "STOP", color: .dim) { await stopRogue() }
             }
             HStack(spacing: 10) {
-                PineButton("IMPOSTA PORTAL", color: .warn) { await setPortal() }
+                PineButton(label: "IMPOSTA PORTAL", color: .warn) { await setPortal() }
                 PineButton(probes.isEmpty ? "KARMA ARM" : "KARMA STOP", color: .warn) { await karma() }
             }
             TextEditor(text: $portalHTML)
@@ -114,8 +114,8 @@ struct PineAppleView: View {
             Text("RECON").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
             PineField("IP target", $targetIP)
             HStack(spacing: 10) {
-                PineButton("PORT SCAN", color: .redHat) { await doPortScan() }
-                PineButton("DETTETTORI", color: .warn) { await runDetectors() }
+                PineButton(label: "PORT SCAN", color: .redHat) { await doPortScan() }
+                PineButton(label: "DETTETTORI", color: .warn) { await runDetectors() }
             }
             Text("porte: \(scanPorts.map(String.init).joined(separator: " "))")
                 .font(.system(size: 10, design: .monospaced)).foregroundColor(.dim)
@@ -144,7 +144,7 @@ struct PineAppleView: View {
                 Text("probe su \(e.proto.rawValue) :\(e.port) — nessun comando richiesto")
                     .font(.system(size: 11)).foregroundColor(.dim)
             }
-            PineButton("ESEGUI", color: .redHat) { await fire() }
+            PineButton(label: "ESEGUI", color: .redHat) { await fire() }
         }
     }
 
