@@ -281,7 +281,7 @@ extension TerminalModel {
             append("sessione rootd chiusa — al prossimo comando si riconnette", .warn)
             return
         }
-        // tui <cmd> → PTY reale via script di util-linux (/var/jb — quello BSD di iOS non ha -c)
+        // tui <cmd> → PTY reale: rileva la variante di script (util-linux ha -c, BSD no)
         if head == "tui", parts.count > 1 {
             let inner = parts.dropFirst().joined(separator: " ").replacingOccurrences(of: "'", with: "")
             let sc = "/var/jb/usr/bin/script"
@@ -289,7 +289,7 @@ extension TerminalModel {
                 installTool("util-linux", then: "tui \(inner)")
                 return
             }
-            run("\(sc) -q -c '\(inner)' /dev/null")
+            run("if \(sc) -c true /dev/null >/dev/null 2>&1; then \(sc) -q -c '\(inner)' /dev/null; else \(sc) -q /dev/null \(inner); fi")
             return
         }
         if head == "install", parts.count > 1 {

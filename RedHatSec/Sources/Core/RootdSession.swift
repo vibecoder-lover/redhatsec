@@ -1,9 +1,9 @@
 import Foundation
 import Network
 
-// rootd è ONE-SHOT: launchd inetd spawna sh che legge UNA riga (RHSROOT:{...}) ed esce.
-// Quindi: connessione per comando + persistenza cwd/env tracciata APP-SIDE e
-// re-iniettata nel wrapper. EOF dopo il marker = normale, non è un errore.
+// rootd ONE-SHOT: ogni connessione esegue UNA riga (RHSROOT:{...}) e chiude.
+// Pump: coda FIFO di comandi, 1 connessione per comando, riciclo dopo il marker,
+// cwd/env persistono app-side e vengono re-inietti nel wrapper di ogni comando.
 final class RootdSession: ObservableObject {
     static let shared = RootdSession()
 
@@ -16,10 +16,10 @@ final class RootdSession: ObservableObject {
 
     private var conn: NWConnection?
     private var ready = false
-    private var outBuf = ""                     // comandi inviati prima che la conn sia ready
     private var inBuf: [UInt8] = []
-    private var pending = 0
-    private var lastCmd = ""
+    private var queue: [String] = []            // comandi in attesa (FIFO)
+    private var current = ""                    // comando in volo (1 connessione)
+    private var tries = 0
     private var cwd = "/"
     private var envLines: [String]
     private let q = DispatchQueue(label: "rhs.rootd.session")
@@ -43,37 +43,64 @@ final class RootdSession: ObservableObject {
     func send(_ line: String) {
         let t = line.trimmingCharacters(in: .whitespaces)
         q.async {
-            // export/unset persistono app-side (ri-iniettati nel wrapper di ogni comando)
-            if t.hasPrefix("export ") || t.hasPrefix("unset ") {
-                self.envLines.append(t.replacingOccurrences(of: "\n", with: " "))
-                UserDefaults.standard.set(self.envLines, forKey: Self.envKey)
-            }
-            var pre = ""
-            let cq = self.cwd.replacingOccurrences(of: "'", with: "'\\''")
-            pre += "cd '\(cq)' 2>/dev/null; "
-            for l in self.envLines { pre += "\(l.replacingOccurrences(of: "'", with: "")); " }
-            let mk = String(decoding: self.marker, as: UTF8.self)
-            let cmd = "RHSROOT:{ \(pre)\(t) ; __rhs_rc=$?; echo \"\(mk)$__rhs_rc\"; echo \"\(Self.cwdMark)$PWD\"; }\n"
-            self.lastCmd = t
-            if self.ready, let c = self.conn {
-                self.pending += 1
-                self.syncBusy()
-                c.send(content: Data(cmd.utf8), completion: .contentProcessed { _ in })
-            } else {
-                self.outBuf += cmd
-                self.connect()
-            }
+            self.trackEnv(t)
+            self.queue.append(t)
+            self.pump()
         }
     }
 
     func close() {
         q.async {
-            self.ready = false
-            self.conn?.cancel()
-            self.conn = nil
+            self.queue.removeAll()
+            self.current = ""
+            self.recycle()
             DispatchQueue.main.async { self.connected = false }
         }
     }
+
+    // MARK: pump one-shot
+
+    private func pump() {
+        guard current.isEmpty, !queue.isEmpty else { syncBusy(); return }
+        current = queue.removeFirst()
+        tries = 0
+        syncBusy()
+        if ready, let c = conn {
+            fire(current, on: c)
+        } else {
+            connect()   // on ready → fire(current)
+        }
+    }
+
+    private func fire(_ t: String, on c: NWConnection) {
+        c.send(content: Data(wrapper(t).utf8), completion: .contentProcessed { _ in })
+    }
+
+    private func wrapper(_ t: String) -> String {
+        var pre = ""
+        let cq = cwd.replacingOccurrences(of: "'", with: "'\\''")
+        pre += "cd '\(cq)' 2>/dev/null; "
+        for l in envLines { pre += "\(l.replacingOccurrences(of: "'", with: "")); " }
+        let mk = String(decoding: marker, as: UTF8.self)
+        return "RHSROOT:{ \(pre)\(t) ; __rhs_rc=$?; echo \"\(mk)$__rhs_rc\"; echo \"\(Self.cwdMark)$PWD\"; }\n"
+    }
+
+    private func trackEnv(_ t: String) {
+        if t.hasPrefix("export ") || t.hasPrefix("unset ") {
+            envLines.append(t.replacingOccurrences(of: "\n", with: " "))
+            UserDefaults.standard.set(envLines, forKey: Self.envKey)
+        }
+    }
+
+    // il conn è consumato dopo un marker (one-shot) → chiudi e passa al prossimo
+    private func recycle() {
+        ready = false
+        conn?.cancel()
+        conn = nil
+        inBuf.removeAll()
+    }
+
+    // MARK: connessione
 
     private func connect() {
         guard conn == nil else { return }
@@ -91,14 +118,12 @@ final class RootdSession: ObservableObject {
         case .ready:
             ready = true
             DispatchQueue.main.async { self.connected = true }
-            flushOut()
+            if !current.isEmpty {
+                fire(current, on: conn!)
+            }
             recv()
         case .failed(let e):
-            if pending > 0 {
-                drop("rootd: connessione fallita (\(e)) — jailbreak attivo? rhs-sudoers v1.1 installato?")
-            } else {
-                silentClose()
-            }
+            lost("rootd: connessione fallita (\(e)) — jailbreak attivo? rhs-sudoers v1.1 installato?")
         case .cancelled:
             ready = false
             conn = nil
@@ -106,50 +131,6 @@ final class RootdSession: ObservableObject {
         default:
             break
         }
-    }
-
-    private func flushOut() {
-        guard !outBuf.isEmpty else { return }
-        let b = outBuf
-        outBuf = ""
-        guard let c = conn else { return }
-        pending += b.split(separator: "\n", omittingEmptySubsequences: false).count
-        syncBusy()
-        c.send(content: Data(b.utf8), completion: .contentProcessed { _ in })
-    }
-
-    private func drop(_ msg: String) {
-        ready = false
-        conn?.cancel()
-        conn = nil
-        let cmd = lastCmd
-        if !inBuf.isEmpty {
-            let txt = String(decoding: inBuf, as: UTF8.self)
-            inBuf.removeAll()
-            if !txt.isEmpty { DispatchQueue.main.async { self.onChunk?(txt) } }
-        }
-        pending = 0
-        DispatchQueue.main.async {
-            self.connected = false
-            self.busy = false
-        }
-        lastCmd = ""
-        if !cmd.isEmpty {
-            DispatchQueue.main.async { self.onFail?(msg, cmd) }
-        }
-    }
-
-    // chiusura normale (one-shot: il server chiude dopo il marker) — niente fallback
-    private func silentClose() {
-        ready = false
-        conn?.cancel()
-        conn = nil
-        if !inBuf.isEmpty {
-            let txt = String(decoding: inBuf, as: UTF8.self)
-            inBuf.removeAll()
-            if !txt.isEmpty { DispatchQueue.main.async { self.onChunk?(txt) } }
-        }
-        DispatchQueue.main.async { self.connected = false }
     }
 
     private func recv() {
@@ -166,17 +147,57 @@ final class RootdSession: ObservableObject {
             parseMarkers()
         }
         if isEOF {
-            if pending > 0 { drop("rootd: stream chiuso a comando incompleto") }
-            else { silentClose() }
+            // marker già preso → chiusura normale; altrimenti il comando si è perso: retry
+            if current.isEmpty {
+                silentClose()
+            } else {
+                lost("rootd: stream chiuso a comando incompleto")
+            }
             return
         }
         if let err {
-            if pending > 0 { drop("rootd: recv err (\(err)) — reinstalla rhs-sudoers v1.1") }
-            else { silentClose() }
+            if current.isEmpty { silentClose() }
+            else { lost("rootd: recv err (\(err)) — reinstalla rhs-sudoers v1.1") }
             return
         }
         recv()
     }
+
+    // comando perso (conn chiusa senza marker): max 2 tentativi poi fallback
+    private func lost(_ msg: String) {
+        tries += 1
+        if tries >= 2 {
+            let cmd = current
+            current = ""
+            recycle()
+            DispatchQueue.main.async {
+                self.connected = false
+                self.busy = false
+            }
+            if !cmd.isEmpty {
+                DispatchQueue.main.async { self.onFail?(msg, cmd) }
+            }
+            pump()
+        } else {
+            recycle()
+            DispatchQueue.main.async { self.connected = false }
+            connect()   // on ready → fire(current) di nuovo
+        }
+    }
+
+    private func silentClose() {
+        ready = false
+        conn?.cancel()
+        conn = nil
+        if !inBuf.isEmpty {
+            let txt = String(decoding: inBuf, as: UTF8.self)
+            inBuf.removeAll()
+            if !txt.isEmpty { DispatchQueue.main.async { self.onChunk?(txt) } }
+        }
+        DispatchQueue.main.async { self.connected = false }
+    }
+
+    // MARK: parse
 
     private func parseMarkers() {
         let cwdB = Array(Self.cwdMark.utf8)
@@ -203,14 +224,18 @@ final class RootdSession: ObservableObject {
         if end < inBuf.count, inBuf[end] == 10 { end += 1 }
         let head = String(decoding: inBuf[0..<mi], as: UTF8.self)
         inBuf.removeFirst(end)
-        let cmd = lastCmd
+        let cmd = current
         if !head.isEmpty, let cb = onChunk {
             DispatchQueue.main.async { cb(head) }
         }
         if let e = Int32(digits) {
-            pending = max(0, pending - 1)
+            current = ""
             syncBusy()
             DispatchQueue.main.async { self.onDone?(e, cmd) }
+            // one-shot: il conn è consumato → ricicla e pompa il prossimo
+            recycle()
+            DispatchQueue.main.async { self.connected = false }
+            pump()
         }
     }
 
@@ -242,7 +267,7 @@ final class RootdSession: ObservableObject {
     }
 
     private func syncBusy() {
-        let b = pending > 0
+        let b = !current.isEmpty || !queue.isEmpty
         DispatchQueue.main.async { self.busy = b }
     }
 
