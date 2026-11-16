@@ -6,49 +6,54 @@ final class TerminalModel: ObservableObject {
     @Published var lines: [LogEntry] = []
     @Published var running = false
 
+    private var partial = ""
+    private var tried127: Set<String> = []
+
+    init() {
+        let s = RootdSession.shared
+        s.onChunk = { [weak self] c in self?.stream(c) }
+        s.onDone = { [weak self] e, c in self?.done(e, c) }
+        s.onFail = { [weak self] m, c in self?.fallback(m, c) }
+    }
+
     func append(_ text: String, _ level: LogEntry.Level = .info) {
         lines.append(LogEntry(level: level, text: text))
     }
 
-    func run(_ raw: String) {
-        guard !running else { return }
-        let cmd = raw.trimmingCharacters(in: .whitespaces)
-        guard !cmd.isEmpty else { return }
-        let parts = cmd.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-        guard let head = parts.first else { return }
-
-        if ShellRunner.shared.resolve(head) == nil {
-            running = true
-            append("tool '\(head)' non trovato — auto-install da repo…", .warn)
-            let toolName = head
-            ToolRegistry.install(toolName) { l in
-                DispatchQueue.main.async { self.append(l) }
-            } done: { ok in
-                DispatchQueue.main.async {
-                    self.running = false
-                    if ok {
-                        self.append("'\(toolName)' installato — rieseguo", .good)
-                        // guardia anti-loop: se il binario non è risolvibile, non re-entrare in install
-                        if ShellRunner.shared.resolve(String(head)) != nil {
-                            self.run(cmd)
-                        } else {
-                            self.append("install ok ma '\(head)' non risolvibile nel PATH — ridigita", .bad)
-                            Haptics.fail()
-                        }
-                    } else {
-                        self.append("auto-install fallita per '\(toolName)' — Sileo aperto, installa lì e riprova", .bad)
-                        Haptics.fail()
-                    }
-                }
+    // streaming live: i chunk arrivano spezzati, la riga incompleta resta in partial
+    func stream(_ chunk: String) {
+        var rest = chunk
+        if !partial.isEmpty { rest = partial + rest; partial = "" }
+        let pieces = rest.split(separator: "\n", omittingEmptySubsequences: false)
+        let n = pieces.count
+        for (i, p) in pieces.enumerated() {
+            if i == n - 1 && !rest.hasSuffix("\n") {
+                partial = String(p)
+            } else {
+                lines.append(LogEntry(level: .info, text: String(p)))
             }
-            return
         }
+    }
 
-        running = true
-        Haptics.tap()
-        append("$ \(cmd)", .exec)
-        // tutto via rootd: launchd (root) spawna sh per noi — lo spawn diretto
-        // dall'app è negato dall'AMFI (SecCodeCopySelf rc=-67065 = unsigned)
+    private func done(_ exit: Int32, _ cmd: String) {
+        if !partial.isEmpty {
+            lines.append(LogEntry(level: .info, text: partial))
+            partial = ""
+        }
+        append("exit \(exit)", exit == 0 ? .good : .warn)
+        running = RootdSession.shared.busy
+        // 127 = command not found nel PATH della sh root → auto-install una sola volta per head
+        guard exit == 127 else { return }
+        let head = cmd.split(separator: " ", omittingEmptySubsequences: true).map(String.init).first ?? ""
+        guard !head.isEmpty, !tried127.contains(head) else { return }
+        tried127.insert(head)
+        append("'\(head)' non trovato dalla sh root — auto-install…", .warn)
+        installTool(head, then: cmd)
+    }
+
+    private func fallback(_ msg: String, _ cmd: String) {
+        append(msg, .bad)
+        append("rootd giù — fallback exec singola…", .warn)
         DispatchQueue.global(qos: .utility).async {
             let r = RootShell.shared.runSync(cmd, timeout: 300)
             DispatchQueue.main.async {
@@ -64,6 +69,17 @@ final class TerminalModel: ObservableObject {
                 self.running = false
             }
         }
+    }
+
+    func run(_ raw: String) {
+        let cmd = raw.trimmingCharacters(in: .whitespaces)
+        guard !cmd.isEmpty else { return }
+        running = true
+        Haptics.tap()
+        append("$ \(cmd)", .exec)
+        // sessione rootd persistente: una sh root viva — streaming live, cwd/env persistenti,
+        // l'input si accoda anche mentre un altro comando gira (semantica terminale reale)
+        RootdSession.shared.send(cmd)
     }
 }
 
@@ -101,6 +117,7 @@ struct ToolsTab: View {
 
 struct TerminalView: View {
     @EnvironmentObject var tm: TerminalModel
+    @ObservedObject private var sess = RootdSession.shared
     @State private var input = ""
     @FocusState private var focused: Bool
 
@@ -164,9 +181,14 @@ struct TerminalView: View {
             }
 
             HStack(spacing: 10) {
-                Text("rhs")
-                    .font(.system(size: 12, weight: .heavy, design: .monospaced))
-                    .foregroundColor(.redHat)
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(sess.connected ? Color.ok : Color.bad)
+                        .frame(width: 8, height: 8)
+                    Text("rootd")
+                        .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                        .foregroundColor(sess.connected ? .ok : .bad)
+                }
                 TextField(tm.running ? "in esecuzione…" : "comando…", text: $input)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13, design: .monospaced))
@@ -180,7 +202,6 @@ struct TerminalView: View {
                         .font(.system(size: 13, weight: .bold))
                         .foregroundColor(tm.running ? .dim : .redHat)
                 }
-                .disabled(tm.running)
                 Button {
                     tm.lines.removeAll()
                 } label: {
@@ -207,7 +228,7 @@ struct TerminalView: View {
 extension TerminalModel {
     func runSmartText(_ raw: String) {
         let cmd = raw.trimmingCharacters(in: .whitespaces)
-        guard !cmd.isEmpty, !running else { return }
+        guard !cmd.isEmpty else { return }
         let parts = cmd.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         guard let head = parts.first else { return }
         if head == "clear" { lines.removeAll(); return }
@@ -216,24 +237,16 @@ extension TerminalModel {
             return
         }
         if head == "sudo" {
-            append("$ \(cmd)", .exec)
             guard parts.count > 1 else {
-                append("uso: sudo <comando> — la password va nel campo ROOT sopra", .warn)
+                append("uso: sudo <comando> — su rootd già sei root", .warn)
                 return
             }
-            running = true
-            let rest = parts.dropFirst().joined(separator: " ")
-            DispatchQueue.global(qos: .utility).async {
-                let r = RootShell.shared.runSync(rest, timeout: 300)
-                DispatchQueue.main.async {
-                    if !r.stdout.isEmpty { self.append(String(r.stdout.suffix(2500))) }
-                    self.append(String(r.stderr.suffix(1200)), r.exitCode == 0 ? .good : .bad)
-                    self.running = false
-                }
-            }
+            run(parts.dropFirst().joined(separator: " "))
             return
         }
-        if BuiltinExec.names.contains(head) {
+        // builtins finti solo per la diagnostica app: ls/cat/cd/whoami/… ora sono REALI
+        // nella sh root persistente (cd persiste davvero tra i comandi)
+        if ["help", "spawntest", "repo"].contains(head) {
             append("$ \(cmd)", .exec)
             let out = BuiltinExec.exec(parts) ?? []
             for l in out { append(l) }
@@ -247,7 +260,7 @@ extension TerminalModel {
     }
 
     func installTool(_ tool: String, then cmd: String? = nil) {
-        guard !running else { return }
+        // gli install usano connessioni rootd proprie: girano anche mentre la sessione è occupata
         running = true
         append("auto-install '\(tool)'…", .warn)
         ToolRegistry.install(tool) { l in
