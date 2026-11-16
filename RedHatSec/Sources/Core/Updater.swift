@@ -57,6 +57,18 @@ enum Updater {
         } catch {
             return "move fallita: \(error.localizedDescription)"
         }
+        // VIA A (rootd): copia in /var/jb/tmp e magnifier url=file:// — TrollStore
+        // (TSInstallationController) NON valida lo scheme: NSURLSessionDownloadTask
+        // copia anche i file:// (TrollStore è root, legge /var/jb/tmp)
+        let jbPath = "/var/jb/tmp/rhs.tipa"
+        let cp = RootShell.shared.runSync("rm -f \(jbPath); cp '\(dest)' \(jbPath) && chmod 644 \(jbPath)", timeout: 30)
+        if cp.exitCode == 0 {
+            await MainActor.run {
+                UIApplication.shared.open(URL(string: "apple-magnifier://install?url=file://\(jbPath)")!)
+            }
+            return "install via TrollStore avviata (\(info.build)) — conferma nell'alert"
+        }
+        // VIA B (rootd giù): share sheet DIC
         await MainActor.run {
             let d = UIDocumentInteractionController(url: URL(fileURLWithPath: dest))
             d.uti = "com.opa334.trollstore.tipa"
@@ -67,7 +79,7 @@ enum Updater {
                 d.presentOpenInMenu(from: win.bounds, in: win, animated: true)
             }
         }
-        return "tipa pronto (\(info.build)) — tocca \"TrollStore\" nel pannello e conferma"
+        return "tipa pronto (\(info.build)) — tocca \"TrollStore\" nel pannello e conferma (rootd giù)"
     }
 }
 // build trigger 28c1cb6-cancelled

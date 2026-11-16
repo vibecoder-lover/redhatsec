@@ -385,8 +385,16 @@ static void feed(uint8_t* b, size_t n) {
 
 // ============ setup/loop ============
 
+// LED di stato (GPIO2 onboard, attivo LOW)
+#define LED_PIN 2
+#define LED_ON()  digitalWrite(LED_PIN, LOW)
+#define LED_OFF() digitalWrite(LED_PIN, HIGH)
+
 void setup() {
   Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  // boot: 3 blink rapidi
+  for (int i = 0; i < 3; i++) { LED_ON(); delay(90); LED_OFF(); delay(90); }
   WiFi.mode(WIFI_AP_STA);
   // ponte principale: l'ESP entra nell'hotspot del telefono (stessa rete → TCP diretto)
   WiFi.setAutoReconnect(true);
@@ -425,6 +433,46 @@ void loop() {
       int got = client.readBytes(tmp, av);
       feed(tmp, (size_t)got);
     }
+  }
+
+  // retry hotspot ogni 30s se disconnesso
+  static uint32_t lastJoinTry = 0;
+  if (WiFi.status() != WL_CONNECTED && millis() - lastJoinTry > 30000) {
+    lastJoinTry = millis();
+    WiFi.begin(PH_SSID, PH_PASS, 0, nullptr, true);
+    Serial.println("[rhs] retry hotspot");
+  }
+
+  // debug: a 60s senza hotspot, stampo lo scan (cerco l'SSID del telefono)
+  static bool debugScanDone = false;
+  if (!debugScanDone && millis() > 60000 && WiFi.status() != WL_CONNECTED) {
+    debugScanDone = true;
+    int n = WiFi.scanComplete();
+    if (n < 0) { Serial.println("[rhs] DEBUG scan: non ancora pronto"); n = 0; }
+    Serial.print("[rhs] DEBUG scan: "); Serial.print(n); Serial.println(" reti");
+    for (int i = 0; i < n; i++) {
+      bool hit = WiFi.SSID(i) == PH_SSID;
+      Serial.print(hit ? "[rhs] >>> TROVATA: " : "[rhs]   - ");
+      Serial.print(WiFi.SSID(i));
+      Serial.print(" ch"); Serial.print(WiFi.channel(i));
+      Serial.print(" rssi "); Serial.print(WiFi.RSSI(i));
+      Serial.print(" enc "); Serial.println((int)WiFi.encryptionType(i));
+    }
+    if (n == 0) Serial.println("[rhs] nessuna rete vista — hotspot OFF o 5GHz? attiva \"Massimizza compatibilita\"");
+  }
+
+  // LED di stato
+  static uint32_t lastLedT = 0;
+  static bool ledPhase = false;
+  uint32_t now = millis();
+  if (client && client.connected()) {
+    LED_ON();                                        // ON fisso: ponte pronto
+  } else if (WiFi.status() == WL_CONNECTED) {
+    if (now - lastLedT > 2000) { lastLedT = now; ledPhase = true; LED_ON(); }
+    else if (now - lastLedT > 1800) LED_OFF();       // flash breve ogni 2s: hotspot ok, in attesa
+  } else {
+    if (now - lastLedT > 600) { lastLedT = now; ledPhase = !ledPhase; }
+    digitalWrite(LED_PIN, ledPhase ? LOW : HIGH);    // blink 1Hz: cerco l'hotspot
   }
 
   MDNS.update();
