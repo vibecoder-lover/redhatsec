@@ -12,7 +12,7 @@ struct ToolSpec {
 func proc_pidpath_c(_ pid: pid_t, _ buf: UnsafeMutablePointer<CChar>, _ size: UInt32) -> Int32
 
 enum BuiltinExec {
-    static let names: Set<String> = ["ls", "cat", "echo", "whoami", "id", "uname",
+    static let names: Set<String> = ["ls", "cat", "cd", "echo", "whoami", "id", "uname",
                                      "env", "df", "ps", "ifconfig", "pwd", "help", "clear", "spawntest", "repo"]
 
     static func exec(_ parts: [String]) -> [String]? {
@@ -31,6 +31,7 @@ enum BuiltinExec {
         case "ifconfig": return ifconfigLines
         case "ls": return lsLines(args)
         case "cat": return catLines(args)
+        case "cd": return cdLines(args)
         case "ps": return psLines
         case "repo": return ToolRegistry.repoCmd(args)
         default: return nil
@@ -150,6 +151,12 @@ enum BuiltinExec {
             return ["cat: \(f) — permesso negato o inesistente"]
         }
         return s.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    }
+
+    static func cdLines(_ args: [String]) -> [String] {
+        let p = args.first ?? "/var/mobile"
+        if chdir(p) == 0 { return ["cwd: \(FileManager.default.currentDirectoryPath)"] }
+        return ["cd: \(p) — negato o inesistente"]
     }
 
     static var psLines: [String] {
