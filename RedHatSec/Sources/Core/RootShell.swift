@@ -102,6 +102,12 @@ final class RootShell: ObservableObject {
             lastRootOK = true
             return rd
         }
+        // rootd raggiungibile ma comando fallito: risultato REALE (exit del comando) — niente fallback che maschera
+        let connErr = rd.stderr.contains("rootd:") || rd.stderr.contains("[rootd timeout")
+        if !connErr {
+            lastRootOK = true
+            return rd
+        }
         let wrapped = "export DEBIAN_FRONTEND=noninteractive; \(cmd)"
         // 2) fallback: persona spawn diretto di sh (uid 0 override)
         let a = ShellRunner.shared.runWithStdin("sh", args: ["-c", wrapped], stdin: nil, asRoot: true, timeout: timeout)
