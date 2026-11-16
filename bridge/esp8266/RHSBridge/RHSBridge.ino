@@ -46,6 +46,9 @@ void wifi_promiscuous_enable(bool promiscuous);
 #define BRIDGE_PORT 3333
 #define AP_SSID     "RHS-Bridge"
 #define AP_PASS     "rhsbridge"
+// hotspot del telefono: il bridge principale è QUI (STA), l'AP resta come fallback
+#define PH_SSID     "Hexxeted"
+#define PH_PASS     "lwae9180"
 #define MAX_NETS    14
 #define MAX_SSIDS   16
 
@@ -385,14 +388,16 @@ static void feed(uint8_t* b, size_t n) {
 void setup() {
   Serial.begin(115200);
   WiFi.mode(WIFI_AP_STA);
+  // ponte principale: l'ESP entra nell'hotspot del telefono (stessa rete → TCP diretto)
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(PH_SSID, PH_PASS, 0, nullptr, true);
+  // fallback: AP proprio (se l'hotspot manca, il telefono si aggancia qui)
   WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
   WiFi.softAP(AP_SSID, AP_PASS);
   WiFi.scanNetworks(true);
   server.begin();
   server.setNoDelay(true);
-  MDNS.begin("rhsbridge");
-  MDNS.addService("rhsbridge", "tcp", BRIDGE_PORT);
-  Serial.println("[rhs] bridge up :3333");
+  Serial.println("[rhs] bridge :3333 — hotspot " PH_SSID " + AP fallback");
 }
 
 void loop() {
@@ -423,6 +428,19 @@ void loop() {
   }
 
   MDNS.update();
+
+  // mDNS quando l'hotspot è raggiunto (le app lo scoprono via _rhsbridge._tcp)
+  static bool mdnsUp = false;
+  if (!mdnsUp && WiFi.status() == WL_CONNECTED) {
+    if (MDNS.begin("rhsbridge")) {
+      MDNS.addService("rhsbridge", "tcp", BRIDGE_PORT);
+      mdnsUp = true;
+      Serial.print("[rhs] hotspot OK, IP: ");
+      Serial.println(WiFi.localIP());
+    }
+  } else if (mdnsUp && WiFi.status() != WL_CONNECTED) {
+    mdnsUp = false;
+  }
 
   // scan async completa
   if (state == SCANNING && WiFi.scanComplete() >= 0) {

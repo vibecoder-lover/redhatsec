@@ -133,6 +133,9 @@ struct TerminalView: View {
     @ObservedObject private var sess = RootdSession.shared
     @ObservedObject private var sr = ShellRunner.shared
     @State private var input = ""
+    @State private var contentBottomY: CGFloat = 0
+    @State private var viewportBottomY: CGFloat = 0
+    @State private var nearBottom = true
     @FocusState private var focused: Bool
     @State private var hist: [String] = []
     @State private var histIdx = -1
@@ -189,9 +192,31 @@ struct TerminalView: View {
                         }
                     }
                     .padding(12)
+                    .background(
+                        GeometryReader { g in
+                            Color.clear.preference(key: ContentBottomKey.self,
+                                                   value: g.frame(in: .global).maxY)
+                        }
+                    )
                 }
+                .background(
+                    GeometryReader { g in
+                        Color.clear.preference(key: ViewportBottomKey.self,
+                                               value: g.frame(in: .global).maxY)
+                    }
+                )
                 .background(Color(hex: 0x070709))
+                .onPreferenceChange(ContentBottomKey.self) { bottom in
+                    contentBottomY = bottom
+                    nearBottom = viewportBottomY - bottom > -80
+                }
+                .onPreferenceChange(ViewportBottomKey.self) { vp in
+                    viewportBottomY = vp
+                    nearBottom = vp - contentBottomY > -80
+                }
                 .onChange(of: tm.lines.count) { _ in
+                    // scroll guard: se l'utente è risalito a leggere, niente autoscroll
+                    guard nearBottom else { return }
                     withAnimation { proxy.scrollTo(tm.lines.last?.id, anchor: .bottom) }
                 }
             }
@@ -345,7 +370,7 @@ struct BuilderView: View {
     @EnvironmentObject var tm: TerminalModel
     @State private var selectedTool = "nmap"
     @State private var values: [String: String] = [:]
-    @FocusState private var focused: Bool
+    @FocusState private var focus: String?
 
     private struct Template {
         let tool: String
@@ -406,7 +431,7 @@ struct BuilderView: View {
                     }
                 }
 
-                ForEach(Array(template.fields.enumerated()), id: \.offset) { _, f in
+                ForEach(Array(template.fields.enumerated()), id: \.offset) { i, f in
                     VStack(alignment: .leading, spacing: 4) {
                         Text(f.label.uppercased()).font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
                         TextField(f.def, text: Binding(
@@ -417,7 +442,11 @@ struct BuilderView: View {
                             .padding(10)
                             .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
                             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
-                            .focused($focused)
+                            .focused($focus, equals: f.key)
+                            .submitLabel(i == template.fields.count - 1 ? .done : .next)
+                            .onSubmit {
+                                focus = i == template.fields.count - 1 ? nil : template.fields[i + 1].key
+                            }
                     }
                 }
 
@@ -468,6 +497,7 @@ struct BuilderView: View {
 // MARK: - Forge
 
 struct ForgeView: View {
+    @FocusState private var focus: String?
     enum Kind: String, CaseIterable, Identifiable {
         case revBash = "Bash"
         case revPy = "Python"
@@ -607,15 +637,15 @@ struct ForgeView: View {
                     }
                 }
                 if kind.isQR {
-                    forgeField(qrPlaceholder, $qrVal)
+                    forgeField(qrPlaceholder, $qrVal, key: "qr", last: true)
                 } else {
                     HStack(spacing: 10) {
-                        forgeField("attacker host/IP", $host)
-                        forgeField("port", $port, w: 80)
+                        forgeField("attacker host/IP", $host, key: "host", next: "port")
+                        forgeField("port", $port, w: 80, key: "port", next: kind == .portal || kind == .phish ? "path" : nil)
                     }
                 }
                 if kind == .portal || kind == .phish {
-                    forgeField("path", $path)
+                    forgeField("path", $path, key: "path", last: true)
                 }
 
                 Text("PAYLOAD").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
@@ -686,14 +716,45 @@ struct ForgeView: View {
         .background(Color.bg.ignoresSafeArea())
     }
 
-    private func forgeField(_ ph: String, _ bind: Binding<String>, w: CGFloat? = nil) -> some View {
+    private func forgeField(_ ph: String, _ bind: Binding<String>, w: CGFloat? = nil,
+                            key: String? = nil, next: String? = nil, last: Bool = false) -> some View {
         TextField(ph, text: bind)
             .textFieldStyle(.plain).font(.system(size: 13, design: .monospaced))
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
             .frame(width: w)
+            .modifier(ForgeFocus(focus: $focus, key: key, next: next, last: last))
     }
+}
+
+// FocusState per campo: submit = next field, ultimo = done + keyboard giù
+struct ForgeFocus: ViewModifier {
+    @FocusState.Binding var focus: String?
+    let key: String?
+    let next: String?
+    let last: Bool
+
+    func body(content: Content) -> some View {
+        if let key {
+            content
+                .focused($focus, equals: key)
+                .submitLabel(last ? .done : .next)
+                .onSubmit { if last { focus = nil } else { focus = next } }
+        } else {
+            content
+        }
+    }
+}
+
+// scroll guard: offset del fondo contenuto vs viewport (globali, confrontabili)
+struct ContentBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+struct ViewportBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 enum QRCodec {
