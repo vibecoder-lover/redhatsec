@@ -47,3 +47,4 @@ Il workflow `debs.yml` compila la matrice e pubblica i `.deb` nella release tag 
 Trigger: il workflow parte su push di crossbuild/** — failure stampa primo errore (multi-pattern), comando e tail del log. brew: flex bison autoconf automake libtool. socat: patch call-site system() (fork/exec/waitpid) + pre-seed cache sc_cv_type_*. Ricetta aircrack-ng: autotools minimale (libnl/pcre/hwloc/sqlite/gcrypt/opt OFF, openssl da DEPS statico).
 - rerun trigger: 2026-11-16 (2132b1d cancellata dal runner)
 - trigger bpf ioctl + curl off
+- trigger find_root_path deps
