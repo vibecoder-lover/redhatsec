@@ -39,12 +39,11 @@ enum Updater {
         return (info, info.build != current)
     }
 
-    // scarica il tipa in /var/mobile/RedHatSec/updates e passa la palla a TrollStore
+    // scarica il tipa nella tmp del container (mobile-writable al 100% — la dir
+    // /var/mobile/RedHatSec è root-owned e il move lì fallisce) e passa la palla a TrollStore
     static func downloadAndInstall(_ info: Info) async -> String {
-        let dir = "/var/mobile/RedHatSec/updates"
-        let dest = dir + "/RedHatSec-\(info.build).tipa"
         let fm = FileManager.default
-        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let dest = (NSTemporaryDirectory() as NSString).appendingPathComponent("RedHatSec-\(info.build).tipa")
         try? fm.removeItem(atPath: dest)
         guard let (tmp, resp) = try? await URLSession.shared.download(from: info.fileURL),
               (resp as? HTTPURLResponse)?.statusCode == 200 else {
@@ -55,8 +54,12 @@ enum Updater {
         } catch {
             return "move fallita: \(error.localizedDescription)"
         }
-        // TrollStore registra apple-magnifier://install?file=<path assoluto>
-        guard let ts = URL(string: "apple-magnifier://install?file=\(dest)") else {
+        // TrollStore (root) legge il container dell'app senza problemi
+        var comps = URLComponents()
+        comps.scheme = "apple-magnifier"
+        comps.host = "install"
+        comps.queryItems = [URLQueryItem(name: "file", value: dest)]
+        guard let ts = comps.url else {
             return "tipa in \(dest) — installa da TrollStore"
         }
         await MainActor.run {
