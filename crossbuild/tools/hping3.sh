@@ -6,6 +6,9 @@ SRC="$SRCROOT/hping3-master"
 [ -d "$SRC" ] || tar xzf "$SRCROOT/hping3.tar.gz" -C "$SRCROOT"
 cd "$SRC"
 
+# gethostname.c dichiara strlcpy che su Darwin è già in libc (conflitto con builtin fortify)
+sed -i '' '/^size_t strlcpy(char \*dst, const char \*src, size_t siz);$/d' gethostname.c
+
 # bytesex.h non conosce aarch64/arm64 (little endian) → #error di byteorder
 sed -i '' 's|defined(__i386__)|defined(__i386__) \|\| defined(__aarch64__) \|\| defined(__arm64__)|' bytesex.h
 grep -n "aarch64" bytesex.h

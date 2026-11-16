@@ -21,7 +21,7 @@ mkdir -p "$B"
 cd "$B"
 # CMAKE_SYSTEM_NAME=iOS: toolchain nativa cmake (niente file custom)
 cmake .. \
-  -DCMAKE_SYSTEM_NAME=iOS \
+  -DCMAKE_SYSTEM_NAME=Darwin \
   -DCMAKE_OSX_SYSROOT=iphoneos \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
