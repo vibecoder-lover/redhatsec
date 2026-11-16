@@ -23,8 +23,9 @@ final class TerminalModel: ObservableObject {
 
     // streaming live: i chunk arrivano spezzati, la riga incompleta resta in partial
     func stream(_ chunk: String) {
-        var rest = chunk
-        if !partial.isEmpty { rest = partial + rest; partial = "" }
+        let joined = partial.isEmpty ? chunk : partial + chunk
+        partial = ""
+        let rest = stripANSI(joined)
         let pieces = rest.split(separator: "\n", omittingEmptySubsequences: false)
         let n = pieces.count
         for (i, p) in pieces.enumerated() {
@@ -35,6 +36,16 @@ final class TerminalModel: ObservableObject {
             }
         }
         if lines.count > 1600 { lines.removeFirst(lines.count - 1200) }
+    }
+
+    // le TUI (script/top/yersinia) sparano sequenze VT100 — pulite per il log view
+    private func stripANSI(_ s: String) -> String {
+        var r = s
+        r = r.replacingOccurrences(of: "\u{1b}\\[[0-9;?]*[ -/]*[@-~]", with: "", options: .regularExpression)
+        r = r.replacingOccurrences(of: "\u{1b}\\][^\u{07}\u{1b}]*(\u{07}|\u{1b}\\\\)", with: "", options: .regularExpression)
+        r = r.replacingOccurrences(of: "\u{1b}[@-Z\\\\-_]", with: "", options: .regularExpression)
+        r = r.replacingOccurrences(of: "\r", with: "")
+        return r
     }
 
     private func done(_ exit: Int32, _ cmd: String) {
@@ -267,6 +278,12 @@ extension TerminalModel {
         if head == "exit" {
             RootdSession.shared.close()
             append("sessione rootd chiusa — al prossimo comando si riconnette", .warn)
+            return
+        }
+        // tui <cmd> → PTY reale via util-linux script -q -c (per top/yersinia/programmi interattivi)
+        if head == "tui", parts.count > 1 {
+            let inner = parts.dropFirst().joined(separator: " ").replacingOccurrences(of: "'", with: "")
+            run("script -q -c '\(inner)' /dev/null")
             return
         }
         if head == "install", parts.count > 1 {

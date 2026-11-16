@@ -132,6 +132,7 @@ enum ToolRegistry {
         ToolSpec(name: "curl", pkg: "curl", bins: ["curl"]),
         ToolSpec(name: "python3", pkg: "python3", bins: ["python3"]),
         ToolSpec(name: "netcat", pkg: "netcat", bins: ["nc"]),
+        ToolSpec(name: "util-linux", pkg: "util-linux", bins: ["script"]),
         ToolSpec(name: "openssh", pkg: "openssh", bins: ["ssh", "scp", "ssh-keygen"]),
         ToolSpec(name: "openssl", pkg: "openssl", bins: ["openssl"]),
         ToolSpec(name: "wget", pkg: "wget", bins: ["wget"]),
