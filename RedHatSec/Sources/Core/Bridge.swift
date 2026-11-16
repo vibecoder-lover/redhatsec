@@ -435,8 +435,17 @@ final class TCPBridge: NSObject, ObservableObject {
 
     // MARK: connessione
 
+    private var lastHost = "192.168.4.1"
+    private var lastPort: UInt16 = 3333
+    private var retriesLeft = 0
+    private var manual = false
+
     func connect(host: String, port: UInt16 = 3333) {
+        manual = false
         disconnect()
+        lastHost = host
+        lastPort = port
+        retriesLeft = 3
         state = "connessione a \(host)…"
         log("connect \(host):\(port)")
         let c = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!,
@@ -447,11 +456,13 @@ final class TCPBridge: NSObject, ObservableObject {
                 switch s {
                 case .ready:
                     self?.connected = true
+                    self?.retriesLeft = 3
                     self?.state = "connesso (\(host))"
                     self?.log("TCP connesso ✓")
                 case .failed(let e):
                     self?.connected = false
                     self?.state = "fallito: \(e.localizedDescription)"
+                    self?.scheduleReconnect()
                 case .cancelled:
                     self?.connected = false
                     self?.state = "off"
@@ -463,7 +474,21 @@ final class TCPBridge: NSObject, ObservableObject {
         pump()
     }
 
+    // reconnect automatico: durante lo scan l'AP dell'ESP salta canale (~2s)
+    // e il TCP muore — 3 tentativi a 3s coprono il rejoin del telefono
+    private func scheduleReconnect() {
+        guard !manual, retriesLeft > 0 else { return }
+        retriesLeft -= 1
+        let h = lastHost, p = lastPort
+        log("reconnect (\(retriesLeft + 1) rimasti)…")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, !self.manual, !self.connected else { return }
+            self.connect(host: h, port: p)
+        }
+    }
+
     func disconnect() {
+        manual = true
         conn?.cancel()
         conn = nil
         connected = false
@@ -484,6 +509,7 @@ final class TCPBridge: NSObject, ObservableObject {
                 DispatchQueue.main.async {
                     self.connected = false
                     self.state = "disconnesso"
+                    self.scheduleReconnect()
                 }
             }
         }
