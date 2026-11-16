@@ -122,6 +122,8 @@ struct TerminalView: View {
     @ObservedObject private var sess = RootdSession.shared
     @State private var input = ""
     @FocusState private var focused: Bool
+    @State private var hist: [String] = []
+    @State private var histIdx = -1
 
     private let quick: [(String, String)] = [
         ("whoami", "whoami"),
@@ -195,14 +197,42 @@ struct TerminalView: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 13, design: .monospaced))
                     .focused($focused)
-                    .onSubmit { tm.runSmartText(input); input = "" }
+                    .onSubmit {
+                        let c = input.trimmingCharacters(in: .whitespaces)
+                        if !c.isEmpty, hist.last != c { hist.append(c); if hist.count > 100 { hist.removeFirst() } }
+                        histIdx = -1
+                        tm.runSmartText(input)
+                        input = ""
+                    }
                 Button {
+                    let c = input.trimmingCharacters(in: .whitespaces)
+                    if !c.isEmpty, hist.last != c { hist.append(c); if hist.count > 100 { hist.removeFirst() } }
+                    histIdx = -1
                     tm.runSmartText(input)
                     input = ""
                 } label: {
                     Image(systemName: "play.fill")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundColor(tm.running ? .dim : .redHat)
+                }
+                Button {
+                    guard !hist.isEmpty else { return }
+                    histIdx = min(histIdx + 1, hist.count - 1)
+                    input = hist[hist.count - 1 - histIdx]
+                    focused = true
+                } label: {
+                    Image(systemName: "chevron.up").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
+                }
+                Button {
+                    if histIdx > 0 {
+                        histIdx -= 1
+                        input = hist[hist.count - 1 - histIdx]
+                    } else {
+                        histIdx = -1
+                        input = ""
+                    }
+                } label: {
+                    Image(systemName: "chevron.down").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
                 }
                 Button {
                     tm.lines.removeAll()
