@@ -36,12 +36,12 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
 
-// SDK symbols (core Arduino li espone nel linker, header deprecati → dichiarazioni dirette)
-extern "C" {
-int  wifi_send_pkt_freedom(uint8_t *packet, int len, bool sys_seq);
-int  wifi_set_channel(uint8_t channel);
-void wifi_promiscuous_enable(bool promiscuous);
-}
+// SDK symbols già dichiarati in user_interface.h (core 3.x li espone via ESP8266WiFi.h);
+// include esplicito + silenzio del deprecation warning
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#include "user_interface.h"
+#pragma GCC diagnostic pop
 
 #define BRIDGE_PORT 3333
 #define AP_SSID     "RHS-Bridge"
