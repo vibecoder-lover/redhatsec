@@ -32,6 +32,13 @@ if [ -f "$DEPS/usr/include/pcap/bpf.h" ]; then
 #ifndef _RHS_NET_BPF_TRAMPOLINE
 #define _RHS_NET_BPF_TRAMPOLINE
 #include <pcap/bpf.h>
+#include <sys/ioccom.h>
+/* ioctl BSD dal xnu net/bpf.h che pcap/bpf.h non esporta */
+#define BIOCIMMEDIATE   _IOWR('B', 112, u_int)
+#define BIOCPROMISC     _IO('B', 105)
+#define BIOCGDLT        _IOWR('B', 106, u_int)
+#define BIOCSETIF       _IOWR('B', 108, struct ifreq)
+#define BIOCFLUSH       _IO('B', 104)
 #endif
 EOF
 fi
