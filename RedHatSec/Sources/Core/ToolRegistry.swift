@@ -220,6 +220,11 @@ enum ToolRegistry {
         }
     }
 
+    // .deb realmente pubblicati nella release "debs" (crossbuild): niente 404
+    static let builtDebs: Set<String> = ["tcpdump", "hping3", "aircrack-ng", "socat",
+                                         "reaver", "pixiewps", "mdk3", "yersinia",
+                                         "hostapd", "ettercap"]
+
     static let specs: [ToolSpec] = [
         ToolSpec(name: "nmap", pkg: "nmap", bins: ["nmap"]),
         ToolSpec(name: "tcpdump", pkg: "tcpdump", bins: ["tcpdump"]),
@@ -320,7 +325,10 @@ enum ToolRegistry {
 
                 // PATH 1.5 — .deb locale: bootstrap dpkg se assente + dpkg -i; fallback estrazione tar (bsdtar legge l'ar)
                 // se lo spec non ha debURL, prova il nome convenzionale nella release (future crossbuild)
-                let debUrl = s.debURL ?? "https://github.com/vibecoder-lover/redhatsec/releases/download/debs/\(s.pkg)_iphoneos-arm64.deb"
+                let debUrl: String? = s.debURL ?? (Self.builtDebs.contains(s.pkg)
+                    ? "https://github.com/vibecoder-lover/redhatsec/releases/download/debs/\(s.pkg)_iphoneos-arm64.deb"
+                    : nil)
+                if let debUrl {
                 line("[install] .deb locale: \(debUrl)…")
                 let tmpDeb = "\(workDir)/tmp/\(s.pkg).deb"
                 let script = "rm -f \(tmpDeb); "
@@ -341,6 +349,9 @@ enum ToolRegistry {
                     line("[install] \(tool) installato da .deb ✓ — ridigita il comando")
                     done(true)
                     return
+                }
+                } else {
+                    line("[install] \(tool): nessun .deb precompilato — provo apt/Sileo")
                 }
             }
 

@@ -20,7 +20,8 @@ enum DeviceNet {
         lock.lock(); cached = ip; lock.unlock()
     }
 
-    private static let priority = ["en0", "en1", "bridge0", "pdp_ip0", "pdp_ip1", "pdp_ip2"]
+    private static let priority = ["bridge0", "ap0", "ap1", "en0", "en1",
+                                   "pdp_ip0", "pdp_ip1", "pdp_ip2"]
 
     private static func pick(_ map: [String: String]) -> String {
         for k in priority { if let ip = map[k], !ip.isEmpty { return ip } }

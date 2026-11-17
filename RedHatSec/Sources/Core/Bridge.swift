@@ -943,7 +943,7 @@ final class TCPBridge: NSObject, ObservableObject {
         guard let r = await sendAwait(0x19, payload: [], timeout: 8), r.0 == 0 else { return [] }
         let csv = String(decoding: r.1, as: UTF8.self)
         let items = csv.isEmpty ? [] : csv.components(separatedBy: "|")
-        log("traffic log: \(items.count) voci")
+        if !items.isEmpty { log("traffic log: \(items.count) voci") }
         return items
     }
 }

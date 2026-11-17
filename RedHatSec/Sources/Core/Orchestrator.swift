@@ -1054,6 +1054,13 @@ final class Orchestrator: ObservableObject {
     // nil = vector non gestito dal bridge, si prosegue col tool locale.
     private func runWifiVectorViaBridge(tool: String, e: PlanEntry) async -> String? {
         guard tcpBridge.connected else { return nil }
+        // la radio è una: se il rogue AP è su, il firmware rifiuta deauth/PMKID/beacon.
+        // Lo spegniamo e diamo ~1.5s al bridge per tornare in STA.
+        if ["aireplay-ng", "hcxpcapngtool", "airodump-ng", "mdk3"].contains(tool), tcpBridge.rogueOn {
+            _ = await tcpBridge.rogueStop()
+            log("radio: rogue spento per lasciare l'antenna al vettore", .info)
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+        }
         let t = e.target
         switch tool {
         case "aireplay-ng":

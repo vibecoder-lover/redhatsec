@@ -38,7 +38,9 @@ final class ShellRunner: ObservableObject {
     private static let toolNames = ["nmap", "tcpdump", "aireplay-ng", "airodump-ng", "aircrack-ng",
                                     "hcxpcapngtool", "hcxdumptool", "hostapd", "mdk3", "reaver",
                                     "pixiewps", "yersinia", "ettercap", "killerbee", "zbdsniff",
-                                    "zbjam", "dns-sd", "curl", "python3", "scapy"]
+                                    "zbjam", "dns-sd", "curl", "python3", "scapy",
+                                    "sh", "bash", "apt", "apt-get", "dpkg", "dpkg-deb",
+                                    "openssl", "ssh", "scp", "wget", "socat", "hping3"]
 
     @Published private(set) var availableTools: [String] = []
     private var knownGood: Set<String> = []
