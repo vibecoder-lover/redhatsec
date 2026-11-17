@@ -44,55 +44,92 @@ enum ToolRegistry {
     // Shim `nc`: il netcat del device (BSD/busybox) non accetta le flag fuse tipo
     // `-lvnp 4444`. Il wrapper spezza i flag e li rimanda al binario vero:
     //   nc -lvnp 4444  ->  nc -l -v -n -p 4444
-    static let ncShimScript: String = [
-        "#!/bin/sh",
-        "# rhs nc shim - forme fuse (-lvnp) -> flag separate portabili",
-        "REAL=\"\"",
-        "for c in /var/jb/usr/bin/nc /var/jb/bin/nc /usr/bin/nc /bin/nc /var/jb/usr/local/bin/nc.real; do",
-        "  if [ -x \"$c\" ]; then REAL=\"$c\"; break; fi",
-        "done",
-        "if [ -z \"$REAL\" ]; then",
-        "  echo \"nc: netcat non installato - usa: install netcat\" >&2",
-        "  exit 127",
-        "fi",
-        "set -f",
-        "NEW=\"\"",
-        "add() { if [ -z \"$NEW\" ]; then NEW=\"$1\"; else NEW=\"$NEW",
-        "$1\"; fi; }",
-        "for a in \"$@\"; do",
-        "  case \"$a\" in",
-        "    --*) add \"$a\" ;;",
-        "    -?*)",
-        "      flags=${a#-}",
-        "      while [ -n \"$flags\" ]; do",
-        "        c=$(printf %.1s \"$flags\")",
-        "        flags=${flags#?}",
-        "        case \"$c\" in",
-        "          l|v|n|z|u|k|d|D|r|t|b|N|4|6|h) add \"-$c\" ;;",
-        "          p)",
-        "            if [ -n \"$flags\" ]; then add \"-p\"; add \"$flags\"; flags=\"\"; else add \"-p\"; fi ;;",
-        "          *) add \"-$c$flags\"; flags=\"\" ;;",
-        "        esac",
-        "      done ;;",
-        "    *) add \"$a\" ;;",
-        "  esac",
-        "done",
-        "OLDIFS=$IFS",
-        "IFS=\"",
-        "\"",
-        "set -- $NEW",
-        "IFS=$OLDIFS",
-        "exec \"$REAL\" \"$@\"",
-        ""
-    ].joined(separator: "\n")
+    static let ncShimScript: String = """
+    #!/bin/sh
+    # rhs nc shim v2: normalizza flag fuse (-lvnp 4444) e sceglie la sintassi
+    # di listen accettata dal netcat locale (BSD/ncat: porta posizionale; GNU/busybox: -p)
+    REAL=""
+    for c in /var/jb/usr/bin/nc /var/jb/bin/nc /usr/bin/nc /bin/nc /var/jb/usr/local/bin/nc.real; do
+      if [ -x "$c" ]; then REAL="$c"; break; fi
+    done
+    if [ -z "$REAL" ]; then
+      echo "nc: netcat non installato - usa: install netcat" >&2
+      exit 127
+    fi
+
+    OLDIFS=$IFS
+    IFS="
+    "
+    ARGS=""
+    listen=0
+    plist=0
+    port=""
+    skip=0
+    add() { if [ -z "$ARGS" ]; then ARGS="$1"; else ARGS="$ARGS
+    $1"; fi; }
+    for a in "$@"; do
+      if [ "$skip" = 1 ]; then port="$a"; skip=0; continue; fi
+      case "$a" in
+        --*) add "$a" ;;
+        -?*)
+          flags=${a#-}
+          while [ -n "$flags" ]; do
+            c=${flags%"${flags#?}"}
+            flags=${flags#?}
+            case "$c" in
+              l) listen=1; add "-l" ;;
+              p) plist=1; if [ -n "$flags" ]; then port="$flags"; flags=""; else skip=1; fi ;;
+              v|n|z|u|k|d|D|r|t|b|N|4|6|h) add "-$c" ;;
+              *) add "-$c$flags"; flags="" ;;
+            esac
+          done ;;
+        *)
+          if [ "$listen" = 1 ] && [ -z "$port" ]; then port="$a"; else add "$a"; fi ;;
+      esac
+    done
+    set -- $ARGS
+    IFS=$OLDIFS
+
+    if [ "$listen" = 1 ]; then
+      if [ -z "$port" ]; then
+        echo "nc shim: listen senza porta" >&2
+        exit 1
+      fi
+      # probe di sintassi su una porta libera: BSD/ncat vs GNU/busybox
+      probe_listen() {
+        "$REAL" "$@" >/dev/null 2>&1 &
+        tp=$!
+        sleep 0.4
+        if kill -0 "$tp" 2>/dev/null; then
+          kill "$tp" 2>/dev/null
+          wait "$tp" 2>/dev/null
+          return 0
+        fi
+        wait "$tp" 2>/dev/null
+        return 1
+      }
+      PP=55321
+      if probe_listen "$@" -p "$PP"; then
+        exec "$REAL" "$@" -p "$port"
+      fi
+      if probe_listen "$@" "$PP"; then
+        exec "$REAL" "$@" "$port"
+      fi
+      exec "$REAL" "$@" "$port"
+    fi
+
+    if [ "$plist" = 1 ] && [ -n "$port" ]; then
+      set -- "$@" -p "$port"
+    fi
+    exec "$REAL" "$@"
+    """
 
     static func ensureNetcatShimIfNeeded() {
-        // detection via root: la sandbox app può non vedere /var/jb
+        // riscrive sempre lo shim (v2): gli update dell'app devono sostituire la versione vecchia
         DispatchQueue.global(qos: .utility).async {
             let nc = RootShell.shared.runSync("command -v nc >/dev/null 2>&1 && echo NC", timeout: 10)
             guard nc.stdout.contains("NC") else { return }
-            let shim = RootShell.shared.runSync("test -x \(ncShimPath) && echo SHIM", timeout: 10)
-            if !shim.stdout.contains("SHIM") { ensureNetcatShim() }
+            ensureNetcatShim()
         }
     }
 
