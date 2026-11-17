@@ -29,6 +29,7 @@ struct PineAppleView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 statusRow
+                netRow
                 rogueSection
                 clientsSection
                 reconSection
@@ -52,6 +53,22 @@ struct PineAppleView: View {
             Pill(text: tcp.rogueOn ? "ROGUE ATTIVO" : "ROGUE OFF",
                  color: tcp.rogueOn ? .warn : .dim,
                  icon: tcp.rogueOn ? "wifi.router.fill" : "wifi.slash")
+        }
+    }
+
+    // Diagnostica rete: IP iPhone, tipo uplink, host del bridge
+    private var netRow: some View {
+        let ip = DeviceNet.localIPv4()
+        let uplink = ip.isEmpty ? "no rete"
+            : (ip.hasPrefix("172.20.10.") ? "hotspot iPhone"
+               : (ip.hasPrefix("192.168.4.") ? "AP del bridge" : "Wi-Fi"))
+        return HStack(spacing: 6) {
+            Pill(text: ip.isEmpty ? "NO IP" : ip, color: ip.isEmpty ? .bad : .ok)
+            Pill(text: uplink, color: .dim)
+            if let h = tcp.foundHosts.first {
+                Pill(text: "ESP \(h)", color: .info)
+            }
+            Spacer()
         }
     }
 

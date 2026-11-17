@@ -41,7 +41,10 @@ jobs:
             grep -E "warning:" build.log | tail -10 || true
           else
             echo "===== BUILD FAILED — tutti gli errori ====="
-            grep -E "error:" build.log | head -60
+            grep -E "error:" build.log | head -60 | while IFS= read -r line; do
+              safe=$(printf '%s' "$line" | tr -d '\r' | cut -c1-900)
+              echo "::error title=xcodebuild::$safe"
+            done
             tail -6 build.log
             exit 1
           fi
