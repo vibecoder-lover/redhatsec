@@ -45,7 +45,7 @@ enum RootdClient {
             case .ready:
                 // PATH + LD_LIBRARY_PATH: il sh di launchd parte senza /var/jb/usr/bin
                 // → i tool installati root risultano "not found" (127) via RootShell
-                let pre = "export PATH=/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH; " +
+                let pre = "export PATH=/var/jb/usr/local/bin:/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH; " +
                           "export LD_LIBRARY_PATH=/var/jb/usr/lib:$LD_LIBRARY_PATH; " +
                           "export DEBIAN_FRONTEND=noninteractive; "
                 conn.send(content: Data("RHSROOT:{ \(pre)\(cmd) ; }; echo __RHS_RC_$?\n".utf8), completion: .contentProcessed { _ in
@@ -69,7 +69,7 @@ enum RootdClient {
         var code: Int32 = 0
         var clean = out
         if let r = out.range(of: "__RHS_RC_", options: .backwards) {
-            code = Int32(String(out[r.upperBound...].prefix(while: { $0.isNumber }))) ?? 0
+            code = Int32(String(out[r.upperBound...].prefix(while: { $0.isNumber }))) ?? -1
             clean = String(out[..<r.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return ShellResult(exitCode: st.error.isEmpty ? code : -1, stdout: clean, stderr: st.error)
@@ -103,32 +103,46 @@ final class RootShell: ObservableObject {
     func runSync(_ cmd: String, timeout: TimeInterval = 180) -> ShellResult {
         // 1) rootd via TCP: launchd (root) spawna sh per noi
         let rd = RootdClient.exec(cmd, timeout: timeout)
+        let timedOut = rd.stderr.contains("[rootd timeout")
         if rd.exitCode == 0 {
-            lastRootOK = true
+            setRootOK(true)
+            return rd
+        }
+        // timeout: il comando POTREBBE essere stato eseguito → niente retry (side effect doppio)
+        if timedOut {
+            setRootOK(false)
             return rd
         }
         // rootd raggiungibile ma comando fallito: risultato REALE (exit del comando) — niente fallback che maschera
-        let connErr = rd.stderr.contains("rootd:") || rd.stderr.contains("[rootd timeout")
+        let connErr = rd.stderr.contains("rootd:")
         if !connErr {
-            lastRootOK = true
+            setRootOK(true)
             return rd
         }
         let wrapped = "export DEBIAN_FRONTEND=noninteractive; \(cmd)"
         // 2) fallback: persona spawn diretto di sh (uid 0 override)
         let a = ShellRunner.shared.runWithStdin("sh", args: ["-c", wrapped], stdin: nil, asRoot: true, timeout: timeout)
         if !a.stderr.contains("spawn failed") {
-            lastRootOK = a.exitCode == 0
+            setRootOK(a.exitCode == 0)
             return a
         }
         // 3) fallback: helper nel bundle
         let helper = Bundle.main.bundlePath + "/RHSHelper"
         if FileManager.default.fileExists(atPath: helper) {
             let b = ShellRunner.shared.runPath(helper, args: [wrapped], stdin: nil, asRoot: true, timeout: timeout)
-            lastRootOK = b.exitCode == 0
+            setRootOK(b.exitCode == 0)
             return b
         }
-        lastRootOK = false
+        setRootOK(false)
         return ShellResult(exitCode: -1, stdout: rd.stdout, stderr: rd.stderr + "\n[RHSHelper] assente nel bundle")
+    }
+
+    private func setRootOK(_ ok: Bool) {
+        if Thread.isMainThread {
+            lastRootOK = ok
+        } else {
+            DispatchQueue.main.async { self.lastRootOK = ok }
+        }
     }
 
     func run(_ cmd: String, timeout: TimeInterval = 180) async -> ShellResult {

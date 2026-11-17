@@ -41,9 +41,19 @@ final class ShellRunner: ObservableObject {
                                     "zbjam", "dns-sd", "curl", "python3", "scapy"]
 
     @Published private(set) var availableTools: [String] = []
+    private var resolveCache: [String: Bool] = [:]
+
+    // cache: statusLabel/statusColor sono chiamati a ogni render per ogni riga PLAN
+    func isAvailable(_ bin: String) -> Bool {
+        if let v = resolveCache[bin] { return v }
+        let v = resolve(bin) != nil
+        resolveCache[bin] = v
+        return v
+    }
 
     // re-scan dopo ogni install: i pill "TOOL ✓/✗" e il contatore si aggiornano live
     func rescanTools() {
+        resolveCache.removeAll()
         availableTools = Self.toolNames.filter { resolve($0) != nil }
     }
 
@@ -52,7 +62,7 @@ final class ShellRunner: ObservableObject {
     }
 
     private var pathEnv: String {
-        var parts: [String] = ["/var/mobile/RedHatSec/bin"]
+        var parts: [String] = ["/var/jb/usr/local/bin", "/var/mobile/RedHatSec/bin"]
         for root in bootstrapRoots {
             let p = root.isEmpty ? "/usr/bin:/bin:/usr/sbin:/sbin" : "\(root)/usr/bin:\(root)/bin"
             parts.append(p)
@@ -62,6 +72,9 @@ final class ShellRunner: ObservableObject {
 
     func resolve(_ bin: String) -> String? {
         let fm = FileManager.default
+        // shim netcat (nc -lvnp → -l -v -n -p) e altri override prima del bootstrap
+        let jbLocal = "/var/jb/usr/local/bin/" + bin
+        if fm.isExecutableFile(atPath: jbLocal) { return jbLocal }
         // app-installed binari prima
         let appBin = "/var/mobile/RedHatSec/bin"
         if fm.fileExists(atPath: appBin + "/" + bin) { return appBin + "/" + bin }
@@ -70,7 +83,7 @@ final class ShellRunner: ObservableObject {
                                     : ["\(root)/usr/bin", "\(root)/bin"]
             for d in dirs {
                 let full = d + "/" + bin
-                if fm.isExecutableFile(atPath: full) || fm.fileExists(atPath: full) { return full }
+                if fm.isExecutableFile(atPath: full) { return full }
             }
         }
         return nil
@@ -89,6 +102,8 @@ final class ShellRunner: ObservableObject {
         envp.append(strdup("PATH=\(pathEnv)"))
         envp.append(strdup("HOME=/var/mobile"))
         envp.append(strdup("TERM=xterm"))
+        // senza LD_LIBRARY_PATH il fallback spawn non trova le dylib rootless → 127
+        envp.append(strdup("LD_LIBRARY_PATH=/var/jb/usr/lib"))
         envp.append(nil)
         return envp
     }
@@ -121,17 +136,34 @@ final class ShellRunner: ObservableObject {
         let inPipe = stdin != nil ? Pipe() : nil
         var attr: posix_spawnattr_t? = nil
         posix_spawnattr_init(&attr)
+        var personaErr: Int32 = 0
         if asRoot {
-            spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAG_OVERRIDE)
-            spawnattr_set_persona_uid(&attr, 0)
-            spawnattr_set_persona_gid(&attr, 0)
+            personaErr = spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAG_OVERRIDE)
+            if personaErr == 0 { personaErr = spawnattr_set_persona_uid(&attr, 0) }
+            if personaErr == 0 { personaErr = spawnattr_set_persona_gid(&attr, 0) }
         }
         var fileActions: posix_spawn_file_actions_t? = nil
         posix_spawn_file_actions_init(&fileActions)
+        guard personaErr == 0 else {
+            posix_spawnattr_destroy(&attr)
+            posix_spawn_file_actions_destroy(&fileActions)
+            return ShellResult(exitCode: -1, stdout: "",
+                               stderr: "persona override fallita rc=\(personaErr) — entitlement com.apple.private.persona-mgmt assente")
+        }
+        // chiudi nel child i fd inutili e le copie dopo dup2: altrimenti il child
+        // tiene aperta la pipe di scrittura e readDataToEndOfFile non ritorna mai
+        posix_spawn_file_actions_addclose(&fileActions, outPipe.fileHandleForReading.fileDescriptor)
+        posix_spawn_file_actions_addclose(&fileActions, errPipe.fileHandleForReading.fileDescriptor)
+        if let inPipe {
+            posix_spawn_file_actions_addclose(&fileActions, inPipe.fileHandleForWriting.fileDescriptor)
+        }
         posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 1)
         posix_spawn_file_actions_adddup2(&fileActions, errPipe.fileHandleForWriting.fileDescriptor, 2)
+        posix_spawn_file_actions_addclose(&fileActions, outPipe.fileHandleForWriting.fileDescriptor)
+        posix_spawn_file_actions_addclose(&fileActions, errPipe.fileHandleForWriting.fileDescriptor)
         if let inPipe {
             posix_spawn_file_actions_adddup2(&fileActions, inPipe.fileHandleForReading.fileDescriptor, 0)
+            posix_spawn_file_actions_addclose(&fileActions, inPipe.fileHandleForReading.fileDescriptor)
         }
 
         var argv = buildArgv(bin: bin, args: args)
@@ -145,6 +177,14 @@ final class ShellRunner: ObservableObject {
         for p in envp { if let p { free(p) } }
 
         guard rc == 0 else {
+            try? outPipe.fileHandleForReading.close()
+            try? outPipe.fileHandleForWriting.close()
+            try? errPipe.fileHandleForReading.close()
+            try? errPipe.fileHandleForWriting.close()
+            if let inPipe {
+                try? inPipe.fileHandleForReading.close()
+                try? inPipe.fileHandleForWriting.close()
+            }
             let msg = String(cString: strerror(rc))
             return ShellResult(exitCode: Int32(rc), stdout: "",
                                stderr: "spawn failed rc=\(rc): \(msg) — bin: \(bin)")
@@ -152,21 +192,33 @@ final class ShellRunner: ObservableObject {
         try? outPipe.fileHandleForWriting.close()
         try? errPipe.fileHandleForWriting.close()
         if let inPipe {
-            // scrivo stdin e chiudo: il child vede EOF subito dopo
-            if let data = stdin {
-                try? inPipe.fileHandleForWriting.write(contentsOf: data)
+            // stdin scritto in background: un payload > buffer pipe bloccherebbe
+            // prima che partano i reader di stdout/stderr (deadlock fino al timeout)
+            let data = stdin ?? Data()
+            let w = inPipe.fileHandleForWriting
+            DispatchQueue.global(qos: .userInitiated).async {
+                if !data.isEmpty { try? w.write(contentsOf: data) }
+                try? w.close()
             }
-            try? inPipe.fileHandleForWriting.close()
             try? inPipe.fileHandleForReading.close()
         }
 
         let grp = DispatchGroup()
+        let lock = NSLock()
         var outData = Data()
         var errData = Data()
         grp.enter()
-        DispatchQueue.global().async { outData = outPipe.fileHandleForReading.readDataToEndOfFile(); grp.leave() }
+        DispatchQueue.global().async {
+            let d = outPipe.fileHandleForReading.readDataToEndOfFile()
+            lock.lock(); outData = d; lock.unlock()
+            grp.leave()
+        }
         grp.enter()
-        DispatchQueue.global().async { errData = errPipe.fileHandleForReading.readDataToEndOfFile(); grp.leave() }
+        DispatchQueue.global().async {
+            let d = errPipe.fileHandleForReading.readDataToEndOfFile()
+            lock.lock(); errData = d; lock.unlock()
+            grp.leave()
+        }
 
         var timedOut = false
         if grp.wait(timeout: .now() + timeout) == .timedOut {
@@ -179,10 +231,14 @@ final class ShellRunner: ObservableObject {
         waitpid(pid, &status, 0)
         // raw waitpid status → exit code: WEXITSTATUS / 128+segnale
         let rawCode: Int32 = status & 0x7F != 0 ? Int32(128 + (status & 0x7F)) : Int32((status >> 8) & 0xFF)
-        let so = String(data: outData, encoding: .utf8)
-            ?? String(data: outData, encoding: .isoLatin1) ?? ""
-        let se = String(data: errData, encoding: .utf8)
-            ?? String(data: errData, encoding: .isoLatin1) ?? ""
+        lock.lock()
+        let snapOut = outData
+        let snapErr = errData
+        lock.unlock()
+        let so = String(data: snapOut, encoding: .utf8)
+            ?? String(data: snapOut, encoding: .isoLatin1) ?? ""
+        let se = String(data: snapErr, encoding: .utf8)
+            ?? String(data: snapErr, encoding: .isoLatin1) ?? ""
         let suffix = timedOut ? "\n[timeout \(timeout)s — killed]" : ""
         return ShellResult(exitCode: rawCode, stdout: so, stderr: se + suffix)
     }
@@ -232,7 +288,9 @@ final class ShellRunner: ObservableObject {
     }
 
     private static func u32(_ d: Data, _ o: UInt32) -> UInt32 {
-        d.withUnsafeBytes { $0.load(fromByteOffset: Int(o), as: UInt32.self) }
+        let off = Int(o)
+        guard off >= 0, off + 4 <= d.count else { return 0 }
+        return d.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: off, as: UInt32.self) }
     }
 
     // parse della firma embedded: LC_CODE_SIGNATURE → superblob → slot entitlements
@@ -312,8 +370,10 @@ final class ShellRunner: ObservableObject {
         }
         var fileActions: posix_spawn_file_actions_t? = nil
         posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_addclose(&fileActions, outPipe.fileHandleForReading.fileDescriptor)
         posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 1)
         posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 2)
+        posix_spawn_file_actions_addclose(&fileActions, outPipe.fileHandleForWriting.fileDescriptor)
 
         var argv = buildArgv(bin: path, args: args)
         var envp = buildEnvp()
@@ -346,8 +406,10 @@ final class ShellRunner: ObservableObject {
         posix_spawnattr_init(&attr)
         var fileActions: posix_spawn_file_actions_t? = nil
         posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_addclose(&fileActions, outPipe.fileHandleForReading.fileDescriptor)
         posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 1)
         posix_spawn_file_actions_adddup2(&fileActions, outPipe.fileHandleForWriting.fileDescriptor, 2)
+        posix_spawn_file_actions_addclose(&fileActions, outPipe.fileHandleForWriting.fileDescriptor)
 
         var argv = buildArgv(bin: bin, args: args)
         var envp = buildEnvp()
@@ -359,19 +421,27 @@ final class ShellRunner: ObservableObject {
         for p in argv { if let p { free(p) } }
         for p in envp { if let p { free(p) } }
 
-        guard rc == 0 else { line("spawn failed rc=\(rc)"); onExit(Int32(rc)); return }
+        guard rc == 0 else {
+            try? outPipe.fileHandleForReading.close()
+            try? outPipe.fileHandleForWriting.close()
+            line("spawn failed rc=\(rc)")
+            onExit(Int32(rc))
+            return
+        }
         try? outPipe.fileHandleForWriting.close()
 
         DispatchQueue.global(qos: .utility).async {
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
             let s = String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .isoLatin1) ?? ""
-            for l in s.split(separator: "\n", omittingEmptySubsequences: false) {
-                line(String(l))
-            }
+            let rows = s.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
             var status: Int32 = 0
             waitpid(pid, &status, 0)
-            onExit(status & 0x7F != 0 ? Int32(128 + (status & 0x7F)) : Int32((status >> 8) & 0xFF))
+            let code: Int32 = status & 0x7F != 0 ? Int32(128 + (status & 0x7F)) : Int32((status >> 8) & 0xFF)
+            DispatchQueue.main.async {
+                for l in rows { line(l) }
+                onExit(code)
+            }
         }
     }
 }

@@ -70,7 +70,8 @@ struct NFCAttackView: View {
                 scanSection
                 if let t = tag { tagCard(t) }
                 if tag != nil {
-                    Text("VETTORI CALIBRATI").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.dim)
+                    SectionHeader(title: "Vettori calibrati", icon: "scope", color: .redHat,
+                                  trailing: "\(tactics.count)")
                     ForEach(tactics) { tac in
                         tacticCard(tac)
                     }
@@ -80,7 +81,7 @@ struct NFCAttackView: View {
             }
             .padding(16)
         }
-        .background(Color.bg.ignoresSafeArea())
+        .background(RHBackground())
     }
 
     private var scanSection: some View {
@@ -111,7 +112,7 @@ struct NFCAttackView: View {
             if t.ndefContent.isEmpty {
                 KV(k: "contenuto", val: "vuoto o non leggibile")
             } else {
-                ForEach(t.ndefContent, id: \.self) { l in
+                ForEach(Array(t.ndefContent.enumerated()), id: \.offset) { _, l in
                     KV(k: "record", val: l)
                 }
             }
@@ -178,8 +179,10 @@ struct NFCAttackView: View {
                 }
             }
             Button {
+                guard !busy, let a = armed else { return }
                 Haptics.heavy()
-                if let a = armed { Task { await execute(a) } }
+                busy = true
+                Task { await execute(a) }
             } label: {
                 Label(busy ? "IN ATTESA TAG…" : "RIAVVICINA TAG PER ATTACCARE",
                       systemImage: busy ? "wave.3.right" : "bolt.fill")
@@ -264,7 +267,13 @@ struct NFCAttackView: View {
         let cfg: [String: String] = tac.id == "ndef_autoexec"
             ? ["kind": autoexecKind, "value": autoexecValue]
             : ["url": phishURL]
+        // se la sessione CoreNFC non ritorna mai, busy non deve restare bloccato per sempre
+        let watchdog = Task {
+            try? await Task.sleep(nanoseconds: 60_000_000_000)
+            await MainActor.run { if busy { busy = false } }
+        }
         let lines = await o.nfc.attack(tac.id, config: cfg)
+        watchdog.cancel()
         await MainActor.run {
             for l in lines {
                 self.log.append(LogEntry(level: l.contains("✓") || l.contains("FOUND") ? .good : (l.contains("FAIL") ? .bad : .info), text: l))

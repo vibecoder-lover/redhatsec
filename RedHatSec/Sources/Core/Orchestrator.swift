@@ -33,6 +33,10 @@ final class Orchestrator: ObservableObject {
     let bridge = BridgeManager()
     let tcpBridge = TCPBridge()
 
+    private var scanTask: Task<Void, Never>?
+    private var execTask: Task<Void, Never>?
+    private var nfcTask: Task<NFCDump?, Never>?
+
     init() {
         loadDumps()
         // forwarding: i bridge sono ObservableObject esterni — chi osserva Orchestrator
@@ -46,7 +50,8 @@ final class Orchestrator: ObservableObject {
     private var bridgeObservers: [AnyCancellable] = []
 
     private let journalPath: URL = {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
         return docs.appendingPathComponent("audit_journal.txt")
     }()
 
@@ -88,25 +93,27 @@ final class Orchestrator: ObservableObject {
         WiFiScanner.requestLocationPermission()
         log("jailbreak: \(shell.isJailbroken ? "detected" : "NOT detected") — tools: \(shell.availableTools.joined(separator: ", ").isEmpty ? "none" : shell.availableTools.joined(separator: ", "))", .exec)
 
-        Task {
+        nfcTask?.cancel()
+        scanTask?.cancel()
+        scanTask = Task {
             await self.runScanPipeline()
         }
     }
 
     private func runScanPipeline() async {
         CrashTracer.mark("pipeline start")
-        // NFC in parallelo (attende tap)
-        let nfcTask = Task { [weak self] () -> NFCDump? in
+        let nfc = Task { [weak self] () -> NFCDump? in
             guard let self else { return nil }
             return await self.nfc.fullScan(timeout: 18)
         }
+        nfcTask = nfc
 
         // BLE
         phase = .scan
         log("BLE sweep…", .exec)
         await withCheckedContinuation { c in
             ble.startScan(timeout: 8) { [weak self] t in
-                MainActor.assumeIsolated { self?.addTarget(t) }
+                Task { @MainActor in self?.addTarget(t) }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + 8) { c.resume() }
         }
@@ -181,7 +188,7 @@ final class Orchestrator: ObservableObject {
         }
 
         // NFC risultato
-        if let dump = await nfcTask.value {
+        if let nfc = nfcTask, let dump = await nfc.value {
             var t = TargetDevice(name: dump.title, proto: .nfc, rssi: 0, via: "NFC field")
             t.extra["uid"] = dump.uid
             t.extra["family"] = dump.family
@@ -191,7 +198,9 @@ final class Orchestrator: ObservableObject {
         } else {
             log("NFC: nessun tag letto in sessione", .info)
         }
+        nfcTask = nil
 
+        if Task.isCancelled { log("scan annullata", .warn); return }
         // ENUMERATE: port probe su host noti
         phase = .enumerate
         log("TCP enumeration su host scoperti (23,80,161,502,554,1883,5683,8080,9100)…", .exec)
@@ -207,6 +216,7 @@ final class Orchestrator: ObservableObject {
         }
         for e in enumerated { if let idx = targets.firstIndex(where: { $0.id == e.id }) { targets[idx] = e } }
 
+        if Task.isCancelled { log("scan annullata", .warn); return }
         // MATCH
         phase = .match
         buildPlan()
@@ -315,12 +325,18 @@ final class Orchestrator: ObservableObject {
         Haptics.heavy()
         findings = []
         log("=== execution start — \(plan.count) step(s) ===", .exec)
-        Task { await runExecution() }
+        execTask?.cancel()
+        execTask = Task { await runExecution() }
     }
 
     private func runExecution() async {
         let total = plan.count
         for (i, entry) in plan.enumerated() {
+            if Task.isCancelled {
+                currentStep = ""
+                log("execution annullata", .warn)
+                return
+            }
             currentStep = entry.vector.name
             log("→ \(entry.vector.name) (\(entry.vector.ref))", .exec)
             let evidence = await runVector(entry)
@@ -357,6 +373,13 @@ final class Orchestrator: ObservableObject {
     }
 
     func executeOnly(_ entry: PlanEntry) {
+        // niente second run concorrente: execute() è già in volo
+        guard phase != .execute else {
+            log("execution già in corso — attendi la fine", .warn)
+            return
+        }
+        scanTask?.cancel()
+        scanTask = nil
         phase = .armed
         plan = [entry]
         findings = []
@@ -631,7 +654,11 @@ final class Orchestrator: ObservableObject {
                     : "RDP 3389: nessuna risposta"
             }
             let protoFlag: UInt8 = {
-                if let r = d.range(of: Data([0x02, 0x00, 0x08, 0x00]), in: 10..<d.count) { return d[r.lowerBound + 4] }
+                guard d.count > 14 else { return 0 }
+                if let r = d.range(of: Data([0x02, 0x00, 0x08, 0x00]), in: 10..<d.count),
+                   r.lowerBound + 4 < d.count {
+                    return d[r.lowerBound + 4]
+                }
                 return 0
             }()
             return "RDP APERTO su \(host):3389 — negotiate resp (proto \(String(format: "0x%02x", protoFlag)); 0x02=TLS/NLA, 0x01=standard → precondizioni BlueKeep)"
@@ -701,7 +728,7 @@ final class Orchestrator: ObservableObject {
             guard let d, d.count >= 10 else { return "ldap 389: nessuna risposta" }
             // bindResponse può arrivare raw (0x61) o wrapped in LDAPMessage (0x30)
             guard d[0] == 0x61 || d[0] == 0x30 else { return "389 risponde non-LDAP" }
-            if let r = d.range(of: Data([0x02, 0x01]), in: 1..<d.count) {
+            if let r = d.range(of: Data([0x02, 0x01]), in: 1..<d.count), r.upperBound < d.count {
                 let code = d[r.upperBound]
                 return code == 0
                     ? "LDAP ANON BIND SUCCESS su \(host) — enum subtree aperta (utenti/gruppi → Kerberoast recon)"
@@ -860,13 +887,17 @@ final class Orchestrator: ObservableObject {
 
     // OPSEC: wipe totale di stato, journal e dump — gesture di panico
     func panicWipe() {
+        scanTask?.cancel(); scanTask = nil
+        execTask?.cancel(); execTask = nil
+        nfcTask?.cancel(); nfcTask = nil
         bridge.stopAll()
         tcpBridge.stopAll()
         tcpBridge.disconnect()
         plan = []; findings = []; attackLog = []; nfcDumps = []; logs = []
         try? FileManager.default.removeItem(at: journalPath)
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        try? FileManager.default.removeItem(at: docs.appendingPathComponent("nfc_dumps"))
+        if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            try? FileManager.default.removeItem(at: docs.appendingPathComponent("nfc_dumps"))
+        }
         loadDumps()
         phase = .idle
         Haptics.heavy()
@@ -910,7 +941,8 @@ final class Orchestrator: ObservableObject {
     // MARK: - NFC dumps
 
     private var dumpsDir: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
         return docs.appendingPathComponent("nfc_dumps", isDirectory: true)
     }
 

@@ -44,6 +44,10 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
     private var rxBuffer: [UInt8] = []
     private var responseCont: CheckedContinuation<(UInt8, Data)?, Never>?
     private var scanCont: CheckedContinuation<[BridgeNet], Never>?
+    private var pendingCmd: UInt8?
+    private let reqLock = NSLock()
+    private var reqGen = 0
+    private var scanGen = 0
 
     func start() {
         guard central == nil else { return }
@@ -52,8 +56,16 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
     }
 
     func log(_ s: String) {
-        bridgeLog.append("[bridge] \(s)")
-        if bridgeLog.count > 200 { bridgeLog.removeFirst(bridgeLog.count - 200) }
+        let line = "[bridge] \(s)"
+        if Thread.isMainThread {
+            bridgeLog.append(line)
+            if bridgeLog.count > 200 { bridgeLog.removeFirst(bridgeLog.count - 200) }
+        } else {
+            DispatchQueue.main.async {
+                self.bridgeLog.append(line)
+                if self.bridgeLog.count > 200 { self.bridgeLog.removeFirst(self.bridgeLog.count - 200) }
+            }
+        }
     }
 
     // MARK: CBCentral
@@ -104,8 +116,12 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         connected = false
         chr = nil
+        rxBuffer.removeAll()
         state = "disconnesso"
         log("bridge disconnesso")
+        // continuation appese: risolvile subito, non al timeout
+        resumeResponse(nil)
+        resumeScan([])
     }
 
     // MARK: Framing
@@ -122,18 +138,31 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
     }
 
     private func send(_ cmd: Cmd, payload: [UInt8] = []) {
-        guard connected, let chr else {
+        guard connected, let chr, let per = peripheral else {
             log("send \(cmd): bridge non connesso")
             return
         }
+        guard payload.count <= 1000 else { log("send \(cmd): payload troppo grande"); return }
         seq &+= 1
         var frame: [UInt8] = [0xA5, 0, 0, seq, cmd.rawValue]
         frame[1] = UInt8(payload.count & 0xFF)
         frame[2] = UInt8((payload.count >> 8) & 0xFF)
         frame += payload
         frame.append(crc8(Array(frame.dropFirst())))  // CRC dopo l'header (spec firmware, come RX)
-        peripheral?.writeValue(Data(frame), for: chr, type: .withResponse)
-        log("TX \(cmd) (\(payload.count)B)")
+        // MTU: un write più lungo del limite viene troncato/scartato dal controller BLE
+        let data = Data(frame)
+        let mtu = max(20, per.maximumWriteValueLength(for: .withResponse))
+        var off = 0
+        while off < data.count {
+            let n = min(mtu, data.count - off)
+            per.writeValue(data.subdata(in: off..<(off + n)), for: chr, type: .withResponse)
+            off += n
+        }
+        log("TX \(cmd) (\(payload.count)B\(off > mtu ? ", \(off / mtu + 1) chunk" : ""))")
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error { log("write err: \(error.localizedDescription)") }
     }
 
     private func sendAwait(_ cmd: Cmd, payload: [UInt8] = [], timeout: TimeInterval = 8) async -> (UInt8, Data)? {
@@ -142,24 +171,39 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
             // sendAwait sovrapposti sovrascriverebbero la continuation pendente → rifiuto
             guard responseCont == nil else { c.resume(returning: nil); return }
             responseCont = c
+            pendingCmd = cmd.rawValue
+            reqLock.lock()
+            reqGen += 1
+            let gen = reqGen
+            reqLock.unlock()
             send(cmd, payload: payload)
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
                 guard let self else { return }
-                self.resumeResponse(nil)
+                self.reqLock.lock()
+                let stale = gen != self.reqGen
+                self.reqLock.unlock()
+                if !stale { self.resumeResponse(nil) }
             }
         }
     }
 
     private func resumeResponse(_ r: (UInt8, Data)?) {
         DispatchQueue.main.async {
+            self.reqLock.lock()
+            self.reqGen += 1
+            self.reqLock.unlock()
             guard let c = self.responseCont else { return }
             self.responseCont = nil
+            self.pendingCmd = nil
             c.resume(returning: r)
         }
     }
 
     private func resumeScan(_ nets: [BridgeNet]) {
         DispatchQueue.main.async {
+            self.reqLock.lock()
+            self.scanGen += 1
+            self.reqLock.unlock()
             guard let c = self.scanCont else { return }
             self.scanCont = nil
             c.resume(returning: nets)
@@ -169,18 +213,32 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard let data = characteristic.value else { return }
         rxBuffer += [UInt8](data)
-        guard let frame = popFrame() else { return }
-        guard frame.status == 0x00 else {
-            log("RX error \(frame.status)")
-            resumeResponse((frame.status, Data()))
-            return
-        }
-        switch frame.cmdEcho {
-        case 0x02, 0x03: // wifiResults — eco del cmd richiesta o esplicito
-            resumeScan(parseNets(frame.payload))
-            resumeResponse((0, Data()))
-        default:
-            resumeResponse((0, Data(frame.payload)))
+        // più frame possono arrivare in una sola notify: svuota tutto il buffer
+        while let frame = popFrame() { handleFrame(frame) }
+    }
+
+    private func handleFrame(_ frame: (status: UInt8, cmdEcho: UInt8, payload: [UInt8])) {
+        DispatchQueue.main.async {
+            if frame.status != 0x00 {
+                self.log("RX error \(frame.status) (cmd 0x\(String(format: "%02X", frame.cmdEcho)))")
+                if self.pendingCmd == frame.cmdEcho { self.resumeResponse((frame.status, Data())) }
+                if frame.cmdEcho == 0x02 || frame.cmdEcho == 0x03 { self.resumeScan([]) }
+                return
+            }
+            switch frame.cmdEcho {
+            case 0x02, 0x03: // wifiResults — eco del cmd richiesta o esplicito
+                if self.scanCont != nil { self.resumeScan(self.parseNets(frame.payload)) }
+                if self.pendingCmd == 0x02 || self.pendingCmd == 0x03 {
+                    self.resumeResponse((0, Data()))
+                }
+            default:
+                // risposta asincrona di una richiesta vecchia: non risolvere quella nuova
+                if self.pendingCmd == frame.cmdEcho {
+                    self.resumeResponse((0, Data(frame.payload)))
+                } else {
+                    self.log("RX 0x\(String(format: "%02X", frame.cmdEcho)) inatteso — scartato")
+                }
+            }
         }
     }
 
@@ -231,18 +289,23 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
 
     func wifiScan(seconds: Int = 8) async -> [BridgeNet] {
         guard connected else { return [] }
+        guard scanCont == nil else { log("wifi scan: già in corso"); return [] }
         CrashTracer.mark("ble scan start")
         let nets = await withCheckedContinuation { (c: CheckedContinuation<[BridgeNet], Never>) in
+            reqLock.lock(); scanGen += 1; let gen = scanGen; reqLock.unlock()
             scanCont = c
-            send(.wifiScan, payload: [UInt8(seconds)])
+            send(.wifiScan, payload: [UInt8(max(3, min(12, seconds)))])
             CrashTracer.mark("ble scan frame sent")
             DispatchQueue.global().asyncAfter(deadline: .now() + Double(seconds) + 6) { [weak self] in
                 guard let self else { return }
-                self.resumeScan([])
+                self.reqLock.lock()
+                let stale = gen != self.scanGen
+                self.reqLock.unlock()
+                if !stale { self.resumeScan([]) }
             }
         }
         CrashTracer.mark("ble scan done nets=\(nets.count)")
-        scanNets = nets
+        DispatchQueue.main.async { self.scanNets = nets }
         log("wifi scan: \(nets.count) rete(e)")
         return nets
     }
@@ -252,8 +315,8 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
             log("deauth: mac invalido")
             return false
         }
-        m.append(UInt8(ch))
-        m.append(UInt8(count))
+        m.append(UInt8(clamping: ch))
+        m.append(UInt8(clamping: count))
         let r = await sendAwait(.deauth, payload: m)
         let ok = r?.0 == 0
         log(ok ? "deauth \(mac) inviata ✓" : "deauth fallita")
@@ -275,7 +338,7 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
 
     func pmkid(mac: String, ch: Int) async -> Bool {
         guard connected, var m = mac.replacingOccurrences(of: ":", with: "").hexBytes, m.count == 6 else { return false }
-        m.append(UInt8(ch))
+        m.append(UInt8(clamping: ch))
         let r = await sendAwait(.pmkid, payload: m, timeout: 20)
         return r?.0 == 0
     }
@@ -317,6 +380,10 @@ final class TCPBridge: NSObject, ObservableObject {
     private var retryTimer: Timer?
     private var responseCont: CheckedContinuation<(UInt8, Data)?, Never>?
     private var scanCont: CheckedContinuation<[BridgeManager.BridgeNet], Never>?
+    private var pendingCmd: UInt8?
+    private let reqLock = NSLock()
+    private var reqGen = 0
+    private var scanGen = 0
 
     func log(_ s: String) {
         DispatchQueue.main.async {
@@ -441,31 +508,39 @@ final class TCPBridge: NSObject, ObservableObject {
     private var manual = false
 
     func connect(host: String, port: UInt16 = 3333) {
-        manual = false
+        // disconnect() setta manual=true: va riportato a false DOPO, altrimenti
+        // scheduleReconnect() esce subito e l'auto-reconnect non riparte mai
         disconnect()
+        manual = false
         lastHost = host
         lastPort = port
         retriesLeft = 3
         state = "connessione a \(host)…"
         log("connect \(host):\(port)")
-        let c = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!,
-                             using: .tcp)
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            state = "porta invalida \(port)"
+            log("connect: porta invalida \(port)")
+            return
+        }
+        let c = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
         conn = c
-        c.stateUpdateHandler = { [weak self] s in
+        c.stateUpdateHandler = { [weak self, weak c] s in
             DispatchQueue.main.async {
+                // eventi tardivi della connessione vecchia non devono toccare la nuova
+                guard let self, let c, self.conn === c else { return }
                 switch s {
                 case .ready:
-                    self?.connected = true
-                    self?.retriesLeft = 3
-                    self?.state = "connesso (\(host))"
-                    self?.log("TCP connesso ✓")
+                    self.connected = true
+                    self.retriesLeft = 3
+                    self.state = "connesso (\(host))"
+                    self.log("TCP connesso ✓")
                 case .failed(let e):
-                    self?.connected = false
-                    self?.state = "fallito: \(e.localizedDescription)"
-                    self?.scheduleReconnect()
+                    self.connected = false
+                    self.state = "fallito: \(e.localizedDescription)"
+                    self.scheduleReconnect()
                 case .cancelled:
-                    self?.connected = false
-                    self?.state = "off"
+                    self.connected = false
+                    self.state = "off"
                 default: break
                 }
             }
@@ -496,8 +571,9 @@ final class TCPBridge: NSObject, ObservableObject {
     }
 
     private func pump() {
-        conn?.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, _, err in
-            guard let self else { return }
+        guard let c = conn else { return }
+        c.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self, weak c] data, _, _, err in
+            guard let self, let c, self.conn === c else { return }
             if let data, !data.isEmpty {
                 self.rx += [UInt8](data)
                 while let frame = self.popFrame() {
@@ -507,8 +583,12 @@ final class TCPBridge: NSObject, ObservableObject {
             if err == nil { self.pump() }
             else {
                 DispatchQueue.main.async {
+                    guard self.conn === c else { return }
                     self.connected = false
                     self.state = "disconnesso"
+                    self.rx.removeAll()
+                    self.resumeResponse(nil)
+                    self.resumeScan([])
                     self.scheduleReconnect()
                 }
             }
@@ -549,14 +629,21 @@ final class TCPBridge: NSObject, ObservableObject {
     // resume-once: niente doppio resume (crash "continuation misuse")
     private func resumeResponse(_ r: (UInt8, Data)?) {
         DispatchQueue.main.async {
+            self.reqLock.lock()
+            self.reqGen += 1
+            self.reqLock.unlock()
             guard let c = self.responseCont else { return }
             self.responseCont = nil
+            self.pendingCmd = nil
             c.resume(returning: r)
         }
     }
 
     private func resumeScan(_ nets: [BridgeManager.BridgeNet]) {
         DispatchQueue.main.async {
+            self.reqLock.lock()
+            self.scanGen += 1
+            self.reqLock.unlock()
             guard let c = self.scanCont else { return }
             self.scanCont = nil
             c.resume(returning: nets)
@@ -569,10 +656,18 @@ final class TCPBridge: NSObject, ObservableObject {
             // sendAwait sovrapposti sovrascriverebbero la continuation pendente → rifiuto
             guard responseCont == nil else { c.resume(returning: nil); return }
             responseCont = c
+            pendingCmd = cmd
+            reqLock.lock()
+            reqGen += 1
+            let gen = reqGen
+            reqLock.unlock()
             send(cmd, payload: payload)
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
                 guard let self else { return }
-                self.resumeResponse(nil)
+                self.reqLock.lock()
+                let stale = gen != self.reqGen
+                self.reqLock.unlock()
+                if !stale { self.resumeResponse(nil) }
             }
         }
     }
@@ -600,17 +695,24 @@ final class TCPBridge: NSObject, ObservableObject {
 
     private func handle(_ f: (status: UInt8, cmdEcho: UInt8, payload: [UInt8])) {
         DispatchQueue.main.async {
-            guard f.status == 0x00 else {
-                self.log("RX status err \(f.status)")
-                self.resumeResponse((f.status, Data()))
+            if f.status != 0x00 {
+                self.log("RX status err \(f.status) (cmd 0x\(String(format: "%02X", f.cmdEcho)))")
+                if self.pendingCmd == f.cmdEcho { self.resumeResponse((f.status, Data())) }
+                if f.cmdEcho == 0x02 || f.cmdEcho == 0x03 { self.resumeScan([]) }
                 return
             }
             switch f.cmdEcho {
             case 0x02, 0x03: // wifiResults — l'eco del cmd richiesta (0x02) o esplicito (0x03)
-                self.resumeScan(self.parseNets(f.payload))
-                self.resumeResponse((0, Data()))
+                if self.scanCont != nil { self.resumeScan(self.parseNets(f.payload)) }
+                if self.pendingCmd == 0x02 || self.pendingCmd == 0x03 {
+                    self.resumeResponse((0, Data()))
+                }
             default:
-                self.resumeResponse((0, Data(f.payload)))
+                if self.pendingCmd == f.cmdEcho {
+                    self.resumeResponse((0, Data(f.payload)))
+                } else {
+                    self.log("RX 0x\(String(format: "%02X", f.cmdEcho)) inatteso — scartato")
+                }
             }
         }
     }
@@ -639,26 +741,31 @@ final class TCPBridge: NSObject, ObservableObject {
 
     func wifiScan(seconds: Int = 8) async -> [BridgeManager.BridgeNet] {
         guard connected else { return [] }
+        guard scanCont == nil else { log("wifi scan: già in corso"); return [] }
         CrashTracer.mark("tcp scan start")
         let nets = await withCheckedContinuation { (c: CheckedContinuation<[BridgeManager.BridgeNet], Never>) in
+            reqLock.lock(); scanGen += 1; let gen = scanGen; reqLock.unlock()
             scanCont = c
-            send(0x02, payload: [UInt8(seconds)])
+            send(0x02, payload: [UInt8(max(3, min(12, seconds)))])
             CrashTracer.mark("tcp scan frame sent")
             DispatchQueue.global().asyncAfter(deadline: .now() + Double(seconds) + 12) { [weak self] in
                 guard let self else { return }
-                self.resumeScan([])
+                self.reqLock.lock()
+                let stale = gen != self.scanGen
+                self.reqLock.unlock()
+                if !stale { self.resumeScan([]) }
             }
         }
         CrashTracer.mark("tcp scan done nets=\(nets.count)")
-        scanNets = nets
+        DispatchQueue.main.async { self.scanNets = nets }
         log("wifi scan: \(nets.count) rete(e)")
         return nets
     }
 
     func deauth(mac: String, ch: Int, count: Int = 10) async -> Bool {
         guard var m = mac.replacingOccurrences(of: ":", with: "").hexBytes, m.count == 6 else { return false }
-        m.append(UInt8(ch))
-        m.append(UInt8(count))
+        m.append(UInt8(clamping: ch))
+        m.append(UInt8(clamping: count))
         let r = await sendAwait(0x04, payload: m)
         log(r?.0 == 0 ? "deauth \(mac) ✓" : "deauth fallita")
         return r?.0 == 0
@@ -679,7 +786,7 @@ final class TCPBridge: NSObject, ObservableObject {
 
     func pmkid(mac: String, ch: Int) async -> Bool {
         guard var m = mac.replacingOccurrences(of: ":", with: "").hexBytes, m.count == 6 else { return false }
-        m.append(UInt8(ch))
+        m.append(UInt8(clamping: ch))
         let r = await sendAwait(0x06, payload: m, timeout: 30)
         return r?.0 == 0
     }
@@ -766,7 +873,7 @@ final class TCPBridge: NSObject, ObservableObject {
         p += [UInt8(pw.count)] + pw
         p.append(dnsFwd ? 1 : 0)   // 1 = internet reale + log qname, 0 = poison/portal
         let ok = await sendAwait(0x13, payload: p, timeout: 12)?.0 == 0
-        rogueOn = ok
+        DispatchQueue.main.async { self.rogueOn = ok }
         log(ok ? "rogue AP '\(ssid)' ON (dns=\(dnsFwd ? "internet" : "poison"))" : "rogue AP start fallito")
         return ok
     }
@@ -774,8 +881,10 @@ final class TCPBridge: NSObject, ObservableObject {
     func rogueStop() async -> Bool {
         guard connected else { return false }
         let ok = await sendAwait(0x14, payload: [], timeout: 10)?.0 == 0
-        rogueOn = !ok
-        if ok { rogueClients = [] }
+        DispatchQueue.main.async {
+            self.rogueOn = !ok
+            if ok { self.rogueClients = [] }
+        }
         log(ok ? "rogue AP OFF" : "rogue stop fallito")
         return ok
     }
@@ -794,7 +903,7 @@ final class TCPBridge: NSObject, ObservableObject {
             o += 4
             out.append(RogueClient(mac: mac, ip: ip))
         }
-        rogueClients = out
+        DispatchQueue.main.async { self.rogueClients = out }
         log("rogue clients: \(cnt)")
     }
 

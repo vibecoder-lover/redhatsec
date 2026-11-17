@@ -7,8 +7,15 @@ func outcomeColor(_ outcome: String) -> Color {
 }
 
 // esposizione CVE: vettori ad alta severità nel catalogo per lo stesso proto
+// (precomputato una volta: prima VectorDB.all() veniva filtrato per OGNI target a OGNI render)
+private let cveByProto: [Proto: Int] = {
+    var d: [Proto: Int] = [:]
+    for v in VectorDB.all() where v.cvss >= 7 { d[v.proto, default: 0] += 1 }
+    return d
+}()
+
 func cveCountFor(_ t: TargetDevice) -> Int {
-    VectorDB.all().filter { $0.proto == t.proto && $0.cvss >= 7 }.count
+    cveByProto[t.proto] ?? 0
 }
 
 func outcomeMark(_ outcome: String) -> String {
@@ -23,7 +30,7 @@ struct TargetsView: View {
     @State private var filter: Proto?
     @State private var selected: TargetDevice?
     @State private var dumpDetail: NFCDump?
-    @State private var rssiMin = -100
+    @State private var rssiMin = -95
     @State private var onlyCVE = false
 
     var filtered: [TargetDevice] {
@@ -42,7 +49,16 @@ struct TargetsView: View {
                     if o.targets.isEmpty { emptyState }
                     if !o.targets.isEmpty { strengthRow }
                     if filtered.isEmpty && !o.targets.isEmpty {
-                        Text("nessun target coi filtri attivi").font(.caption).foregroundColor(.dim)
+                        VStack(spacing: 10) {
+                            Text("Nessun target coi filtri attivi")
+                                .font(.rhsCaption(12)).foregroundColor(.dim)
+                            Button("azzera filtri") {
+                                Haptics.tap()
+                                filter = nil; onlyCVE = false; rssiMin = -95
+                            }
+                            .font(.system(size: 11, weight: .bold)).foregroundColor(.redHat)
+                        }
+                        .frame(maxWidth: .infinity).padding(.vertical, 18)
                     }
                     ForEach(filtered) { t in
                         TargetRow(t: t) {
@@ -54,17 +70,19 @@ struct TargetsView: View {
                 }
                 .padding(16)
             }
-            .background(Color.bg.ignoresSafeArea())
+            .background(RHBackground())
             .navigationTitle("Targets — \(o.targets.count)")
-            .sheet(item: $selected) { t in TargetDetailView(target: t) }
+            .sheet(item: $selected) { t in TargetDetailView(targetID: t.id) }
             .sheet(item: $dumpDetail) { d in NFCDumpDetail(dump: d) }
         }
     }
 
     // filtri: potenza segnale minima + solo target con CVE note (≥7 CVSS nel catalogo)
     private var strengthRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "cellularbars")
+                    .font(.system(size: 10, weight: .heavy)).foregroundColor(.redHat)
                 Text("SEGNALE ≥ \(rssiMin) dBm").font(.system(size: 10, weight: .bold, design: .rounded)).foregroundColor(.dim)
                 Spacer()
                 Chip(text: onlyCVE ? "CVE ✓ ON" : "CVE OFF", active: onlyCVE) { onlyCVE.toggle() }
@@ -72,7 +90,7 @@ struct TargetsView: View {
             Slider(value: Binding(get: { Double(rssiMin) }, set: { rssiMin = Int($0) }), in: -95...(-35), step: 5)
                 .tint(.redHat)
         }
-        .padding(10).card()
+        .padding(12).card()
     }
 
     private var filterChips: some View {
@@ -90,20 +108,18 @@ struct TargetsView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "antenna.radiowaves.left.and.right.slash")
-                .font(.system(size: 42, weight: .light)).foregroundColor(.dim)
-            Text("Nessun target").font(.headline)
-            Text("Esegui uno scan dal tab Orchestrator.").font(.caption).foregroundColor(.dim)
-        }
-        .padding(.vertical, 30)
+        EmptyState(icon: "antenna.radiowaves.left.and.right.slash",
+                   title: "Nessun target",
+                   subtitle: "Esegui uno scan dal tab Orchestrator per popolare la lista.",
+                   actionTitle: "AVVIA SCAN",
+                   action: { o.startScan() })
     }
 
     @ViewBuilder
     private var nfcDumpsSection: some View {
         if !o.nfcDumps.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                Text("NFC DUMPS — \(o.nfcDumps.count)").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.warn)
+                SectionHeader(title: "NFC dumps", icon: "wave.3.right", color: .warn, trailing: "\(o.nfcDumps.count)")
                 ForEach(o.nfcDumps) { d in
                     Button {
                         Haptics.tap()
@@ -132,7 +148,7 @@ struct TargetsView: View {
     private var attackLogSection: some View {
         if !o.attackLog.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                Text("ATTACK LOG — \(o.attackLog.count)").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.redHat)
+                SectionHeader(title: "Attack log", icon: "bolt.fill", color: .redHat, trailing: "\(o.attackLog.count)")
                 ForEach(o.attackLog.reversed().prefix(20)) { a in
                     HStack(alignment: .top, spacing: 10) {
                         Circle()
@@ -233,7 +249,7 @@ struct NFCDumpDetail: View {
                 }
                 .padding(16)
             }
-            .background(Color.bg.ignoresSafeArea())
+            .background(RHBackground())
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("chiudi") { dismiss() } } }
         }
@@ -244,40 +260,59 @@ struct NFCDumpDetail: View {
 struct TargetRow: View {
     let t: TargetDevice
     let tap: () -> Void
+    private var pc: Color { protoColor(t.proto) }
     var body: some View {
         Button(action: { Haptics.tap(); tap() }) {
             HStack(spacing: 12) {
                 ZStack {
-                    Circle().fill(protoColor(t.proto).opacity(0.15)).frame(width: 40, height: 40)
+                    Circle().fill(pc.opacity(0.14)).frame(width: 42, height: 42)
+                    Circle().strokeBorder(pc.opacity(0.35), lineWidth: 1).frame(width: 42, height: 42)
                     Image(systemName: t.proto.icon).font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(protoColor(t.proto))
+                        .foregroundColor(pc)
                 }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(t.name).font(.system(size: 14, weight: .bold, design: .rounded))
-                        .foregroundColor(.white).lineLimit(1)
+                VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
-                        Text(t.via).font(.system(size: 10)).foregroundColor(.dim)
+                        Text(t.name).font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundColor(.white).lineLimit(1)
+                        if t.extra["autoArm"] == "1" {
+                            Pill(text: "AUTO", color: .ok, icon: "bolt.fill")
+                        }
+                    }
+                    HStack(spacing: 6) {
+                        Text(t.via).font(.system(size: 10, weight: .medium, design: .rounded)).foregroundColor(.dim)
                         let cve = cveCountFor(t)
                         if cve > 0 {
-                            Text("CVE:\(cve)").font(.system(size: 9, weight: .bold, design: .monospaced))
-                                .foregroundColor(.bad)
-                        }
-                        if t.extra["autoArm"] == "1" {
-                            Pill(text: "AUTO-ARM", color: .ok)
+                            HStack(spacing: 3) {
+                                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8))
+                                Text("CVE \(cve)").font(.system(size: 9, weight: .bold, design: .monospaced))
+                            }
+                            .foregroundColor(.bad)
                         }
                         if let ports = t.extra["open"], !ports.isEmpty {
-                            Text(ports).font(.system(size: 10, design: .monospaced)).foregroundColor(.ok)
+                            Text(ports).font(.system(size: 10, design: .monospaced)).foregroundColor(.ok).lineLimit(1)
                         }
                         if let sec = t.extra["sec"] {
-                            Text(sec).font(.system(size: 10)).foregroundColor(.warn)
+                            Text(sec).font(.system(size: 10, weight: .semibold, design: .rounded)).foregroundColor(.warn).lineLimit(1)
                         }
                     }
                 }
-                Spacer()
-                RSSIMeter(rssi: t.rssi, color: protoColor(t.proto))
-                Image(systemName: "chevron.right").font(.caption).foregroundColor(.dim)
+                Spacer(minLength: 0)
+                VStack(alignment: .trailing, spacing: 3) {
+                    RSSIMeter(rssi: t.rssi, color: pc)
+                    Text("\(t.rssi)").font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundColor(.dim)
+                }
+                Image(systemName: "chevron.right").font(.caption2).foregroundColor(.dim)
             }
-            .padding(14).card()
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: RH.radius, style: .continuous)
+                    .fill(LinearGradient(colors: [Color.surfaceHi, Color.surface],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: RH.radius, style: .continuous)
+                    .strokeBorder(pc.opacity(0.22), lineWidth: 1)
+            )
         }
         .buttonStyle(ScaleButton())
     }
@@ -303,12 +338,18 @@ struct RSSIMeter: View {
 }
 
 struct TargetDetailView: View {
-    let target: TargetDevice
+    let targetID: UUID
     @EnvironmentObject var o: Orchestrator
     @Environment(\.dismiss) var dismiss
     @State private var payloadHex = ""
     @State private var svcUUID = ""
     @State private var chrUUID = ""
+
+    // letto live da o.targets: dopo "salva arming" la UI si aggiorna davvero
+    private var target: TargetDevice {
+        o.targets.first(where: { $0.id == targetID })
+            ?? TargetDevice(name: "target rimosso", proto: .net, rssi: 0, via: "?")
+    }
 
     private var relatedPlan: [PlanEntry] {
         o.plan.filter { $0.target?.id == target.id }
@@ -332,7 +373,7 @@ struct TargetDetailView: View {
                 }
                 .padding(18)
             }
-            .background(Color.bg.ignoresSafeArea())
+            .background(RHBackground())
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .navigationBarTrailing) { Button("chiudi") { dismiss() } } }
         }
@@ -565,7 +606,7 @@ struct TargetDetailView: View {
     private func statusLabel(_ e: PlanEntry) -> String {
         switch e.vector.cap {
         case .plan: return "PLAN"
-        case .shellTool(let t): return ShellRunner.shared.resolve(t) != nil ? "TOOL ✓" : "TOOL ✗"
+        case .shellTool(let t): return ShellRunner.shared.isAvailable(t) ? "TOOL ✓" : "TOOL ✗"
         case .native:
             if e.vector.id == "ble_write" {
                 return target.extra["chrUUID"]?.isEmpty == false ? "AUTO-ARMED" : "SERVE CONFIG"
@@ -577,7 +618,7 @@ struct TargetDetailView: View {
     private func statusColor(_ e: PlanEntry) -> Color {
         switch e.vector.cap {
         case .plan: return .warn
-        case .shellTool(let t): return ShellRunner.shared.resolve(t) != nil ? .ok : .bad
+        case .shellTool(let t): return ShellRunner.shared.isAvailable(t) ? .ok : .bad
         case .native:
             if e.vector.id == "ble_write" && target.extra["chrUUID"]?.isEmpty != false { return .warn }
             return .ok

@@ -8,16 +8,19 @@ enum CrashTracer {
 
     static func mark(_ s: String) {
         q.async {
-            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSTemporaryDirectory())
             let f = docs.appendingPathComponent("crash_trace.txt")
-            // cap 256KB: ricrea il file
-            if let sz = (try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, sz > 256_000 {
-                try? FileManager.default.removeItem(at: f)
+            // cap 256KB: TIENI la coda (la storia recente), non cancellare tutto
+            if let sz = (try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, sz > 256_000,
+               let blob = try? Data(contentsOf: f) {
+                try? Data(blob.suffix(128_000)).write(to: f, options: .atomic)
             }
             let line = "[\(DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium))] \(s)\n"
             if let fh = try? FileHandle(forWritingTo: f) {
                 _ = try? fh.seekToEnd()
                 try? fh.write(contentsOf: Data(line.utf8))
+                try? fh.synchronize()
                 try? fh.close()
             } else {
                 try? line.write(to: f, atomically: true, encoding: .utf8)
@@ -26,7 +29,10 @@ enum CrashTracer {
     }
 
     static func clear() {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        try? FileManager.default.removeItem(at: docs.appendingPathComponent("crash_trace.txt"))
+        q.sync {
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSTemporaryDirectory())
+            try? FileManager.default.removeItem(at: docs.appendingPathComponent("crash_trace.txt"))
+        }
     }
 }

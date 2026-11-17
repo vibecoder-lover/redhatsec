@@ -65,16 +65,19 @@ enum TargetNamer {
     }
 
     static func friendlyNameFromXML(_ xml: String) -> String? {
-        if let r = xml.range(of: "<friendlyName>(.*?)</friendlyName>", options: .regularExpression) {
+        // [\s\S] invece di . : il dot non matcha il newline (XML indentato)
+        if let r = xml.range(of: "<friendlyName>([\\s\\S]*?)</friendlyName>", options: .regularExpression) {
             let name = String(xml[r])
                 .replacingOccurrences(of: "<friendlyName>", with: "")
                 .replacingOccurrences(of: "</friendlyName>", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             if !name.isEmpty { return name }
         }
-        if let r = xml.range(of: "<modelDescription>(.*?)</modelDescription>", options: .regularExpression) {
+        if let r = xml.range(of: "<modelDescription>([\\s\\S]*?)</modelDescription>", options: .regularExpression) {
             let name = String(xml[r])
                 .replacingOccurrences(of: "<modelDescription>", with: "")
                 .replacingOccurrences(of: "</modelDescription>", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             if !name.isEmpty { return name }
         }
         return nil

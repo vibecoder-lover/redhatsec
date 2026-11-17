@@ -72,27 +72,29 @@ enum ReportBuilder {
 
     @discardableResult
     static func write(_ r: Report) -> URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let f = docs.appendingPathComponent("redhatsec-report.html")
         do {
             try html(r).write(to: f, atomically: true, encoding: .utf8)
             lastHTML = f
         } catch {
-            try? FileManager.default.removeItem(at: f)
-            lastHTML = nil
+            // NON cancellare il report precedente: resta l'ultimo valido
         }
         return f
     }
 
     @discardableResult
-    static func pdf(_ r: Report) -> URL {
+    static func pdf(_ r: Report) -> URL? {
         let pageRect = CGRect(x: 0, y: 0, width: 595, height: 842) // A4
         let margin: CGFloat = 44
         let format = UIGraphicsPDFRendererFormat()
         let renderer = UIGraphicsPDFRenderer(bounds: pageRect, format: format)
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let url = docs.appendingPathComponent("redhatsec-report.pdf")
-        try? renderer.writePDF(to: url) { (ctx: UIGraphicsPDFRendererContext) in
+        do {
+        try renderer.writePDF(to: url) { (ctx: UIGraphicsPDFRendererContext) in
             ctx.beginPage()
             var y: CGFloat = margin
             func text(_ s: String, font: UIFont, color: UIColor, size: CGFloat = 300) {
@@ -136,6 +138,10 @@ enum ReportBuilder {
                 for (s, fnt, sz) in lines { text(s, font: fnt, color: .black, size: sz) }
                 y += 8
             }
+        }
+        } catch {
+            // PDF non scritto: NON aggiornare lastPDF (la UI mostrerebbe successo falso)
+            return nil
         }
         lastPDF = url
         return url

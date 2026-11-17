@@ -14,8 +14,11 @@ struct DashboardView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
+                    hero
                     statusRow
                     updaterRow
+                    SectionHeader(title: "Radar", icon: "dot.radiowaves.left.and.right",
+                                  color: .redHat, trailing: phaseLabel)
                     RadarView(targets: o.targets, scanning: o.phase == .scan || o.phase == .enumerate)
                         .frame(height: 300)
                         .overlay(radarButton)
@@ -27,8 +30,9 @@ struct DashboardView: View {
                 .padding(16)
                 .animation(.easeInOut(duration: 0.25), value: o.phase)
             }
-            .background(Color.bg.ignoresSafeArea())
-            .navigationTitle("RedHat Sec")
+            .background(RHBackground())
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
@@ -68,21 +72,69 @@ struct DashboardView: View {
         }
     }
 
+    // MARK: - Header
+
+    private var phaseLabel: String {
+        switch o.phase {
+        case .idle: return "idle"
+        case .scan: return "scanning"
+        case .enumerate: return "enumerating"
+        case .match: return "matching"
+        case .armed: return "armed"
+        case .execute: return "running"
+        case .report: return "report"
+        }
+    }
+
+    private var phaseBlurb: String {
+        switch o.phase {
+        case .idle: return "Pronto — avvia uno scan per popolare i target."
+        case .scan: return "Scansione radio in corso…"
+        case .enumerate: return "Enumerazione servizi e fingerprint."
+        case .match: return "Correlazione vettori e CVE note."
+        case .armed: return "Piano pronto — \(o.plan.count) step da eseguire."
+        case .execute: return "Esecuzione in corso — non chiudere l'app."
+        case .report: return "Report pronto — controlla la scheda Report."
+        }
+    }
+
+    private var hero: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(LinearGradient(colors: [.redHat, Color(hex: 0x7A0000)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 48, height: 48)
+                Image(systemName: "shield.lefthalf.filled")
+                    .font(.system(size: 21, weight: .bold)).foregroundColor(.white)
+            }
+            .glow(.redHat, radius: 10, on: o.phase != .idle)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("RedHat Sec").font(.system(size: 21, weight: .heavy, design: .rounded))
+                Text(phaseBlurb).font(.rhsCaption(11)).foregroundColor(.dim).lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14).card()
+    }
+
     private var statusRow: some View {
         HStack(spacing: 8) {
             Pill(text: ShellRunner.shared.isJailbroken ? "JB OK" : "NO JB",
-                 color: ShellRunner.shared.isJailbroken ? .ok : .bad)
-            Pill(text: "tools: \(sr.availableTools.count)", color: .info)
+                 color: ShellRunner.shared.isJailbroken ? .ok : .bad,
+                 icon: ShellRunner.shared.isJailbroken ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+            Pill(text: "tools: \(sr.availableTools.count)", color: .info, icon: "hammer.fill")
             Pill(text: o.tcpBridge.connected ? "BRIDGE ✓" : "BRIDGE ✗",
-                 color: o.tcpBridge.connected ? .ok : .bad)
-            Spacer()
+                 color: o.tcpBridge.connected ? .ok : .bad,
+                 icon: o.tcpBridge.connected ? "dot.radiowaves.left.and.right" : "bolt.horizontal.circle")
+            Spacer(minLength: 0)
             if o.phase == .execute {
-                Pill(text: o.currentStep, color: .warn).shimmering()
+                Pill(text: o.currentStep, color: .warn, icon: "gearshape.2.fill").shimmering()
             }
         }
     }
 
-    private var hasUpdate: Bool { updInfo != nil && updInfo!.build != ToolRegistry.buildTag }
+    private var hasUpdate: Bool { updInfo.map { $0.build != ToolRegistry.buildTag } ?? false }
 
     private var updaterRow: some View {
         HStack(spacing: 10) {
@@ -193,8 +245,16 @@ struct DashboardView: View {
     @ViewBuilder
     private var actionArea: some View {
         if o.phase == .execute || o.phase == .scan || o.phase == .enumerate {
-            VStack(spacing: 8) {
-                HStack { Text(o.currentStep.isEmpty ? "working…" : o.currentStep).font(.footnote) ; Spacer() }
+            VStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "gearshape.2.fill")
+                        .font(.system(size: 11, weight: .heavy)).foregroundColor(.warn)
+                    Text(o.currentStep.isEmpty ? "working…" : o.currentStep)
+                        .font(.rhsCaption(12)).lineLimit(1)
+                    Spacer()
+                    Text("\(Int(o.progress * 100))%")
+                        .font(.rhsMono(11)).foregroundColor(.warn)
+                }
                 GeometryReader { g in
                     ZStack(alignment: .leading) {
                         Capsule().fill(Color.surfaceHi)
@@ -210,18 +270,24 @@ struct DashboardView: View {
     }
 
     private var recentLogs: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("LIVE JOURNAL").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.dim)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Image(systemName: "text.alignleft")
+                    .font(.system(size: 11, weight: .heavy)).foregroundColor(.dim)
+                Text("LIVE JOURNAL").font(.system(size: 11, weight: .heavy, design: .rounded)).tracking(0.8).foregroundColor(.dim)
                 Spacer()
-                Button("apri console") { showConsole = true }.font(.caption).foregroundColor(.redHat)
+                Button("apri console") { showConsole = true }
+                    .font(.rhsCaption(11)).foregroundColor(.redHat)
             }
             ForEach(o.logs.suffix(5)) { l in
                 LogLine(l: l)
             }
             if o.logs.isEmpty {
-                Text("journal vuoto — premi SCAN")
-                    .font(.system(size: 12, design: .monospaced)).foregroundColor(.dim)
+                HStack(spacing: 8) {
+                    Image(systemName: "terminal").font(.system(size: 11)).foregroundColor(.dim)
+                    Text("journal vuoto — premi SCAN")
+                        .font(.rhsMono(11)).foregroundColor(.dim)
+                }
             }
         }
         .padding(14).card()
@@ -233,22 +299,35 @@ struct RadarView: View {
     let scanning: Bool
 
     var body: some View {
-        TimelineView(.animation) { timeline in
-            Canvas { ctx, size in
-                let now = timeline.date.timeIntervalSinceReferenceDate
-                RadarDrawing.rings(ctx, size)
-                RadarDrawing.sweep(ctx, size, now)
-                RadarDrawing.blips(ctx, size, targets, now)
+        Group {
+            if scanning {
+                TimelineView(.animation) { t in canvas(t.date) }
+            } else {
+                // idle: 1 redraw/1.5s invece di 60fps
+                TimelineView(.periodic(from: .now, by: 1.5)) { t in canvas(t.date) }
             }
         }
         .background(
-            RadialGradient(colors: [.surfaceHi, .bg], center: .center, startRadius: 10, endRadius: 170)
+            ZStack {
+                RadialGradient(colors: [.surfaceHi, .bg], center: .center, startRadius: 10, endRadius: 170)
+                RadialGradient(colors: [Color.redHat.opacity(0.10), .clear],
+                               center: .center, startRadius: 20, endRadius: 220)
+            }
         )
         .overlay(
             Circle().strokeBorder(Color.white.opacity(0.05), lineWidth: 1).padding(2)
         )
         .clipShape(Circle())
         .card()
+    }
+
+    private func canvas(_ date: Date) -> some View {
+        Canvas { ctx, size in
+            let now = date.timeIntervalSinceReferenceDate
+            RadarDrawing.rings(ctx, size)
+            RadarDrawing.sweep(ctx, size, now)
+            RadarDrawing.blips(ctx, size, targets, now)
+        }
     }
 }
 
@@ -294,7 +373,7 @@ enum RadarDrawing {
         let c = center(size)
         let r = min(size.width, size.height) / 2 - 6
         for (i, t) in targets.enumerated() {
-            let seed = abs(t.id.hashValue)
+            let seed = UInt(bitPattern: t.id.hashValue)
             let aRad = Double(seed % 360) * Double.pi / 180 - Double.pi / 2
             let dist = CGFloat(min(90, max(30, -t.rssi))) / 90
             let rr = r * (0.25 + 0.65 * dist)
@@ -357,27 +436,44 @@ struct StatCard: View {
     let color: Color
     let icon: String
     var body: some View {
-        VStack(spacing: 4) {
-            Image(systemName: icon).font(.system(size: 13, weight: .bold)).foregroundColor(color)
-            Text(value).font(.system(size: 24, weight: .heavy, design: .rounded))
+        VStack(spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: icon).font(.system(size: 12, weight: .bold)).foregroundColor(color)
+                Text(value).font(.system(size: 24, weight: .heavy, design: .rounded))
+            }
             Text(label).font(.system(size: 10, weight: .semibold)).foregroundColor(.dim)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 12).card()
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.surface)
+                .overlay(alignment: .top) {
+                    RoundedRectangle(cornerRadius: 2).fill(color.opacity(0.7))
+                        .frame(width: 24, height: 3).padding(.top, 7)
+                }
+        )
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(color.opacity(0.18), lineWidth: 1))
     }
 }
 
 struct Pill: View {
     let text: String
     let color: Color
+    var icon: String? = nil
     var body: some View {
-        Text(text)
-            .font(.system(size: 11, weight: .bold, design: .rounded))
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(Capsule().fill(color.opacity(0.14)))
-            .overlay(Capsule().strokeBorder(color.opacity(0.5), lineWidth: 1))
-            .foregroundColor(color)
-            .lineLimit(1)
+        HStack(spacing: 5) {
+            if let icon {
+                Image(systemName: icon).font(.system(size: 9, weight: .heavy))
+            }
+            Text(text).font(.system(size: 11, weight: .bold, design: .rounded))
+                .lineLimit(1).minimumScaleFactor(0.75)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .background(Capsule().fill(color.opacity(0.14)))
+        .overlay(Capsule().strokeBorder(color.opacity(0.5), lineWidth: 1))
+        .foregroundColor(color)
     }
 }
 
@@ -403,6 +499,7 @@ struct LogLine: View {
 
 struct ConsoleView: View {
     @EnvironmentObject var o: Orchestrator
+    @State private var atBottom = true
 
     var body: some View {
         NavigationStack {
@@ -410,15 +507,37 @@ struct ConsoleView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 6) {
                         ForEach(o.logs) { l in LogLine(l: l).id(l.id) }
+                        Color.clear.frame(height: 1).id("bottom")
+                            .onAppear { atBottom = true }
+                            .onDisappear { atBottom = false }
                     }.padding(12)
                 }
-                .background(Color(hex: 0x070709).ignoresSafeArea())
+                .background(
+                    ZStack {
+                        Color(hex: 0x070709)
+                        RadialGradient(colors: [Color.redHat.opacity(0.06), .clear],
+                                       center: .top, startRadius: 10, endRadius: 360)
+                    }.ignoresSafeArea()
+                )
                 .onChange(of: o.logs.count) { _ in
-                    withAnimation { proxy.scrollTo(o.logs.last?.id, anchor: .bottom) }
+                    // non strappare la vista a chi sta leggendo righe vecchie
+                    guard atBottom else { return }
+                    withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }
             .navigationTitle("audit_journal")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        Haptics.tap()
+                        o.logs.removeAll()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .disabled(o.logs.isEmpty)
+                }
+            }
         }
         .preferredColorScheme(.dark)
     }

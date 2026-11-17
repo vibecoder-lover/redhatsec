@@ -61,7 +61,7 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             services = s.map { BLEScanner.friendlyService($0) }
         }
         var extra: [String: String] = [:]
-        if let adv = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
+        if let adv = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data, adv.count >= 2 {
             extra["companyID"] = String(format: "0x%04X", UInt16(adv[0]) | UInt16(adv[1]) << 8)
         }
         if let tx = advertisementData[CBAdvertisementDataTxPowerLevelKey] as? NSNumber {
@@ -178,6 +178,40 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             discoveryDone = true
             tryFinishEnum()
         }
+        // write pendente: appena la chr target è scoperta, esegui
+        performWrite(on: peripheral)
+    }
+
+    private func performWrite(on peripheral: CBPeripheral) {
+        guard let t = writeTarget else { return }
+        guard let svc = peripheral.services?.first(where: {
+                  $0.uuid.uuidString.caseInsensitiveCompare(t.service) == .orderedSame
+              }),
+              let c = svc.characteristics?.first(where: {
+                  $0.uuid.uuidString.caseInsensitiveCompare(t.chr) == .orderedSame
+              }) else { return }   // discovery non ancora arrivata su questa service
+        writeTarget = nil
+        writeTargetSize = t.payload.count
+        if c.properties.contains(.write) {
+            writeInFlight = (t.service, t.chr)
+            peripheral.writeValue(t.payload, for: c, type: .withResponse)
+        } else {
+            peripheral.writeValue(t.payload, for: c, type: .withoutResponse)
+            let msg = "write sent (no-response) \(t.payload.count)B svc=\(t.service) chr=\(t.chr)"
+            writeCont?(msg)
+            writeCont = nil
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard let f = writeInFlight, f.chr == characteristic.uuid.uuidString else { return }
+        writeInFlight = nil
+        if let error {
+            writeCont?("write error: \(error.localizedDescription)")
+        } else {
+            writeCont?("write OK (\(writeTargetSize)B) svc=\(f.svc) chr=\(f.chr)")
+        }
+        writeCont = nil
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -237,14 +271,21 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             central.connect(per, options: nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self, weak per] in
                 guard let self, let per else { return }
-                if self.writeCont != nil { self.central.cancelPeripheralConnection(per) }
+                if self.writeCont != nil {
+                    self.writeTarget = nil
+                    self.writeInFlight = nil
+                    self.central.cancelPeripheralConnection(per)
+                }
             }
         }
     }
 
     private var writeCont: ((String) -> Void)?
     private var writeTarget: (service: String, chr: String, payload: Data)?
+    private var writeInFlight: (svc: String, chr: String)?
+    private var writeTargetSize = 0
     private var floodPeripheral: CBPeripheral?
+    private var floodToken: UUID?
 
     func flood(_ target: TargetDevice, attempts: Int) async -> Int {
         guard central.state == .poweredOn,
@@ -252,6 +293,8 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         var done = 0
         floodPeripheral = per
         for _ in 0..<attempts {
+            let token = UUID()
+            floodToken = token
             await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
                 floodCont = { c.resume() }
                 per.delegate = self
@@ -261,13 +304,17 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
                     self.central.cancelPeripheralConnection(per)
                 }
                 // safety: se né didDisconnect né didFailToConnect arrivano, sblocco comunque
+                // (token: un timer di un'iterazione vecchia non deve sbloccare quella nuova)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
-                    self?.floodCont?(); self?.floodCont = nil
+                    guard let self, self.floodToken == token else { return }
+                    self.floodCont?()
+                    self.floodCont = nil
                 }
             }
             done += 1
         }
         floodPeripheral = nil
+        floodToken = nil
         return done
     }
 
@@ -298,6 +345,8 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         finishEnum()
+        writeInFlight = nil
+        writeTarget = nil
         writeCont?("disconnected — write outcome unknown")
         writeCont = nil
         // resume solo del flood attivo su QUESTO peripheral (no desync da disconnect stale)
@@ -311,6 +360,8 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         finishEnum()
+        writeInFlight = nil
+        writeTarget = nil
         writeCont?("connect failed: \(error?.localizedDescription ?? "?")")
         writeCont = nil
         if peripheral.identifier == floodPeripheral?.identifier {
@@ -348,9 +399,13 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 }
 
 extension Data {
+    var hex: String {
+        map { String(format: "%02x", $0) }.joined()
+    }
+
     var hexPreview: String {
-        let hex = map { String(format: "%02x", $0) }.joined()
-        return hex.count > 48 ? String(hex.prefix(48)) + "…" : hex
+        let h = hex
+        return h.count > 48 ? String(h.prefix(48)) + "…" : h
     }
 
     init?(hexString: String) {
@@ -982,7 +1037,7 @@ final class NFCScanner: NSObject, NFCNDEFReaderSessionDelegate, NFCTagReaderSess
                 m.readNDEF { msg, _ in
                     if let msg {
                         for r in msg.records {
-                            dump.ndefHex.append(r.payload.hexPreview)
+                            dump.ndefHex.append(r.payload.hex)
                             dump.ndefText.append(String(data: r.payload, encoding: .utf8) ?? r.payload.hexPreview)
                         }
                     }
@@ -1118,8 +1173,10 @@ final class NetScanner {
         func arm() {
             c.receiveMessage { [weak self] data, _, _, _ in
                 if let d = data, let s = String(data: d, encoding: .utf8) {
-                    let loc = s.split(separator: "\n").first { $0.uppercased().contains("LOCATION:") }?
-                        .split(separator: ":", maxSplits: 1).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+                    let loc = s.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+                        .first { $0.uppercased().contains("LOCATION:") }?
+                        .split(separator: ":", maxSplits: 1).last
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
                     lock.lock()
                     let fresh = !loc.isEmpty && found.insert(loc).inserted
                     lock.unlock()
@@ -1226,22 +1283,29 @@ final class NetScanner {
         let c = NWConnection(host: NWEndpoint.Host(host),
                              port: p, using: .udp)
         var done = false
+        let lock = NSLock()
+        func finish(_ s: String?) {
+            lock.lock()
+            let first = !done
+            if first { done = true }
+            lock.unlock()
+            guard first else { return }
+            c.cancel()
+            let out = s ?? ""
+            DispatchQueue.main.async { onReply(out) }
+        }
         c.stateUpdateHandler = { st in
             if case .ready = st {
                 c.send(content: payload, completion: .contentProcessed { _ in
                     c.receiveMessage { d, _, _, _ in
-                        guard !done else { return }
-                        done = true
-                        let s = d.flatMap { String(data: $0, encoding: .utf8) } ?? d?.hexPreview ?? ""
-                        c.cancel()
-                        onReply(s)
+                        finish(d.flatMap { String(data: $0, encoding: .utf8) } ?? d?.hexPreview)
                     }
                 })
             }
         }
         c.start(queue: .global(qos: .utility))
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-            if !done { done = true; c.cancel(); onReply("") }
+            finish(nil)
         }
     }
 }
@@ -1249,7 +1313,11 @@ final class NetScanner {
 extension String {
     func hostPart() -> String {
         guard let m = self.range(of: "//([^:/]+)", options: .regularExpression) else { return "?" }
-        return String(self[m]).replacingOccurrences(of: "//", with: "")
+        let h = String(self[m]).replacingOccurrences(of: "//", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // niente CR/LF/altri char: un LOCATION malevolo non deve iniettare header
+        guard h.range(of: "^[A-Za-z0-9.\\-]{1,253}$", options: .regularExpression) != nil else { return "?" }
+        return h
     }
     func portPart() -> String {
         guard let m = self.range(of: ":[0-9]+(?=[/?#]|$)", options: .regularExpression) else { return "80" }

@@ -21,6 +21,8 @@ final class RootdSession: ObservableObject {
     private var current = ""                    // comando in volo (1 connessione)
     private var consumed = false                // conn già servita (one-shot): in attesa di CWD+EOF
     private var tries = 0
+    private var watchdog: DispatchWorkItem?
+    private static let cmdTimeout: TimeInterval = 1800
     private var cwd = "/"
     private var envLines: [String]
     private let q = DispatchQueue(label: "rhs.rootd.session")
@@ -41,8 +43,23 @@ final class RootdSession: ObservableObject {
         }
     }
 
+    func close() {
+        q.async {
+            self.queue.removeAll()
+            self.current = ""
+            self.recycle()
+            DispatchQueue.main.async {
+                self.connected = false
+                self.busy = false
+            }
+        }
+    }
+
     func send(_ line: String) {
-        let t = line.trimmingCharacters(in: .whitespaces)
+        let t = line
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespaces)
         q.async {
             self.trackEnv(t)
             self.queue.append(t)
@@ -50,19 +67,49 @@ final class RootdSession: ObservableObject {
         }
     }
 
-    func close() {
+    // input RAW verso lo stdin del comando in volo (ESC/TAB/frecce/^D/^Z per i processi
+    // interattivi). Il socket è già lo stdin della sh rootd: niente linea, niente nuova riga.
+    func sendRaw(_ bytes: [UInt8]) {
         q.async {
+            guard !bytes.isEmpty, !self.current.isEmpty, self.ready, !self.consumed,
+                  let c = self.conn else { return }
+            c.send(content: Data(bytes), completion: .contentProcessed { _ in })
+        }
+    }
+
+    // ^C / ^\: il comando in volo è figlio della sh tracciata in /tmp/rhs.curpid.
+    // rootd è inetd → una connessione separata può ucciderlo mentre la sessione
+    // principale resta bloccata in attesa del marker. hard = SIGKILL diretto.
+    func interrupt(hard: Bool = false) {
+        q.async {
+            guard !self.current.isEmpty else { return }
             self.queue.removeAll()
             self.current = ""
             self.recycle()
-            DispatchQueue.main.async { self.connected = false }
+            DispatchQueue.main.async {
+                self.connected = false
+                self.busy = false
+            }
+            self.pump()
+            let sig = hard ? "KILL" : "TERM"
+            let script = "p=$(cat /tmp/rhs.curpid 2>/dev/null); if [ -n \"$p\" ]; then "
+                + "command -v pkill >/dev/null 2>&1 && pkill -\(sig) -P $p 2>/dev/null; "
+                + "kill -\(sig) $p 2>/dev/null; sleep 1; "
+                + "command -v pkill >/dev/null 2>&1 && pkill -KILL -P $p 2>/dev/null; "
+                + "kill -KILL $p 2>/dev/null; fi; rm -f /tmp/rhs.curpid; echo RHS-INT"
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = RootdClient.exec(script, timeout: 8)
+            }
         }
     }
 
     // MARK: pump one-shot
 
     private func pump() {
-        guard current.isEmpty, !queue.isEmpty else { syncBusy(); return }
+        // !consumed: la conn one-shot ha già stampato il marker → è drenata, il prossimo
+        // comando deve attendere silentClose (prima veniva legato alla conn vecchia e
+        // finiva in lost() come falso errore di rete)
+        guard current.isEmpty, !consumed, !queue.isEmpty else { syncBusy(); return }
         current = queue.removeFirst()
         tries = 0
         syncBusy()
@@ -75,27 +122,64 @@ final class RootdSession: ObservableObject {
     }
 
     private func fire(_ t: String, on c: NWConnection) {
+        startWatchdog()
         c.send(content: Data(wrapper(t).utf8), completion: .contentProcessed { _ in })
+    }
+
+    // watchdog: se il marker non arriva mai (sh bloccata da un comando che ignora TERM,
+    // rootd che non risponde) la coda non deve restare appesa per sempre
+    private func startWatchdog() {
+        watchdog?.cancel()
+        let w = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.q.async {
+                guard !self.current.isEmpty else { return }
+                self.lost("rootd: nessun marker entro \(Int(Self.cmdTimeout))s")
+            }
+        }
+        watchdog = w
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.cmdTimeout, execute: w)
+    }
+
+    private func stopWatchdog() {
+        watchdog?.cancel()
+        watchdog = nil
     }
 
     private func wrapper(_ t: String) -> String {
         var pre = ""
+        // il sh di launchd parte senza /var/jb nel PATH: senza questo ogni tool root
+        // rispondeva 127 (command not found) e scattava l'auto-install a vuoto
+        pre += "export PATH=/var/jb/usr/local/bin:/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH; "
+        pre += "export LD_LIBRARY_PATH=/var/jb/usr/lib:$LD_LIBRARY_PATH; "
+        // pid della sh corrente: serve a ^C (kill del comando in volo da un'altra conn rootd)
+        pre += "echo $$ > /tmp/rhs.curpid; "
         let cq = cwd.replacingOccurrences(of: "'", with: "'\\''")
         pre += "cd '\(cq)' 2>/dev/null; "
-        for l in envLines { pre += "\(l.replacingOccurrences(of: "'", with: "")); " }
+        for l in envLines { pre += l.replacingOccurrences(of: "\n", with: " ") + "; " }
         let mk = String(decoding: marker, as: UTF8.self)
         return "RHSROOT:{ \(pre)\(t) ; __rhs_rc=$?; echo \"\(mk)$__rhs_rc\"; echo \"\(Self.cwdMark)$PWD\"; }\n"
     }
 
     private func trackEnv(_ t: String) {
-        if t.hasPrefix("export ") || t.hasPrefix("unset ") {
-            envLines.append(t.replacingOccurrences(of: "\n", with: " "))
-            UserDefaults.standard.set(envLines, forKey: Self.envKey)
+        guard t.hasPrefix("export ") || t.hasPrefix("unset ") else { return }
+        func keyOf(_ line: String) -> String {
+            let b = line.hasPrefix("export ") ? line.dropFirst(7) : line.dropFirst(6)
+            return b.split(separator: "=", maxSplits: 1).first
+                .map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
         }
+        let key = keyOf(t)
+        guard !key.isEmpty else { return }
+        // stessa variabile ri-esportata: sostituisci invece di accumulare per sempre
+        envLines.removeAll { keyOf($0) == key }
+        envLines.append(t)
+        if envLines.count > 64 { envLines.removeFirst(envLines.count - 64) }
+        UserDefaults.standard.set(envLines, forKey: Self.envKey)
     }
 
     // il conn è consumato dopo un marker (one-shot) → chiudi e passa al prossimo
     private func recycle() {
+        stopWatchdog()
         ready = false
         conn?.cancel()
         conn = nil
@@ -109,20 +193,23 @@ final class RootdSession: ObservableObject {
         guard conn == nil else { return }
         let c = NWConnection(host: "127.0.0.1", port: 4444, using: .tcp)
         conn = c
-        c.stateUpdateHandler = { [weak self] state in
+        // identità della connessione catturata: un .cancelled/.failed tardivo della
+        // connessione vecchia non deve toccare quella nuova (prima: conn! crash / stato falso)
+        c.stateUpdateHandler = { [weak self, weak c] state in
             guard let self else { return }
-            self.q.async { self.onState(state) }
+            self.q.async { self.onState(state, from: c) }
         }
         c.start(queue: q)
     }
 
-    private func onState(_ state: NWConnection.State) {
+    private func onState(_ state: NWConnection.State, from src: NWConnection?) {
+        guard let src, src === conn else { return }
         switch state {
         case .ready:
             ready = true
             DispatchQueue.main.async { self.connected = true }
             if !current.isEmpty {
-                fire(current, on: conn!)
+                fire(current, on: src)
             }
             recv()
         case .failed(let e):
@@ -236,6 +323,7 @@ final class RootdSession: ObservableObject {
         if let e = Int32(digits) {
             current = ""
             consumed = true
+            stopWatchdog()
             syncBusy()
             DispatchQueue.main.async { self.onDone?(e, cmd) }
             // il conn rimane aperto fino a CWD+EOF (one-shot): lì silentClose → pump
@@ -245,13 +333,14 @@ final class RootdSession: ObservableObject {
 
     private func takeCWD(at mi: Int) {
         var end = mi + Self.cwdMark.utf8.count
-        var path = ""
+        var bytes: [UInt8] = []
         while end < inBuf.count, inBuf[end] != 10 {
-            path.append(Character(UnicodeScalar(inBuf[end])))
+            bytes.append(inBuf[end])
             end += 1
         }
         if end < inBuf.count, inBuf[end] == 10 { end += 1 }
         inBuf.removeFirst(end)
+        let path = String(decoding: bytes, as: UTF8.self)
         if !path.isEmpty { cwd = path }
     }
 

@@ -1,6 +1,11 @@
 import SwiftUI
 import CoreImage
 
+// valori di query in un URI QR (SMS/mail/WhatsApp): &, =, ? devono essere encodati,
+// .urlQueryAllowed li lascia passare e spezza il payload
+private let rhsQueryValueAllowed = CharacterSet(
+    charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+
 @MainActor
 final class TerminalModel: ObservableObject {
     @Published var lines: [LogEntry] = []
@@ -8,6 +13,8 @@ final class TerminalModel: ObservableObject {
 
     private var partial = ""
     private var tried127: Set<String> = []
+    private var installing = false
+    private var installQueue: [(String, String?)] = []
 
     init() {
         let s = RootdSession.shared
@@ -101,18 +108,44 @@ struct ToolsTab: View {
     @EnvironmentObject private var o: Orchestrator
     @State private var mode = 0
 
+    private let modes: [(String, String)] = [
+        ("Terminal", "terminal.fill"),
+        ("Builder", "hammer.fill"),
+        ("Forge", "qrcode"),
+        ("NFC", "wave.3.right.circle.fill"),
+        ("PineApple", "wifi.router.fill"),
+    ]
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                Picker("tool", selection: $mode) {
-                    Text("Terminal").tag(0)
-                    Text("Builder").tag(1)
-                    Text("Forge").tag(2)
-                    Text("NFC").tag(3)
-                    Text("PineApple").tag(4)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(Array(modes.enumerated()), id: \.offset) { i, m in
+                            Button {
+                                Haptics.tap()
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { mode = i }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: m.1).font(.system(size: 11, weight: .bold))
+                                    Text(m.0).font(.system(size: 12, weight: .bold, design: .rounded))
+                                }
+                                .padding(.horizontal, 13).padding(.vertical, 8)
+                                .background(Capsule().fill(mode == i
+                                    ? LinearGradient(colors: [.redHat, Color(hex: 0xB40000)],
+                                                     startPoint: .top, endPoint: .bottom)
+                                    : LinearGradient(colors: [Color.surfaceHi, Color.surface],
+                                                     startPoint: .top, endPoint: .bottom)))
+                                .overlay(Capsule().strokeBorder(mode == i ? Color.white.opacity(0.12) : Color.white.opacity(0.07), lineWidth: 1))
+                                .foregroundColor(mode == i ? .white : .dim)
+                                .shadow(color: mode == i ? Color.redHat.opacity(0.3) : .clear, radius: 6, y: 2)
+                            }
+                            .buttonStyle(ScaleButton())
+                        }
+                    }
+                    .padding(.horizontal, 12)
                 }
-                .pickerStyle(.segmented)
-                .padding(10)
+                .padding(.vertical, 10)
                 switch mode {
                 case 0: TerminalView().environmentObject(tm)
                 case 1: BuilderView().environmentObject(tm)
@@ -121,7 +154,7 @@ struct ToolsTab: View {
                 default: NFCAttackView()
                 }
             }
-            .background(Color.bg.ignoresSafeArea())
+            .background(RHBackground())
             .navigationTitle("Tools")
             .navigationBarTitleDisplayMode(.inline)
         }
@@ -139,6 +172,7 @@ struct TerminalView: View {
     @State private var contentBottomY: CGFloat = 0
     @State private var viewportBottomY: CGFloat = 0
     @State private var nearBottom = true
+    @State private var lastCount = 0
     @FocusState private var focused: Bool
     @State private var hist: [String] = []
     @State private var histIdx = -1
@@ -157,6 +191,36 @@ struct TerminalView: View {
         ("help", "help"),
     ]
 
+    private func keyCap(_ label: String, _ color: Color = .dim,
+                        _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                .foregroundColor(color)
+                .frame(minWidth: 26)
+                .padding(.horizontal, 7).padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.surfaceHi))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func histUp() {
+        guard !hist.isEmpty else { return }
+        histIdx = min(histIdx + 1, hist.count - 1)
+        input = hist[hist.count - 1 - histIdx]
+        focused = true
+    }
+
+    private func histDown() {
+        if histIdx > 0 {
+            histIdx -= 1
+            input = hist[hist.count - 1 - histIdx]
+        } else {
+            histIdx = -1
+            input = ""
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
@@ -165,7 +229,8 @@ struct TerminalView: View {
                         Chip(text: t, active: false) { input = "\(t) " ; focused = true }
                     }
                     ForEach(ToolRegistry.specs, id: \.name) { s in
-                        let installed = ShellRunner.shared.resolve(s.name) != nil
+                        let installed = ShellRunner.shared.isAvailable(s.name)
+                            || s.bins.contains { ShellRunner.shared.isAvailable($0) }
                         Chip(text: installed ? s.name : "+ \(s.name)", active: false) {
                             if installed {
                                 input = "\(s.name) "
@@ -182,6 +247,32 @@ struct TerminalView: View {
                 .padding(.horizontal, 10)
             }
             .padding(.vertical, 8)
+
+            // barra tasti di controllo (terminale iOS): ^C/^D/^L/^U/^W/^R/^Z/^\/ESC/TAB/frecce
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    keyCap("ESC") { tm.raw([0x1B]) }
+                    keyCap("TAB") { tm.raw([0x09]) }
+                    keyCap("←") { tm.raw([0x1B, 0x5B, 0x44]) }
+                    keyCap("→") { tm.raw([0x1B, 0x5B, 0x43]) }
+                    keyCap("^C", .bad) { tm.interrupt() }
+                    keyCap("^\\", .bad) { tm.interrupt(true) }
+                    keyCap("^D") { tm.eof(closeWhenIdle: input.isEmpty) }
+                    keyCap("^Z") { tm.raw([0x1A]) }
+                    keyCap("^L") { tm.reset() }
+                    keyCap("^U") { input = "" }
+                    keyCap("^K") { input = "" }
+                    keyCap("^W") { input = tm.deleteLastWord(input) }
+                    keyCap("^R") {
+                        if let h = tm.recall(input, hist) { input = h }
+                        focused = true
+                    }
+                    keyCap("↑") { histUp() }
+                    keyCap("↓") { histDown() }
+                }
+                .padding(.horizontal, 10)
+            }
+            .padding(.bottom, 6)
 
             ScrollViewReader { proxy in
                 ScrollView {
@@ -210,8 +301,12 @@ struct TerminalView: View {
                 )
                 .background(Color(hex: 0x070709))
                 .onPreferenceChange(ContentBottomKey.self) { bottom in
+                    // la crescita del contenuto NON è uno scroll: aggiorna nearBottom
+                    // solo quando il movimento viene dall'utente (count invariato)
+                    let grew = tm.lines.count != lastCount
+                    lastCount = tm.lines.count
                     contentBottomY = bottom
-                    nearBottom = viewportBottomY - bottom > -80
+                    if !grew { nearBottom = viewportBottomY - bottom > -80 }
                 }
                 .onPreferenceChange(ViewportBottomKey.self) { vp in
                     viewportBottomY = vp
@@ -256,26 +351,17 @@ struct TerminalView: View {
                         .foregroundColor(tm.running ? .dim : .redHat)
                 }
                 Button {
-                    guard !hist.isEmpty else { return }
-                    histIdx = min(histIdx + 1, hist.count - 1)
-                    input = hist[hist.count - 1 - histIdx]
-                    focused = true
+                    histUp()
                 } label: {
                     Image(systemName: "chevron.up").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
                 }
                 Button {
-                    if histIdx > 0 {
-                        histIdx -= 1
-                        input = hist[hist.count - 1 - histIdx]
-                    } else {
-                        histIdx = -1
-                        input = ""
-                    }
+                    histDown()
                 } label: {
                     Image(systemName: "chevron.down").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
                 }
                 Button {
-                    tm.lines.removeAll()
+                    tm.reset()
                 } label: {
                     Image(systemName: "trash")
                         .font(.system(size: 13)).foregroundColor(.dim)
@@ -293,18 +379,71 @@ struct TerminalView: View {
         .onAppear {
             focused = true
             sess.warm()
+            ToolRegistry.ensureNetcatShimIfNeeded()
             if tm.lines.isEmpty { tm.append("rhs build \(ToolRegistry.buildTag)", .info) }
         }
     }
 }
 
 extension TerminalModel {
+    // ^L / trash: azzera anche il frammento incompleto (altrimenti il prossimo
+    // chunk si concatena alla riga vecchia e produce output corrotto)
+    func reset() {
+        lines.removeAll()
+        partial = ""
+    }
+
+    // tasti di controllo: bytes raw sullo stdin del comando in volo (ESC/TAB/frecce/^D/^Z)
+    func raw(_ bytes: [UInt8]) {
+        if RootdSession.shared.busy {
+            RootdSession.shared.sendRaw(bytes)
+        } else {
+            append("nessun processo attivo — tasti raw solo durante un comando", .warn)
+        }
+    }
+
+    func interrupt(_ hard: Bool = false) {
+        guard RootdSession.shared.busy else {
+            append(hard ? "^\\ — niente in esecuzione" : "^C — niente in esecuzione", .warn)
+            return
+        }
+        append(hard ? "^\\ — SIGKILL al comando…" : "^C — interrompo…", .warn)
+        running = false
+        RootdSession.shared.interrupt(hard: hard)
+    }
+
+    func eof(closeWhenIdle: Bool) {
+        if RootdSession.shared.busy {
+            RootdSession.shared.sendRaw([0x04])
+        } else if closeWhenIdle {
+            RootdSession.shared.close()
+            running = false
+            append("sessione rootd chiusa (^D)", .warn)
+        }
+    }
+
+    func deleteLastWord(_ s: String) -> String {
+        var t = s
+        while t.last == " " { t.removeLast() }
+        while let c = t.last, c != " " { t.removeLast() }
+        return t
+    }
+
+    // ^R: ultimo comando della history che contiene il testo già digitato
+    func recall(_ q: String, _ history: [String]) -> String? {
+        let needle = q.trimmingCharacters(in: .whitespaces)
+        for h in history.reversed() where h != q && (needle.isEmpty || h.contains(needle)) {
+            return h
+        }
+        return nil
+    }
+
     func runSmartText(_ raw: String) {
         let cmd = raw.trimmingCharacters(in: .whitespaces)
         guard !cmd.isEmpty else { return }
         let parts = cmd.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         guard let head = parts.first else { return }
-        if head == "clear" { lines.removeAll(); return }
+        if head == "clear" { reset(); return }
         if head == "exit" {
             RootdSession.shared.close()
             append("sessione rootd chiusa — al prossimo comando si riconnette", .warn)
@@ -347,6 +486,14 @@ extension TerminalModel {
     }
 
     func installTool(_ tool: String, then cmd: String? = nil) {
+        // un solo install alla volta: apt/dpkg hanno i lock, due connessioni rootd
+        // concorrenti si bloccano a vicenda
+        if installing {
+            installQueue.append((tool, cmd))
+            append("install \(tool) in coda…", .warn)
+            return
+        }
+        installing = true
         // gli install usano connessioni rootd proprie: girano anche mentre la sessione è occupata
         running = true
         append("auto-install '\(tool)'…", .warn)
@@ -354,6 +501,7 @@ extension TerminalModel {
             DispatchQueue.main.async { self.append(l) }
         } done: { ok in
             DispatchQueue.main.async {
+                self.installing = false
                 self.running = false
                 if ok {
                     self.append("'\(tool)' pronto ✓", .good)
@@ -361,6 +509,10 @@ extension TerminalModel {
                 } else {
                     self.append("install fallita — Sileo aperto sul pacchetto", .bad)
                     Haptics.fail()
+                }
+                if !self.installQueue.isEmpty {
+                    let (t, c) = self.installQueue.removeFirst()
+                    self.installTool(t, then: c)
                 }
             }
         }
@@ -398,6 +550,8 @@ struct BuilderView: View {
         Template(tool: "netcat", fields: [("host", "host", "10.0.0.2"),
                                           ("port", "port", "80")],
                  build: { v in "nc \(v["host"] ?? "") \(v["port"] ?? "")" }),
+        Template(tool: "nc listen", fields: [("port", "port", "4444")],
+                 build: { v in "nc -l -p \(v["port"] ?? "4444")" }),
         Template(tool: "python3", fields: [("script", "script", "scapy"),
                                            ("args", "args", "")],
                  build: { v in v["script"] == "scapy" ? "python3 -c \"from scapy.all import *\" --help" : "python3 \(v["script"] ?? "") \(v["args"] ?? "")" }),
@@ -423,7 +577,8 @@ struct BuilderView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(templates, id: \.tool) { t in
-                            let installed = t.tool == "raw" || t.tool == "ping" || ShellRunner.shared.resolve(t.tool) != nil
+                            let installed = ["raw", "ping", "nc listen"].contains(t.tool)
+                                || ShellRunner.shared.resolve(t.tool) != nil
                             Chip(text: t.tool, active: selectedTool == t.tool) {
                                 selectedTool = t.tool
                                 values = [:]
@@ -453,7 +608,7 @@ struct BuilderView: View {
                     }
                 }
 
-                Text("COMANDO GENERATO").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
+                SectionHeader(title: "Comando generato", icon: "terminal.fill", color: .ok)
                 Text(command)
                     .font(.system(size: 12, design: .monospaced))
                     .padding(12).frame(maxWidth: .infinity, alignment: .leading)
@@ -493,7 +648,7 @@ struct BuilderView: View {
             }
             .padding(16)
         }
-        .background(Color.bg.ignoresSafeArea())
+        .background(RHBackground())
     }
 }
 
@@ -534,6 +689,7 @@ struct ForgeView: View {
     @State private var path = "/login"
     @State private var qrVal = ""
     @State private var copied = false
+    @State private var qrImage: UIImage?
     // sid STABILE nel payload (UUID nel body cambierebbe a ogni render: link copiato ≠ mostrato)
     @State private var trackSid = UUID().uuidString.prefix(8).description
 
@@ -567,13 +723,13 @@ struct ForgeView: View {
         case .qSms:
             let v = qrVal.split(separator: ",", maxSplits: 1)
             let n = v.first.map(String.init) ?? "+391234567890"
-            let t = v.count > 1 ? String(v[1]).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "" : ""
+            let t = v.count > 1 ? String(v[1]).addingPercentEncoding(withAllowedCharacters: rhsQueryValueAllowed) ?? "" : ""
             return "SMSTO:\(n):\(t)"
         case .qMail:
             let v = qrVal.split(separator: ",", maxSplits: 2)
             let a = v.first.map(String.init) ?? "victim@target.com"
             let s = v.count > 1 ? String(v[1]) : "URGENT"
-            let b = v.count > 2 ? String(v[2]).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "" : ""
+            let b = v.count > 2 ? String(v[2]).addingPercentEncoding(withAllowedCharacters: rhsQueryValueAllowed) ?? "" : ""
             return "mailto:\(a)?subject=\(s)&body=\(b)"
         case .qIntent:
             let u = qrVal.isEmpty ? "evil.host/apk" : qrVal
@@ -584,7 +740,7 @@ struct ForgeView: View {
         case .qWa:
             let v = qrVal.split(separator: ",", maxSplits: 1)
             let n = v.first.map(String.init) ?? "+391234567890"
-            let t = v.count > 1 ? String(v[1]).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "" : "ciao"
+            let t = v.count > 1 ? String(v[1]).addingPercentEncoding(withAllowedCharacters: rhsQueryValueAllowed) ?? "" : "ciao"
             return "https://wa.me/\(n.replacingOccurrences(of: "+", with: ""))?text=\(t)"
         case .qContact:
             let v = qrVal.split(separator: ",", maxSplits: 2)
@@ -612,7 +768,7 @@ struct ForgeView: View {
     private var hint: String {
         switch kind {
         case .revBash, .revPy, .revNC:
-            return "Listener: MSF Handler o nc -lvnp \(port) su \(host.isEmpty ? "host" : host)"
+            return "Listener: MSF Handler o `nc -l -p \(port)` su \(host.isEmpty ? "host" : host) — la forma `nc -lvnp` ora funziona via shim"
         case .msf: return "Esegui su host attacker. Payload adattato all'arch del target."
         case .portal: return "Servi la pagina con hostapd + dnsmasq; QR mostrato alla vittima."
         case .phish: return "Il sid traccia le aperture. Manda come QR o link."
@@ -651,7 +807,7 @@ struct ForgeView: View {
                     forgeField("path", $path, key: "path", last: true)
                 }
 
-                Text("PAYLOAD").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
+                SectionHeader(title: "Payload", icon: "doc.on.doc.fill", color: .warn)
                 Text(payload)
                     .font(.system(size: 12, design: .monospaced))
                     .padding(12).frame(maxWidth: .infinity, alignment: .leading)
@@ -678,7 +834,8 @@ struct ForgeView: View {
                     Button {
                         UIPasteboard.general.string = payload
                         if let img = QRCodec.image(payload), let png = img.pngData() {
-                            let urls = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                            let urls = (FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+                                ?? URL(fileURLWithPath: NSTemporaryDirectory()))
                                 .appendingPathComponent("forge_payload.png")
                             try? png.write(to: urls)
                             Haptics.tap()
@@ -693,8 +850,8 @@ struct ForgeView: View {
                     .buttonStyle(ScaleButton())
                 }
 
-                if payload.count < 400, let img = QRCodec.image(payload) {
-                    Text("QR PAYLOAD").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
+                if let img = qrImage {
+                    SectionHeader(title: "QR payload", icon: "qrcode", color: .info)
                     Image(uiImage: img)
                         .interpolation(.none)
                         .resizable()
@@ -716,7 +873,13 @@ struct ForgeView: View {
             }
             .padding(16)
         }
-        .background(Color.bg.ignoresSafeArea())
+        .background(RHBackground())
+        .onAppear { regenQR() }
+        .onChange(of: payload) { _ in regenQR() }
+    }
+
+    private func regenQR() {
+        qrImage = payload.count < 400 ? QRCodec.image(payload) : nil
     }
 
     private func forgeField(_ ph: String, _ bind: Binding<String>, w: CGFloat? = nil,

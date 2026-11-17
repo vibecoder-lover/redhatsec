@@ -14,7 +14,7 @@ struct ReportView: View {
                     empty
                 }
             }
-            .background(Color.bg.ignoresSafeArea())
+            .background(RHBackground())
             .navigationTitle("Report")
             .fullScreenCover(isPresented: $preview) {
                 if let url = o.reportURL {
@@ -35,25 +35,39 @@ struct ReportView: View {
     }
 
     private var empty: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "doc.text.magnifyingglass")
-                .font(.system(size: 42, weight: .light)).foregroundColor(.dim)
-            Text("Nessun report").font(.headline)
-            Text("Scan → Execute → il report si genera qui.").font(.caption).foregroundColor(.dim)
-        }
+        EmptyState(icon: "doc.text.magnifyingglass",
+                   title: "Nessun report",
+                   subtitle: "Scan → Execute → il report si genera automaticamente qui.")
     }
 
     private func content(_ rep: Report) -> some View {
-        ScrollView {
+        var sevCount: [Sev: Int] = [:]
+        for f in rep.findings { sevCount[f.sev, default: 0] += 1 }
+        return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(rep.title).font(.system(size: 19, weight: .heavy, design: .rounded))
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.text.fill")
+                            .font(.system(size: 15, weight: .bold)).foregroundColor(.redHat)
+                        Text(rep.title).font(.system(size: 19, weight: .heavy, design: .rounded))
+                    }
                     Text("\(rep.targets.count) targets · \(rep.findings.count) findings · \(DateFormatter.localizedString(from: rep.date, dateStyle: .medium, timeStyle: .short))")
-                        .font(.caption).foregroundColor(.dim)
+                        .font(.rhsCaption(11)).foregroundColor(.dim)
+                    HStack(spacing: 6) {
+                        ForEach(Sev.allCases) { s in
+                            if let n = sevCount[s], n > 0 {
+                                Pill(text: "\(s.rawValue) \(n)", color: s.color)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
                 }
                 .padding(16).card()
 
                 severityBars(rep)
+
+                SectionHeader(title: "Findings", icon: "flag.2.crossed", color: .redHat,
+                              trailing: "\(rep.findings.count)")
 
                 ForEach(rep.findings.sorted { $0.sev < $1.sev }) { f in
                     FindingCard(f: f)
@@ -70,7 +84,7 @@ struct ReportView: View {
         for f in rep.findings { counts[f.sev, default: 0] += 1 }
         let maxC = max(1, counts.values.max() ?? 1)
         return VStack(alignment: .leading, spacing: 8) {
-            Text("SEVERITY DISTRIBUTION").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.dim)
+            SectionHeader(title: "Severity distribution", icon: "chart.bar.fill", color: .dim)
             ForEach(Sev.allCases) { s in
                 HStack(spacing: 10) {
                     Text(s.rawValue).font(.system(size: 11, design: .monospaced))
@@ -104,9 +118,17 @@ struct ReportView: View {
             }
             Button {
                 Haptics.tap()
-                if let rep = o.report {
-                    _ = ReportBuilder.pdf(rep)
-                    o.log("PDF generato in Documents/redhatsec-report.pdf", .good)
+                guard let rep = o.report else { return }
+                // rendering PDF: fuori dal main (report grandi bloccano la UI)
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let url = ReportBuilder.pdf(rep)
+                    DispatchQueue.main.async {
+                        if let url {
+                            o.log("PDF generato: \(url.lastPathComponent)", .good)
+                        } else {
+                            o.log("PDF: generazione fallita", .bad)
+                        }
+                    }
                 }
             } label: {
                 Label("PDF", systemImage: "doc.badge.plus")
@@ -152,7 +174,7 @@ struct FindingCard: View {
                         .lineLimit(14)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("REPRO").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
-                        ForEach(f.repro, id: \.self) { r in
+                        ForEach(Array(f.repro.enumerated()), id: \.offset) { _, r in
                             HStack(alignment: .top, spacing: 6) {
                                 Text("▸").font(.caption2).foregroundColor(f.sev.color)
                                 Text(r).font(.system(size: 11, design: .monospaced)).foregroundColor(.white.opacity(0.85))

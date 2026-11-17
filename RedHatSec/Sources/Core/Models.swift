@@ -121,6 +121,33 @@ struct NFCDump: Identifiable, Codable {
     var kind: String
 
     var title: String { "\(kind) \(uid.prefix(10))" }
+
+    init(uid: String, family: String, pages: [String], ndefHex: [String], ndefText: [String], kind: String) {
+        self.uid = uid
+        self.family = family
+        self.pages = pages
+        self.ndefHex = ndefHex
+        self.ndefText = ndefText
+        self.kind = kind
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, date, uid, family, pages, ndefHex, ndefText, kind
+    }
+
+    // decode tollerante: i dump scritti da una versione vecchia (senza id/date o
+    // senza un array) non devono far fallire TUTTO il loadDumps
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = ((try? c.decodeIfPresent(UUID.self, forKey: .id)) ?? nil) ?? UUID()
+        date = ((try? c.decodeIfPresent(Date.self, forKey: .date)) ?? nil) ?? Date()
+        uid = ((try? c.decodeIfPresent(String.self, forKey: .uid)) ?? nil) ?? "?"
+        family = ((try? c.decodeIfPresent(String.self, forKey: .family)) ?? nil) ?? "?"
+        pages = ((try? c.decodeIfPresent([String].self, forKey: .pages)) ?? nil) ?? []
+        ndefHex = ((try? c.decodeIfPresent([String].self, forKey: .ndefHex)) ?? nil) ?? []
+        ndefText = ((try? c.decodeIfPresent([String].self, forKey: .ndefText)) ?? nil) ?? []
+        kind = ((try? c.decodeIfPresent(String.self, forKey: .kind)) ?? nil) ?? "Tag"
+    }
 }
 
 enum Phase: String, CaseIterable, Identifiable {

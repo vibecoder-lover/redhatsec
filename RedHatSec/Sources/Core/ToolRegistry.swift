@@ -39,6 +39,73 @@ enum ToolRegistry {
     static let appBinDir = "/var/mobile/RedHatSec/bin"
     static let workDir = "/var/mobile/RedHatSec"
     static let sourcesPath = workDir + "/etc/apt/sources.list.d/rhs.list"
+    static let ncShimPath = "/var/jb/usr/local/bin/nc"
+
+    // Shim `nc`: il netcat del device (BSD/busybox) non accetta le flag fuse tipo
+    // `-lvnp 4444`. Il wrapper spezza i flag e li rimanda al binario vero:
+    //   nc -lvnp 4444  ->  nc -l -v -n -p 4444
+    static let ncShimScript: String = [
+        "#!/bin/sh",
+        "# rhs nc shim - forme fuse (-lvnp) -> flag separate portabili",
+        "REAL=\"\"",
+        "for c in /var/jb/usr/bin/nc /var/jb/bin/nc /usr/bin/nc /bin/nc /var/jb/usr/local/bin/nc.real; do",
+        "  if [ -x \"$c\" ]; then REAL=\"$c\"; break; fi",
+        "done",
+        "if [ -z \"$REAL\" ]; then",
+        "  echo \"nc: netcat non installato - usa: install netcat\" >&2",
+        "  exit 127",
+        "fi",
+        "set -f",
+        "NEW=\"\"",
+        "add() { if [ -z \"$NEW\" ]; then NEW=\"$1\"; else NEW=\"$NEW",
+        "$1\"; fi; }",
+        "for a in \"$@\"; do",
+        "  case \"$a\" in",
+        "    --*) add \"$a\" ;;",
+        "    -?*)",
+        "      flags=${a#-}",
+        "      while [ -n \"$flags\" ]; do",
+        "        c=$(printf %.1s \"$flags\")",
+        "        flags=${flags#?}",
+        "        case \"$c\" in",
+        "          l|v|n|z|u|k|d|D|r|t|b|N|4|6|h) add \"-$c\" ;;",
+        "          p)",
+        "            if [ -n \"$flags\" ]; then add \"-p\"; add \"$flags\"; flags=\"\"; else add \"-p\"; fi ;;",
+        "          *) add \"-$c$flags\"; flags=\"\" ;;",
+        "        esac",
+        "      done ;;",
+        "    *) add \"$a\" ;;",
+        "  esac",
+        "done",
+        "OLDIFS=$IFS",
+        "IFS=\"",
+        "\"",
+        "set -- $NEW",
+        "IFS=$OLDIFS",
+        "exec \"$REAL\" \"$@\"",
+        ""
+    ].joined(separator: "\n")
+
+    static func ensureNetcatShimIfNeeded() {
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: ncShimPath) else { return }
+        guard let nc = ShellRunner.shared.resolve("nc"), nc != ncShimPath else { return }
+        ensureNetcatShim()
+    }
+
+    static func ensureNetcatShim() {
+        guard RootShell.shared.available else { return }
+        // printf %b: script single-line (rootd legge UNA riga) senza dipendere da base64
+        let body = ncShimScript
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        let cmd = "mkdir -p /var/jb/usr/local/bin && "
+            + "printf '%b' '\(body)' > \(ncShimPath) && chmod 755 \(ncShimPath) "
+            + "&& echo NC-SHIM-OK"
+        DispatchQueue.global(qos: .utility).async {
+            _ = RootShell.shared.runSync(cmd, timeout: 20)
+        }
+    }
 
     // sorgenti di default: Procursus rootless (suite 1900 = arch iphoneos-arm64, iOS16 Dopamine)
     // estendibile a runtime: `repo add <url>` dal terminale; `repo reset` riparte da qui
@@ -48,13 +115,13 @@ enum ToolRegistry {
     ]
 
     static func sources() -> [String] {
-        if let s = try? String(contentsOfFile: sourcesPath, encoding: .utf8) {
-            let lines = s.split(separator: "\n")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty && !$0.hasPrefix("#") }
-            if !lines.isEmpty { return lines }
-        }
-        return defaultRepos
+        // se il file esiste lo rispetto anche se vuoto (repo del intenzionale);
+        // i default si usano solo quando il file è assente
+        guard FileManager.default.fileExists(atPath: sourcesPath) else { return defaultRepos }
+        let s = (try? String(contentsOfFile: sourcesPath, encoding: .utf8)) ?? ""
+        return s.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
     }
 
     static func writeSources(_ lines: [String]) -> String? {
@@ -66,10 +133,15 @@ enum ToolRegistry {
         } catch {
             // dir owner root (creata via rootd in run precedenti) → scrivo via rootd e ripasso a mobile
             guard RootShell.shared.available else { return "\(error)" }
-            let sq: (String) -> String = { $0.replacingOccurrences(of: "'", with: "") }
-            var cmd = "mkdir -p '\(sq(dir))' && rm -f '\(sq(sourcesPath))'"
-            for l in lines { cmd += " && printf '%s\\n' '\(sq(l))' >> '\(sq(sourcesPath))'" }
-            cmd += " && chown -R mobile:mobile '\(sq(workDir))/etc'"
+            let sq: (String) -> String = { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+            var cmd = "mkdir -p \(sq(dir)) && rm -f \(sq(sourcesPath))"
+            for l in lines { cmd += " && printf '%s\\n' \(sq(l)) >> \(sq(sourcesPath))" }
+            cmd += " && chown -R mobile:mobile \(sq(workDir))/etc"
+            // main thread: non bloccare la UI per un runSync fino a 15s
+            if Thread.isMainThread {
+                DispatchQueue.global(qos: .utility).async { _ = RootShell.shared.runSync(cmd, timeout: 15) }
+                return "scrittura rhs.list via rootd in background — riprova tra 1s"
+            }
             let r = RootShell.shared.runSync(cmd, timeout: 15)
             if r.exitCode == 0 { return nil }
             return "mobile EPERM (\(error)) e rootd write rc=\(r.exitCode)"
@@ -184,6 +256,7 @@ enum ToolRegistry {
                 line(String(out.suffix(400)))
                 if r.exitCode == 0, s.bins.first(where: { sh.resolve($0) != nil }) != nil {
                     sh.rescanTools()
+                    if s.bins.contains("nc") { ensureNetcatShim() }
                     line("[install] \(tool) installato ROOT in /var/jb ✓ — ridigita il comando")
                     done(true)
                     return
@@ -194,12 +267,22 @@ enum ToolRegistry {
                 // se lo spec non ha debURL, prova il nome convenzionale nella release (future crossbuild)
                 let debUrl = s.debURL ?? "https://github.com/vibecoder-lover/redhatsec/releases/download/debs/\(s.pkg)_iphoneos-arm64.deb"
                 line("[install] .deb locale: \(debUrl)…")
-                let script = "command -v dpkg >/dev/null 2>&1 || apt-get install -y --allow-unauthenticated dpkg; curl -fSL --max-time 180 -o \(workDir)/tmp/\(s.pkg).deb '\(debUrl)' || echo CURL-FAIL; if dpkg -i \(workDir)/tmp/\(s.pkg).deb; then echo DEB-OK; elif command -v tar >/dev/null 2>&1; then rm -rf \(workDir)/tmp/x; mkdir -p \(workDir)/tmp/x; cd \(workDir)/tmp/x && tar -xf ../\(s.pkg).deb 2>/dev/null && tar xzf data.tar.gz -C / && echo TAR-OK; fi"
+                let tmpDeb = "\(workDir)/tmp/\(s.pkg).deb"
+                let script = "rm -f \(tmpDeb); "
+                  + "command -v dpkg >/dev/null 2>&1 || apt-get install -y --allow-unauthenticated dpkg; "
+                  + "curl -fSL --max-time 180 -o \(tmpDeb) '\(debUrl)' || { echo CURL-FAIL; exit 1; }; "
+                  + "if dpkg -i \(tmpDeb); then echo DEB-OK; else "
+                  + "rm -rf \(workDir)/tmp/x; mkdir -p \(workDir)/tmp/x; cd \(workDir)/tmp/x && "
+                  + "(tar -xf ../\(s.pkg).deb 2>/dev/null || exit 1) && "
+                  + "(if [ -f data.tar.gz ]; then tar xzf data.tar.gz -C /; "
+                  + "elif [ -f data.tar.xz ]; then tar xJf data.tar.xz -C /; "
+                  + "else tar xf data.tar.* -C /; fi) && echo TAR-OK; fi"
                 let d = RootShell.shared.runSync(script, timeout: 300)
                 let dout = (d.stdout.isEmpty ? d.stderr : d.stdout)
                 line(String(dout.suffix(400)))
                 if d.exitCode == 0, s.bins.first(where: { sh.resolve($0) != nil }) != nil {
                     sh.rescanTools()
+                    if s.bins.contains("nc") { ensureNetcatShim() }
                     line("[install] \(tool) installato da .deb ✓ — ridigita il comando")
                     done(true)
                     return
@@ -217,6 +300,7 @@ enum ToolRegistry {
                 let found = s.bins.first { sh.resolve($0) != nil } != nil
                 if found {
                     sh.rescanTools()
+                    if s.bins.contains("nc") { ensureNetcatShim() }
                     line("[install] \(tool) estratto in \(appBinDir) ✓ — exec senza root")
                     done(true)
                     return

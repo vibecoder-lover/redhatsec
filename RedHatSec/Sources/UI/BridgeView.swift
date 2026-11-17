@@ -26,7 +26,8 @@ struct BridgeView: View {
 
     private var joinSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("RETE TARGET — la radio dell'ESP attacca qui").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
+            SectionHeader(title: "Rete target", icon: "antenna.radiowaves.left.and.right", color: .info)
+            Text("la radio dell'ESP entra in questa rete").font(.caption2).foregroundColor(.dim)
             TextField("SSID rete target", text: $targetSSID)
                 .textFieldStyle(.plain).font(.system(size: 12, design: .monospaced))
                 .padding(10)
@@ -38,22 +39,24 @@ struct BridgeView: View {
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color(hex: 0x070709)))
                 .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
             Button {
+                guard !joining else { return }
                 Haptics.heavy(); joining = true
                 Task {
-                    // race con timeout: se joinTarget non risponde entro 20s, sblocco il bottone
+                    // timeout 20s ma il re-entry resta bloccato finché il join reale non finisce
                     let j = Task { await tcp.joinTarget(targetSSID, targetPass) }
-                    let ok = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
-                        let lock = NSLock()
-                        var done = false
-                        let finish: (Bool) -> Void = { v in
-                            lock.lock(); let first = !done; if first { done = true }; lock.unlock()
-                            if first { c.resume(returning: v) }
+                    let ok = await withTaskGroup(of: Bool.self) { group -> Bool in
+                        group.addTask { await j.value }
+                        group.addTask {
+                            try? await Task.sleep(nanoseconds: 20_000_000_000)
+                            return false
                         }
-                        Task { finish(await j.value) }
-                        DispatchQueue.global().asyncAfter(deadline: .now() + 20) { finish(false) }
+                        let first = await group.next() ?? false
+                        group.cancelAll()
+                        return first
                     }
+                    let real = await j.value
                     joining = false
-                    if !ok { tcp.log("join \(targetSSID): timeout o negato") }
+                    if !(ok || real) { tcp.log("join \(targetSSID): timeout o negato") }
                 }
             } label: {
                 Label(joining ? "JOIN…" : "JOIN RETE TARGET", systemImage: "arrow.turn.right.down")
@@ -95,7 +98,8 @@ struct BridgeView: View {
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
                 Button {
                     Haptics.heavy()
-                    tcp.connect(host: manualIP.trimmingCharacters(in: .whitespaces).isEmpty ? "192.168.4.1" : manualIP)
+                    let ip = manualIP.trimmingCharacters(in: .whitespaces)
+                    tcp.connect(host: ip.isEmpty ? "192.168.4.1" : ip)
                 } label: {
                     Image(systemName: "arrow.right.circle.fill").foregroundColor(.redHat)
                 }
@@ -107,7 +111,7 @@ struct BridgeView: View {
 
     private var actionsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("AZIONI RADIO").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
+            SectionHeader(title: "Azioni radio", icon: "dot.radiowaves.left.and.right", color: .redHat)
             Button {
                 Haptics.heavy(); scanning = true
                 CrashTracer.mark("bridge scan tap tcp=\(tcp.connected) ble=\(ble.connected)")
@@ -171,8 +175,9 @@ struct BridgeView: View {
         Group {
             if !nets.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("RETI VISIBILI DALLA RADIO — \(nets.count)").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
-                    ForEach(Array(nets.enumerated()), id: \.offset) { i, n in
+                    SectionHeader(title: "Reti visibili dalla radio", icon: "wifi", color: .ok,
+                                  trailing: "\(nets.count)")
+                    ForEach(nets, id: \.bssid) { n in
                         HStack(spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(n.ssid).font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
@@ -207,7 +212,7 @@ struct BridgeView: View {
 
     private var rawSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("RAW UART (Proxmark / PN532 passthrough)").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
+            SectionHeader(title: "Raw UART", icon: "cable.connector", color: .warn, trailing: "Proxmark / PN532")
             TextField("byte hex (es. AA 00 01)", text: $rawHex)
                 .textFieldStyle(.plain).font(.system(size: 12, design: .monospaced))
                 .padding(10)
@@ -240,7 +245,7 @@ struct BridgeView: View {
         return Group {
             if !lines.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("BRIDGE LOG").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
+                    SectionHeader(title: "Bridge log", icon: "text.alignleft", color: .dim)
                     ForEach(Array(lines.enumerated().suffix(14)), id: \.offset) { _, l in
                         Text(l).font(.system(size: 10, design: .monospaced)).foregroundColor(.white.opacity(0.85))
                     }
@@ -265,7 +270,7 @@ struct SettingsView: View {
                 }
                 .padding(16)
             }
-            .background(Color.bg.ignoresSafeArea())
+            .background(RHBackground())
             .navigationTitle("Impostazioni")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -280,9 +285,8 @@ struct SettingsView: View {
 
     private var traceSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("CRASH TRACE").font(.system(size: 11, weight: .bold)).foregroundColor(.bad)
-                Spacer()
+            HStack(spacing: 8) {
+                SectionHeader(title: "Crash trace", icon: "exclamationmark.triangle.fill", color: .bad)
                 Button("cancella") {
                     CrashTracer.clear()
                     trace = []
@@ -303,7 +307,8 @@ struct SettingsView: View {
     }
 
     static func readTrace() -> [String] {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
         guard let s = try? String(contentsOf: docs.appendingPathComponent("crash_trace.txt"), encoding: .utf8) else { return [] }
         return s.split(separator: "\n").map(String.init)
     }
