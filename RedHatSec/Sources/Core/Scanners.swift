@@ -139,6 +139,15 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        if fileSession != nil {
+            fileSession?.peripheral = peripheral
+            if let s = fileSession?.service {
+                peripheral.discoverServices([CBUUID(string: s)])
+            } else {
+                peripheral.discoverServices(nil)
+            }
+            return
+        }
         if l2capCont != nil, let psm = pendingPsm {
             peripheral.openL2CAPChannel(psm)
             return
@@ -147,6 +156,18 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        if let fs = fileSession {
+            let svc = peripheral.services?.first {
+                fs.service.isEmpty || $0.uuid.uuidString.caseInsensitiveCompare(fs.service) == .orderedSame
+            }
+            guard let svc else {
+                finishFile("service \(fs.service) non trovata sul device")
+                return
+            }
+            fileSession?.service = svc.uuid.uuidString
+            peripheral.discoverCharacteristics(nil, for: svc)
+            return
+        }
         for s in peripheral.services ?? [] {
             enumBuffer.append("SVC \(BLEScanner.friendlyService(s.uuid))")
             if let hint = BLEScanner.provisionHint(s.uuid) {
@@ -161,6 +182,28 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        if let fs = fileSession {
+            guard service.uuid.uuidString.caseInsensitiveCompare(fs.service) == .orderedSame else { return }
+            let c = (service.characteristics ?? []).first {
+                fs.chr.isEmpty || $0.uuid.uuidString.caseInsensitiveCompare(fs.chr) == .orderedSame
+            }
+            guard let c else {
+                finishFile("characteristic \(fs.chr) non trovata in \(fs.service)")
+                return
+            }
+            guard c.properties.contains(.write) || c.properties.contains(.writeWithoutResponse) else {
+                finishFile("characteristic non writable (\(propsText(c.properties)))")
+                return
+            }
+            fs.chr = c.uuid.uuidString
+            fs.chrRef = c
+            if fs.withResponse && !c.properties.contains(.write) { fs.withResponse = false }
+            // MTU reale: massimo payload per write (iOS lo espone dopo il connect)
+            let mtu = peripheral.maximumWriteValueLength(for: fs.withResponse ? .withResponse : .withoutResponse)
+            fs.chunk = max(20, min(180, mtu))
+            nextFileChunk(on: peripheral)
+            return
+        }
         for c in service.characteristics ?? [] {
             var line = "  CHR \(c.uuid.uuidString) [\(propsText(c.properties))]"
             if c.value != nil { line += " val=\((c.value ?? Data()).hexPreview)" }
@@ -204,6 +247,15 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let fs = fileSession {
+            if let error {
+                finishFile("errore al byte \(fs.offset)/\(fs.data.count): \(error.localizedDescription)")
+                return
+            }
+            fs.progress?(fs.offset, fs.data.count)
+            nextFileChunk(on: peripheral)
+            return
+        }
         guard let f = writeInFlight, f.chr == characteristic.uuid.uuidString else { return }
         writeInFlight = nil
         if let error {
@@ -280,6 +332,91 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         }
     }
 
+    // MARK: - File transfer su GATT (foto/audio/file via characteristic writable)
+
+    final class FileXfer {
+        var peripheral: CBPeripheral?
+        var service: String
+        var chr: String
+        var data: Data
+        var name: String
+        var offset = 0
+        var chunk = 180
+        var withResponse = true
+        var cont: ((String) -> Void)?
+        var progress: ((Int, Int) -> Void)?
+        var chrRef: CBCharacteristic?
+        var started = Date()
+        init(service: String, chr: String, data: Data, name: String) {
+            self.service = service
+            self.chr = chr
+            self.data = data
+            self.name = name
+        }
+    }
+
+    private var fileSession: FileXfer?
+
+    // Invia un file (qualsiasi byte: jpg/mp3/pdf) in chunk sulle characteristic.
+    // Funziona solo se il device espone una chr writable che accetta un flusso:
+    // BLE non ha un profilo file standard, il formato lo decide il firmware target.
+    func sendFile(_ target: TargetDevice, service: String, characteristic: String,
+                  data: Data, name: String = "file.bin",
+                  withResponse: Bool = true, timeout: TimeInterval = 120,
+                  onProgress: @escaping (Int, Int) -> Void) async -> String {
+        guard central.state == .poweredOn else { return "BLE spento" }
+        guard let per = peripherals[target.mac ?? ""] else { return "peripheral non in cache: riscanza" }
+        guard !data.isEmpty else { return "file vuoto" }
+        if fileSession != nil { return "trasferimento già in corso" }
+
+        let fs = FileXfer(service: service, chr: characteristic, data: data, name: name)
+        fs.withResponse = withResponse
+        fs.peripheral = per
+        fileSession = fs
+        per.delegate = self
+
+        return await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
+            fs.cont = { r in cont.resume(returning: r) }
+            fs.progress = onProgress
+            onProgress(0, data.count)
+            central.connect(per, options: nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard let self, let s = self.fileSession, s === fs else { return }
+                self.finishFile("timeout a \(s.offset)/\(s.data.count) byte")
+            }
+        }
+    }
+
+    private func nextFileChunk(on peripheral: CBPeripheral) {
+        guard let fs = fileSession, let c = fs.chrRef else { return }
+        if fs.offset >= fs.data.count {
+            let dt = Date().timeIntervalSince(fs.started)
+            let kbs = dt > 0 ? Double(fs.data.count) / dt / 1024 : 0
+            finishFile("\(fs.name): \(fs.data.count)B in \(Int(dt))s (\(String(format: "%.1f", kbs)) KB/s) svc=\(fs.service) chr=\(fs.chr)")
+            return
+        }
+        let end = min(fs.offset + fs.chunk, fs.data.count)
+        let slice = fs.data.subdata(in: fs.offset..<end)
+        peripheral.writeValue(slice, for: c, type: fs.withResponse ? .withResponse : .withoutResponse)
+        fs.offset = end
+        if !fs.withResponse {
+            fs.progress?(fs.offset, fs.data.count)
+            // senza risposta: pacing per non saturare la coda del controller
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.012) { [weak self, weak peripheral] in
+                guard let self, let peripheral, let s = self.fileSession, s === fs else { return }
+                self.nextFileChunk(on: peripheral)
+            }
+        }
+    }
+
+    private func finishFile(_ msg: String) {
+        guard let fs = fileSession else { return }
+        fileSession = nil
+        if let p = fs.peripheral { central.cancelPeripheralConnection(p) }
+        fs.cont?(msg)
+        fs.cont = nil
+    }
+
     private var writeCont: ((String) -> Void)?
     private var writeTarget: (service: String, chr: String, payload: Data)?
     private var writeInFlight: (svc: String, chr: String)?
@@ -344,6 +481,10 @@ final class BLEScanner: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        if let fs = fileSession, fs.peripheral?.identifier == peripheral.identifier {
+            finishFile("disconnesso a \(fs.offset)/\(fs.data.count) byte")
+            return
+        }
         finishEnum()
         writeInFlight = nil
         writeTarget = nil

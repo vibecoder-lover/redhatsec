@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 func outcomeColor(_ outcome: String) -> Color {
     if outcome.contains("executed") || outcome.contains("tool:") { return .ok }
@@ -313,6 +314,9 @@ struct TargetDetailView: View {
     @State private var payloadHex = ""
     @State private var svcUUID = ""
     @State private var chrUUID = ""
+    @State private var importingFile = false
+    @State private var fileBusy = false
+    @State private var fileStatus = ""
 
     // letto live da o.targets: dopo "salva arming" la UI si aggiorna davvero
     private var target: TargetDevice {
@@ -439,8 +443,52 @@ struct TargetDetailView: View {
             }
             .background(RoundedRectangle(cornerRadius: 12).fill(Color.redHat))
             .foregroundColor(.white)
+            Button {
+                importingFile = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.up.doc.fill")
+                    Text(fileBusy ? "invio…" : "INVIA FILE sulla chr")
+                }
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .frame(maxWidth: .infinity).padding(.vertical, 10)
+            }
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color.surfaceHi))
+            .foregroundColor(.white)
+            .disabled(fileBusy || svcUUID.isEmpty || chrUUID.isEmpty)
+            if !fileStatus.isEmpty {
+                Text(fileStatus)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.dim)
+            }
         }
         .padding(16).card()
+        .fileImporter(isPresented: $importingFile, allowedContentTypes: [.data],
+                      allowsMultipleSelection: false) { res in
+            switch res {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                guard let data = try? Data(contentsOf: url) else {
+                    fileStatus = "file non leggibile"; return
+                }
+                let name = url.lastPathComponent
+                fileBusy = true
+                fileStatus = "\(name) — 0/\(data.count) byte"
+                let svc = svcUUID, chr = chrUUID
+                Task {
+                    let r = await o.ble.sendFile(target, service: svc, characteristic: chr,
+                                                 data: data, name: name, withResponse: true) { d, t in
+                        DispatchQueue.main.async { fileStatus = "\(name) — \(d)/\(t) byte" }
+                    }
+                    fileStatus = r
+                    fileBusy = false
+                }
+            case .failure(let e):
+                fileStatus = "selezione: \(e.localizedDescription)"
+            }
+        }
     }
 
     private var netInfo: some View {
