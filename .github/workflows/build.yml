@@ -133,3 +133,4 @@ jobs:
             gh release create tipa --title "RedHatSec tipa (updater)" --notes "auto: latest build"
           gh release upload tipa "RedHatSec-${SHA}.tipa" latest.json --clobber
           echo "published: build=$APPTAG sha=$SHA"
+# rebuild trigger
