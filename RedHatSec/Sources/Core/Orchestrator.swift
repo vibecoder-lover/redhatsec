@@ -1077,6 +1077,19 @@ final class Orchestrator: ObservableObject {
             return ok
                 ? "ESP beacon flood: \(fakes.count) SSID fittizi in onda."
                 : "ESP beacon flood rifiutato (radio occupata da scan/rogue)."
+        case "hcxpcapngtool", "airodump-ng":
+            guard let mac = t?.mac, mac.count >= 17 else {
+                return "ESP PMKID/EAPOL: target senza BSSID — esegui prima lo scan Wi-Fi."
+            }
+            let ch = t?.extra["ch"].flatMap { Int($0) } ?? 0
+            let ok = await tcpBridge.pmkid(mac: mac, ch: ch)
+            return ok
+                ? "ESP: deauth + cattura EAPOL/PMKID → \(mac) ch\(ch). Frame 802.11 reali."
+                : "ESP: cattura rifiutata (client attivo sul canale? riprova)."
+        case "reaver", "pixiewps":
+            return "WPS (reaver/pixiewps): richiede monitor mode + injection che l'ESP8266 non espone. Nessun frame inviato — serve dongle/host esterno."
+        case "ettercap":
+            return "ARP MITM: impossibile dalla radio dell'ESP e dalla sandbox iOS (serve raw socket + iface). Richiede host esterno."
         default:
             return nil
         }

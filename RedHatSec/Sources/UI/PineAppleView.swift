@@ -50,6 +50,13 @@ struct PineAppleView: View {
                 if !ip.isEmpty { netIP = ip }
             }
         }
+        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
+            guard tcp.connected, tcp.rogueOn, !busy else { return }
+            Task {
+                let l = await tcp.trafficLog()
+                if !l.isEmpty { traffic = l }
+            }
+        }
     }
 
     private var statusRow: some View {
