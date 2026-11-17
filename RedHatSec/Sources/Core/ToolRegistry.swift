@@ -10,7 +10,7 @@ struct ToolSpec {
 
 enum BuiltinExec {
     // SOLO comandi app-meta (non shell). TUTTO il resto va alla sh root reale
-    // della sessione rootd persistente â€” niente finti, niente simulazioni.
+    // della sessione rootd persistente — niente finti, niente simulazioni.
     static func exec(_ parts: [String]) -> [String]? {
         guard let head = parts.first else { return nil }
         switch head {
@@ -22,14 +22,14 @@ enum BuiltinExec {
     }
 
     static let helpLines: [String] = [
-        "shell root REALE: rootd (launchd inetd :4444) â†’ sh uid=0 persistente",
-        "  ls cat cd echo whoami id uname env df ps ifconfig pwd grep â€¦",
+        "shell root REALE: rootd (launchd inetd :4444) → sh uid=0 persistente",
+        "  ls cat cd echo whoami id uname env df ps ifconfig pwd grep …",
         "  pwd/cd/export/env persistono tra i comandi (stessa sh viva)",
         "comandi app:",
-        "  install <tool>            â†’ auto-install .deb da release debs (rootd â†’ dpkg)",
-        "  repo list/add/del/reset   â†’ sorgenti apt RHS (\(ToolRegistry.sourcesPath))",
-        "  spawntest                 â†’ diagnostica spawn persona + rootd + entitlements",
-        "  clear Â· exit              â†’ UI (exit chiude la sessione rootd)",
+        "  install <tool>            → auto-install .deb da release debs (rootd → dpkg)",
+        "  repo list/add/del/reset   → sorgenti apt RHS (\(ToolRegistry.sourcesPath))",
+        "  spawntest                 → diagnostica spawn persona + rootd + entitlements",
+        "  clear · exit              → UI (exit chiude la sessione rootd)",
         "tutto il resto: exec reale uid=0 nella sessione viva",
     ]
 }
@@ -97,9 +97,9 @@ enum ToolRegistry {
         echo "nc shim: listen senza porta" >&2
         exit 1
       fi
-      # porta giÃ  in ascolto? (evita "Couldn't setup listening socket")
-      if $NETSTAT -an 2>/dev/null | grep -q "\.$port .*LISTEN"; then
-        echo "nc shim: porta $port giÃ  occupata â€” killall nc  (poi riprova)" >&2
+      # porta già in ascolto? (evita "Couldn't setup listening socket")
+      if $NETSTAT -an 2>/dev/null | grep -q "\\.$port .*LISTEN"; then
+        echo "nc shim: porta $port già occupata — killall nc  (poi riprova)" >&2
         exit 1
       fi
       [ -n "$RHS_NC_DEBUG" ] && echo "nc shim: REAL=$REAL porta=$port args=$*" >&2
@@ -110,7 +110,7 @@ enum ToolRegistry {
         tp=$!
         sleep 0.6
         if kill -0 "$tp" 2>/dev/null &&
-           $NETSTAT -an 2>/dev/null | grep -q "\.$port .*LISTEN"; then
+           $NETSTAT -an 2>/dev/null | grep -q "\\.$port .*LISTEN"; then
           wait "$tp"
           exit $?
         fi
@@ -123,7 +123,7 @@ enum ToolRegistry {
       if try_listen "$@" -p "$port"; then :; fi
       if try_listen -l "$port"; then :; fi
       echo "nc shim: nessuna forma di listen accettata da $REAL" >&2
-      [ -n "$RHS_NC_DEBUG" ] && "$REAL" -h 2>&1 | head -4 >&2
+      "$REAL" -h 2>&1 | head -4 >&2
       exit 1
     fi
 
@@ -165,7 +165,7 @@ enum ToolRegistry {
 
     static func sources() -> [String] {
         // se il file esiste lo rispetto anche se vuoto (repo del intenzionale);
-        // i default si usano solo quando il file Ã¨ assente
+        // i default si usano solo quando il file è assente
         guard FileManager.default.fileExists(atPath: sourcesPath) else { return defaultRepos }
         let s = (try? String(contentsOfFile: sourcesPath, encoding: .utf8)) ?? ""
         return s.split(separator: "\n")
@@ -180,7 +180,7 @@ enum ToolRegistry {
             try lines.joined(separator: "\n").write(toFile: sourcesPath, atomically: true, encoding: .utf8)
             return nil
         } catch {
-            // dir owner root (creata via rootd in run precedenti) â†’ scrivo via rootd e ripasso a mobile
+            // dir owner root (creata via rootd in run precedenti) → scrivo via rootd e ripasso a mobile
             guard RootShell.shared.available else { return "\(error)" }
             let sq: (String) -> String = { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
             var cmd = "mkdir -p \(sq(dir)) && rm -f \(sq(sourcesPath))"
@@ -189,7 +189,7 @@ enum ToolRegistry {
             // main thread: non bloccare la UI per un runSync fino a 15s
             if Thread.isMainThread {
                 DispatchQueue.global(qos: .utility).async { _ = RootShell.shared.runSync(cmd, timeout: 15) }
-                return "scrittura rhs.list via rootd in background â€” riprova tra 1s"
+                return "scrittura rhs.list via rootd in background — riprova tra 1s"
             }
             let r = RootShell.shared.runSync(cmd, timeout: 15)
             if r.exitCode == 0 { return nil }
@@ -204,7 +204,7 @@ enum ToolRegistry {
         case "list":
             return ["sorgenti (\(sourcesPath)):"]
                 + sources().map { "  \($0)" }
-                + ["estendi con: repo add deb https://<host>/ ./ â€” reset: repo reset"]
+                + ["estendi con: repo add deb https://<host>/ ./ — reset: repo reset"]
         case "reset":
             if let e = writeSources(defaultRepos) { return ["write rhs.list fallita: \(e)"] }
             return ["sorgenti ripristinate:"] + defaultRepos.map { "  \($0)" }
@@ -217,7 +217,7 @@ enum ToolRegistry {
                 if !s.contains(line) { s.append(line); added.append(line) }
             }
             if let e = writeSources(s) { return ["write rhs.list fallita: \(e)"] }
-            return added.isEmpty ? ["giÃ  presente"] : ["repo aggiunti:"] + added
+            return added.isEmpty ? ["già presente"] : ["repo aggiunti:"] + added
         case "del":
             guard args.count > 1 else { return ["repo del: serve la keyword"] }
             let kw = args[1]
@@ -273,7 +273,7 @@ enum ToolRegistry {
         specs.first { $0.name == tool || $0.bins.contains(tool) }
     }
 
-    // vero se almeno uno dei binari Ã¨ nel PATH della sh root
+    // vero se almeno uno dei binari è nel PATH della sh root
     static func rootHas(_ bins: [String]) -> Bool {
         guard !bins.isEmpty else { return false }
         let q = bins.map { "command -v \($0) >/dev/null 2>&1" }.joined(separator: " || ")
@@ -282,15 +282,15 @@ enum ToolRegistry {
 
     static func install(_ tool: String, line: @escaping (String) -> Void, done: @escaping (Bool) -> Void) {
         guard let s = spec(tool) else {
-            line("tool non catalogato: \(tool) â€” apro la ricerca Sileo")
+            line("tool non catalogato: \(tool) — apro la ricerca Sileo")
             DispatchQueue.main.async { openSileo(tool, search: true) }
             done(false)
             return
         }
         // pacchetti inesistenti nei repo iOS: niente apt/404 a vuoto
         let notPackaged: [String: String] = [
-            "hcxtools": "hcxtools non Ã¨ nei repo iOS â€” il PMKID/EAPOL lo cattura la radio ESP (vettore PMKID).",
-            "hcxdumptool": "hcxdumptool non Ã¨ nei repo iOS â€” usa la cattura PMKID dell'ESP.",
+            "hcxtools": "hcxtools non è nei repo iOS — il PMKID/EAPOL lo cattura la radio ESP (vettore PMKID).",
+            "hcxdumptool": "hcxdumptool non è nei repo iOS — usa la cattura PMKID dell'ESP.",
             "killerbee": "killerbee richiede un dongle Zigbee (non supportato su iPhone)."
         ]
         if let msg = notPackaged[s.pkg] {
@@ -299,9 +299,9 @@ enum ToolRegistry {
             return
         }
         DispatchQueue.global(qos: .utility).async {
-            // giÃ  installato: la detection app puÃ² fallire, quindi verifica dal root
+            // già installato: la detection app può fallire, quindi verifica dal root
             if rootHas(s.bins) {
-                line("[install] \(tool) giÃ  presente nel bootstrap âœ“")
+                line("[install] \(tool) già presente nel bootstrap ✓")
                 ShellRunner.shared.rescanTools()
                 if s.bins.contains("nc") { ensureNetcatShim() }
                 done(true)
@@ -316,7 +316,7 @@ enum ToolRegistry {
             let apt = sh.resolve("apt-get")
             let dpkgDeb = sh.resolve("dpkg-deb")
 
-            // PATH 1 â€” apt root via rootd con sorgenti RHS aggregati (app-owned)
+            // PATH 1 — apt root via rootd con sorgenti RHS aggregati (app-owned)
             let st = RootShell.shared.runSync("echo rhs-rootd-ok", timeout: 12)
             line("[install] rootd: \(st.exitCode == 0 ? "ok" : "DOWN (exit=\(st.exitCode)) \(st.stderr.prefix(80))")")
             if st.exitCode == 0 {
@@ -327,7 +327,7 @@ enum ToolRegistry {
                 let chk = RootShell.shared.runSync("ls -la '\(sourcesPath)' && head -2 '\(sourcesPath)'", timeout: 10)
                 line("[install] rhs.list: \(chk.stdout.isEmpty ? "MANCANTE/err=" + String(chk.exitCode) : chk.stdout.prefix(120))")
                 let opts = "-o Dir::Etc::sourcelist=\(sourcesPath) -o Dir::Etc::sourceparts=-"
-                line("[install] apt root via rootd â€” \(lines.count) sorgenti RHSâ€¦")
+                line("[install] apt root via rootd — \(lines.count) sorgenti RHS…")
                 let upd = RootShell.shared.runSync("apt-get \(opts) update", timeout: 240)
                 let uout = (upd.stderr.isEmpty ? upd.stdout : upd.stderr)
                 line(String(uout.suffix(500)))
@@ -337,19 +337,19 @@ enum ToolRegistry {
                 if r.exitCode == 0, (s.bins.first(where: { sh.resolve($0) != nil }) != nil || rootHas(s.bins)) {
                     sh.rescanTools()
                     if s.bins.contains("nc") { ensureNetcatShim() }
-                    line("[install] \(tool) installato ROOT in /var/jb âœ“ â€” ridigita il comando")
+                    line("[install] \(tool) installato ROOT in /var/jb ✓ — ridigita il comando")
                     done(true)
                     return
                 }
-                line("[install] apt RHS fallito (exit=\(r.exitCode)) â€” se il tool Ã¨ in un altro repo: `repo add deb https://<host>/ ./`")
+                line("[install] apt RHS fallito (exit=\(r.exitCode)) — se il tool è in un altro repo: `repo add deb https://<host>/ ./`")
 
-                // PATH 1.5 â€” .deb locale: bootstrap dpkg se assente + dpkg -i; fallback estrazione tar (bsdtar legge l'ar)
+                // PATH 1.5 — .deb locale: bootstrap dpkg se assente + dpkg -i; fallback estrazione tar (bsdtar legge l'ar)
                 // se lo spec non ha debURL, prova il nome convenzionale nella release (future crossbuild)
                 let debUrl: String? = s.debURL ?? (Self.builtDebs.contains(s.pkg)
                     ? "https://github.com/vibecoder-lover/redhatsec/releases/download/debs/\(s.pkg)_iphoneos-arm64.deb"
                     : nil)
                 if let debUrl {
-                line("[install] .deb locale: \(debUrl)â€¦")
+                line("[install] .deb locale: \(debUrl)…")
                 let tmpDeb = "\(workDir)/tmp/\(s.pkg).deb"
                 let script = "rm -f \(tmpDeb); "
                   + "command -v dpkg >/dev/null 2>&1 || apt-get install -y --allow-unauthenticated dpkg; "
@@ -366,18 +366,18 @@ enum ToolRegistry {
                 if d.exitCode == 0, (s.bins.first(where: { sh.resolve($0) != nil }) != nil || rootHas(s.bins)) {
                     sh.rescanTools()
                     if s.bins.contains("nc") { ensureNetcatShim() }
-                    line("[install] \(tool) installato da .deb âœ“ â€” ridigita il comando")
+                    line("[install] \(tool) installato da .deb ✓ — ridigita il comando")
                     done(true)
                     return
                 }
                 } else {
-                    line("[install] \(tool): nessun .deb precompilato â€” provo apt/Sileo")
+                    line("[install] \(tool): nessun .deb precompilato — provo apt/Sileo")
                 }
             }
 
-            // PATH 2 â€” apt fetch via ROOT (la sandbox app non puÃ² eseguire sh /var/jb)
+            // PATH 2 — apt fetch via ROOT (la sandbox app non può eseguire sh /var/jb)
             if apt != nil && dpkgDeb != nil {
-                line("[install] apt fetch \(s.pkg) (root)â€¦")
+                line("[install] apt fetch \(s.pkg) (root)…")
                 let fetch = RootShell.shared.runSync(
                     "cd \(workDir)/tmp && apt-get download \(s.pkg) 2>&1; echo fetch-exit=$?",
                     timeout: 180)
@@ -394,15 +394,15 @@ enum ToolRegistry {
                 if found {
                     sh.rescanTools()
                     if s.bins.contains("nc") { ensureNetcatShim() }
-                    line("[install] \(tool) estratto in \(appBinDir) âœ“ â€” exec senza root")
+                    line("[install] \(tool) estratto in \(appBinDir) ✓ — exec senza root")
                     done(true)
                     return
                 }
                 line("[install] apt fetch: pacchetto non presente nei repo configurati")
             } else {
-                line("[install] apt/dpkg-deb non presenti â†’ Sileo")
+                line("[install] apt/dpkg-deb non presenti → Sileo")
             }
-            line("[sileo] tocca GET/INSTALLA su \(s.pkg) â€” root via helper di Sileo; poi ridigita il comando")
+            line("[sileo] tocca GET/INSTALLA su \(s.pkg) — root via helper di Sileo; poi ridigita il comando")
             DispatchQueue.main.async {
                 openSileo(s.pkg)
             }
