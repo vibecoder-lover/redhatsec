@@ -96,9 +96,9 @@ final class RootShell: ObservableObject {
 
     @Published var lastRootOK = false
 
-    var available: Bool {
-        ShellRunner.shared.resolve("sh") != nil
-    }
+    // rootd è il canale primario: NON gating su FileManager (la sandbox app
+    // può non vedere /var/jb anche se i tool girano via root). runSync ha i fallback.
+    var available: Bool { true }
 
     func runSync(_ cmd: String, timeout: TimeInterval = 180) -> ShellResult {
         // 1) rootd via TCP: launchd (root) spawna sh per noi

@@ -87,10 +87,13 @@ enum ToolRegistry {
     ].joined(separator: "\n")
 
     static func ensureNetcatShimIfNeeded() {
-        let fm = FileManager.default
-        guard !fm.fileExists(atPath: ncShimPath) else { return }
-        guard let nc = ShellRunner.shared.resolve("nc"), nc != ncShimPath else { return }
-        ensureNetcatShim()
+        // detection via root: la sandbox app può non vedere /var/jb
+        DispatchQueue.global(qos: .utility).async {
+            let nc = RootShell.shared.runSync("command -v nc >/dev/null 2>&1 && echo NC", timeout: 10)
+            guard nc.stdout.contains("NC") else { return }
+            let shim = RootShell.shared.runSync("test -x \(ncShimPath) && echo SHIM", timeout: 10)
+            if !shim.stdout.contains("SHIM") { ensureNetcatShim() }
+        }
     }
 
     static func ensureNetcatShim() {
@@ -219,6 +222,13 @@ enum ToolRegistry {
         specs.first { $0.name == tool || $0.bins.contains(tool) }
     }
 
+    // vero se almeno uno dei binari è nel PATH della sh root
+    static func rootHas(_ bins: [String]) -> Bool {
+        guard !bins.isEmpty else { return false }
+        let q = bins.map { "command -v \($0) >/dev/null 2>&1" }.joined(separator: " || ")
+        return RootShell.shared.runSync(q, timeout: 15).exitCode == 0
+    }
+
     static func install(_ tool: String, line: @escaping (String) -> Void, done: @escaping (Bool) -> Void) {
         guard let s = spec(tool) else {
             line("tool non catalogato: \(tool) — apro la ricerca Sileo")
@@ -227,6 +237,14 @@ enum ToolRegistry {
             return
         }
         DispatchQueue.global(qos: .utility).async {
+            // già installato: la detection app può fallire, quindi verifica dal root
+            if rootHas(s.bins) {
+                line("[install] \(tool) già presente nel bootstrap ✓")
+                ShellRunner.shared.rescanTools()
+                if s.bins.contains("nc") { ensureNetcatShim() }
+                done(true)
+                return
+            }
             let fm = FileManager.default
             try? fm.createDirectory(atPath: appBinDir, withIntermediateDirectories: true)
             try? fm.createDirectory(atPath: workDir + "/tmp", withIntermediateDirectories: true)
@@ -237,9 +255,9 @@ enum ToolRegistry {
             let dpkgDeb = sh.resolve("dpkg-deb")
 
             // PATH 1 — apt root via rootd con sorgenti RHS aggregati (app-owned)
-            if RootShell.shared.available {
-                let st = RootShell.shared.runSync("echo rhs-rootd-ok", timeout: 15)
-                line("[install] rootd: \(st.exitCode == 0 ? "ok" : "DOWN (exit=\(st.exitCode)) \(st.stderr.prefix(80))")")
+            let st = RootShell.shared.runSync("echo rhs-rootd-ok", timeout: 12)
+            line("[install] rootd: \(st.exitCode == 0 ? "ok" : "DOWN (exit=\(st.exitCode)) \(st.stderr.prefix(80))")")
+            if st.exitCode == 0 {
                 let lines = sources()
                 if let e = writeSources(lines) {
                     line("[install] write rhs.list fallita: \(e)")
@@ -254,7 +272,7 @@ enum ToolRegistry {
                 let r = RootShell.shared.runSync("apt-get \(opts) install -y --allow-unauthenticated \(s.pkg)", timeout: 300)
                 let out = (r.stdout.isEmpty ? r.stderr : r.stdout)
                 line(String(out.suffix(400)))
-                if r.exitCode == 0, s.bins.first(where: { sh.resolve($0) != nil }) != nil {
+                if r.exitCode == 0, (s.bins.first(where: { sh.resolve($0) != nil }) != nil || rootHas(s.bins)) {
                     sh.rescanTools()
                     if s.bins.contains("nc") { ensureNetcatShim() }
                     line("[install] \(tool) installato ROOT in /var/jb ✓ — ridigita il comando")
@@ -280,7 +298,7 @@ enum ToolRegistry {
                 let d = RootShell.shared.runSync(script, timeout: 300)
                 let dout = (d.stdout.isEmpty ? d.stderr : d.stdout)
                 line(String(dout.suffix(400)))
-                if d.exitCode == 0, s.bins.first(where: { sh.resolve($0) != nil }) != nil {
+                if d.exitCode == 0, (s.bins.first(where: { sh.resolve($0) != nil }) != nil || rootHas(s.bins)) {
                     sh.rescanTools()
                     if s.bins.contains("nc") { ensureNetcatShim() }
                     line("[install] \(tool) installato da .deb ✓ — ridigita il comando")
@@ -297,7 +315,7 @@ enum ToolRegistry {
                 line(fetch.stdout.isEmpty ? fetch.stderr : fetch.stdout)
                 let extract = sh.run("sh", args: ["-c",
                     "cd \(workDir)/tmp && ls *.deb >/dev/null 2>&1 && for d in *.deb; do dpkg-deb -x \"\(workDir)/tmp/$d\" \(workDir)/extracted; done && cp \(workDir)/extracted/var/jb/usr/bin/* \(appBinDir)/ 2>/dev/null; cp \(workDir)/extracted/usr/bin/* \(appBinDir)/ 2>/dev/null; cp \(workDir)/extracted/usr/local/bin/* \(appBinDir)/ 2>/dev/null; chmod 755 \(appBinDir)/* 2>/dev/null; rm -f \(workDir)/tmp/*.deb; true"], timeout: 120)
-                let found = s.bins.first { sh.resolve($0) != nil } != nil
+                let found = s.bins.first { sh.resolve($0) != nil } != nil || rootHas(s.bins)
                 if found {
                     sh.rescanTools()
                     if s.bins.contains("nc") { ensureNetcatShim() }

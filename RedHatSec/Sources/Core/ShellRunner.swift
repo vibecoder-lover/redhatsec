@@ -41,20 +41,60 @@ final class ShellRunner: ObservableObject {
                                     "zbjam", "dns-sd", "curl", "python3", "scapy"]
 
     @Published private(set) var availableTools: [String] = []
-    private var resolveCache: [String: Bool] = [:]
+    private var knownGood: Set<String> = []
+    private var rootFound: Set<String> = []
+    private let stateLock = NSLock()
+    private var refreshingFromRoot = false
 
-    // cache: statusLabel/statusColor sono chiamati a ogni render per ogni riga PLAN
+    // La sandbox dell'app può non vedere /var/jb: la verità la dà la sh root
+    // (`command -v`). knownGood/rootFound vengono riempiti dal refresh async.
     func isAvailable(_ bin: String) -> Bool {
-        if let v = resolveCache[bin] { return v }
-        let v = resolve(bin) != nil
-        resolveCache[bin] = v
-        return v
+        stateLock.lock()
+        let cached = knownGood.contains(bin) || rootFound.contains(bin)
+        stateLock.unlock()
+        if cached { return true }
+        if resolve(bin) != nil {
+            stateLock.lock(); knownGood.insert(bin); stateLock.unlock()
+            return true
+        }
+        return false
     }
 
     // re-scan dopo ogni install: i pill "TOOL ✓/✗" e il contatore si aggiornano live
     func rescanTools() {
-        resolveCache.removeAll()
-        availableTools = Self.toolNames.filter { resolve($0) != nil }
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { self.rescanTools() }
+            return
+        }
+        let local = Self.toolNames.filter { resolve($0) != nil }
+        availableTools = Array(Set(availableTools).union(local)).sorted()
+        refreshToolsFromRoot()
+    }
+
+    private func refreshToolsFromRoot() {
+        if refreshingFromRoot { return }
+        refreshingFromRoot = true
+        let names = Array(Set(Self.toolNames + ToolRegistry.specs.flatMap { $0.bins })).sorted()
+        let script = names.map { "command -v \($0) >/dev/null 2>&1 && echo \($0)" }
+            .joined(separator: "; ")
+        DispatchQueue.global(qos: .utility).async {
+            let r = RootShell.shared.runSync(script, timeout: 25)
+            var found: Set<String> = []
+            for line in r.stdout.split(separator: "\n") {
+                let t = line.trimmingCharacters(in: .whitespaces)
+                if !t.isEmpty { found.insert(t) }
+            }
+            DispatchQueue.main.async {
+                self.stateLock.lock()
+                self.rootFound = found
+                self.knownGood.formUnion(found)
+                self.stateLock.unlock()
+                self.availableTools = Self.toolNames.filter {
+                    found.contains($0) || self.resolve($0) != nil
+                }
+                self.refreshingFromRoot = false
+            }
+        }
     }
 
     private init() {

@@ -63,6 +63,7 @@ struct TargetsView: View {
             }
             .background(RHBackground())
             .navigationTitle("Targets — \(o.targets.count)")
+            .onAppear { sr.rescanTools() }
             .sheet(item: $selected) { t in TargetDetailView(targetID: t.id) }
             .sheet(item: $dumpDetail) { d in NFCDumpDetail(dump: d) }
         }

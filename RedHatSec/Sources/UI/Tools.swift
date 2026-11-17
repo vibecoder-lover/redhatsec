@@ -142,6 +142,7 @@ struct TerminalView: View {
     @EnvironmentObject var tm: TerminalModel
     @ObservedObject private var sess = RootdSession.shared
     @ObservedObject private var sr = ShellRunner.shared
+    @ObservedObject private var root = RootShell.shared
     @State private var input = ""
     @State private var contentBottomY: CGFloat = 0
     @State private var viewportBottomY: CGFloat = 0
@@ -199,7 +200,9 @@ struct TerminalView: View {
         VStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    ForEach(sr.availableTools, id: \.self) { t in
+                    ForEach(sr.availableTools.filter { t in
+                        !ToolRegistry.specs.contains { $0.name == t || $0.bins.contains(t) }
+                    }, id: \.self) { t in
                         Chip(text: t, active: false) { input = "\(t) " ; focused = true }
                     }
                     ForEach(ToolRegistry.specs, id: \.name) { s in
@@ -296,11 +299,11 @@ struct TerminalView: View {
             HStack(spacing: 10) {
                 HStack(spacing: 5) {
                     Circle()
-                        .fill(sess.connected ? Color.ok : Color.bad)
+                        .fill((sess.connected || root.lastRootOK) ? Color.ok : Color.bad)
                         .frame(width: 8, height: 8)
                     Text("rootd")
                         .font(.system(size: 11, weight: .heavy, design: .monospaced))
-                        .foregroundColor(sess.connected ? .ok : .bad)
+                        .foregroundColor((sess.connected || root.lastRootOK) ? .ok : .bad)
                 }
                 TextField(tm.running ? "in esecuzione…" : "comando…", text: $input)
                     .textFieldStyle(.plain)
@@ -353,6 +356,7 @@ struct TerminalView: View {
         .onAppear {
             focused = true
             sess.warm()
+            sr.rescanTools()
             ToolRegistry.ensureNetcatShimIfNeeded()
             if tm.lines.isEmpty { tm.append("rhs build \(ToolRegistry.buildTag)", .info) }
         }
