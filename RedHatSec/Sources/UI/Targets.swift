@@ -49,16 +49,7 @@ struct TargetsView: View {
                     if o.targets.isEmpty { emptyState }
                     if !o.targets.isEmpty { strengthRow }
                     if filtered.isEmpty && !o.targets.isEmpty {
-                        VStack(spacing: 10) {
-                            Text("Nessun target coi filtri attivi")
-                                .font(.rhsCaption(12)).foregroundColor(.dim)
-                            Button("azzera filtri") {
-                                Haptics.tap()
-                                filter = nil; onlyCVE = false; rssiMin = -95
-                            }
-                            .font(.system(size: 11, weight: .bold)).foregroundColor(.redHat)
-                        }
-                        .frame(maxWidth: .infinity).padding(.vertical, 18)
+                        Text("nessun target coi filtri attivi").font(.caption).foregroundColor(.dim)
                     }
                     ForEach(filtered) { t in
                         TargetRow(t: t) {
@@ -79,10 +70,8 @@ struct TargetsView: View {
 
     // filtri: potenza segnale minima + solo target con CVE note (≥7 CVSS nel catalogo)
     private var strengthRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "cellularbars")
-                    .font(.system(size: 10, weight: .heavy)).foregroundColor(.redHat)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
                 Text("SEGNALE ≥ \(rssiMin) dBm").font(.system(size: 10, weight: .bold, design: .rounded)).foregroundColor(.dim)
                 Spacer()
                 Chip(text: onlyCVE ? "CVE ✓ ON" : "CVE OFF", active: onlyCVE) { onlyCVE.toggle() }
@@ -90,7 +79,7 @@ struct TargetsView: View {
             Slider(value: Binding(get: { Double(rssiMin) }, set: { rssiMin = Int($0) }), in: -95...(-35), step: 5)
                 .tint(.redHat)
         }
-        .padding(12).card()
+        .padding(10).card()
     }
 
     private var filterChips: some View {
@@ -110,9 +99,7 @@ struct TargetsView: View {
     private var emptyState: some View {
         EmptyState(icon: "antenna.radiowaves.left.and.right.slash",
                    title: "Nessun target",
-                   subtitle: "Esegui uno scan dal tab Orchestrator per popolare la lista.",
-                   actionTitle: "AVVIA SCAN",
-                   action: { o.startScan() })
+                   subtitle: "Esegui uno scan dal tab Orchestrator.")
     }
 
     @ViewBuilder
@@ -260,59 +247,40 @@ struct NFCDumpDetail: View {
 struct TargetRow: View {
     let t: TargetDevice
     let tap: () -> Void
-    private var pc: Color { protoColor(t.proto) }
     var body: some View {
         Button(action: { Haptics.tap(); tap() }) {
             HStack(spacing: 12) {
                 ZStack {
-                    Circle().fill(pc.opacity(0.14)).frame(width: 42, height: 42)
-                    Circle().strokeBorder(pc.opacity(0.35), lineWidth: 1).frame(width: 42, height: 42)
+                    Circle().fill(protoColor(t.proto).opacity(0.15)).frame(width: 40, height: 40)
                     Image(systemName: t.proto.icon).font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(pc)
+                        .foregroundColor(protoColor(t.proto))
                 }
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(t.name).font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundColor(.white).lineLimit(1)
                     HStack(spacing: 6) {
-                        Text(t.name).font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundColor(.white).lineLimit(1)
-                        if t.extra["autoArm"] == "1" {
-                            Pill(text: "AUTO", color: .ok, icon: "bolt.fill")
-                        }
-                    }
-                    HStack(spacing: 6) {
-                        Text(t.via).font(.system(size: 10, weight: .medium, design: .rounded)).foregroundColor(.dim)
+                        Text(t.via).font(.system(size: 10)).foregroundColor(.dim)
                         let cve = cveCountFor(t)
                         if cve > 0 {
-                            HStack(spacing: 3) {
-                                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8))
-                                Text("CVE \(cve)").font(.system(size: 9, weight: .bold, design: .monospaced))
-                            }
-                            .foregroundColor(.bad)
+                            Text("CVE:\(cve)").font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .foregroundColor(.bad)
+                        }
+                        if t.extra["autoArm"] == "1" {
+                            Pill(text: "AUTO-ARM", color: .ok)
                         }
                         if let ports = t.extra["open"], !ports.isEmpty {
                             Text(ports).font(.system(size: 10, design: .monospaced)).foregroundColor(.ok).lineLimit(1)
                         }
                         if let sec = t.extra["sec"] {
-                            Text(sec).font(.system(size: 10, weight: .semibold, design: .rounded)).foregroundColor(.warn).lineLimit(1)
+                            Text(sec).font(.system(size: 10)).foregroundColor(.warn).lineLimit(1)
                         }
                     }
                 }
-                Spacer(minLength: 0)
-                VStack(alignment: .trailing, spacing: 3) {
-                    RSSIMeter(rssi: t.rssi, color: pc)
-                    Text("\(t.rssi)").font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundColor(.dim)
-                }
-                Image(systemName: "chevron.right").font(.caption2).foregroundColor(.dim)
+                Spacer()
+                RSSIMeter(rssi: t.rssi, color: protoColor(t.proto))
+                Image(systemName: "chevron.right").font(.caption).foregroundColor(.dim)
             }
-            .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: RH.radius, style: .continuous)
-                    .fill(LinearGradient(colors: [Color.surfaceHi, Color.surface],
-                                         startPoint: .topLeading, endPoint: .bottomTrailing))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: RH.radius, style: .continuous)
-                    .strokeBorder(pc.opacity(0.22), lineWidth: 1)
-            )
+            .padding(14).card()
         }
         .buttonStyle(ScaleButton())
     }

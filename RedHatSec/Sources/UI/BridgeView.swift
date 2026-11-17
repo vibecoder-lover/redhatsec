@@ -26,8 +26,7 @@ struct BridgeView: View {
 
     private var joinSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionHeader(title: "Rete target", icon: "antenna.radiowaves.left.and.right", color: .info)
-            Text("la radio dell'ESP entra in questa rete").font(.caption2).foregroundColor(.dim)
+            Text("RETE TARGET — la radio dell'ESP attacca qui").font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
             TextField("SSID rete target", text: $targetSSID)
                 .textFieldStyle(.plain).font(.system(size: 12, design: .monospaced))
                 .padding(10)

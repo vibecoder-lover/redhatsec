@@ -4,8 +4,6 @@ import SwiftUI
 struct RedHatSecApp: App {
     @StateObject private var o = Orchestrator()
 
-    init() { RHAppearance.configure() }
-
     var body: some Scene {
         WindowGroup {
             TabView {

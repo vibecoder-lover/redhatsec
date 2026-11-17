@@ -62,17 +62,10 @@ struct Chip: View {
         Button(action: { Haptics.tap(); action() }) {
             Text(text)
                 .font(.system(size: 11, weight: .bold, design: .rounded))
-                .padding(.horizontal, 13).padding(.vertical, 7)
-                .background(
-                    Capsule().fill(active
-                        ? LinearGradient(colors: [.redHat, Color(hex: 0xB40000)],
-                                         startPoint: .top, endPoint: .bottom)
-                        : LinearGradient(colors: [Color.surfaceHi, Color.surface],
-                                         startPoint: .top, endPoint: .bottom))
-                )
-                .overlay(Capsule().strokeBorder(active ? Color.white.opacity(0.12) : Color.white.opacity(0.08), lineWidth: 1))
+                .padding(.horizontal, 12).padding(.vertical, 7)
+                .background(Capsule().fill(active ? Color.redHat : Color.surface))
+                .overlay(Capsule().strokeBorder(active ? .clear : Color.white.opacity(0.1), lineWidth: 1))
                 .foregroundColor(active ? .white : .dim)
-                .shadow(color: active ? Color.redHat.opacity(0.35) : .clear, radius: 6, y: 2)
         }
         .buttonStyle(ScaleButton())
     }
@@ -83,47 +76,30 @@ struct VectorCard: View {
     let tap: () -> Void
     var body: some View {
         Button(action: { Haptics.tap(); tap() }) {
-            VStack(alignment: .leading, spacing: 9) {
-                HStack(spacing: 5) {
-                    Image(systemName: v.proto.icon).font(.system(size: 11, weight: .bold))
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: v.proto.icon).font(.system(size: 12, weight: .bold))
                         .foregroundColor(protoColor(v.proto))
-                    Text(v.proto.rawValue.uppercased())
-                        .font(.system(size: 8, weight: .heavy, design: .rounded))
-                        .tracking(0.6).foregroundColor(.dim)
-                    Spacer(minLength: 0)
-                    Text(String(format: "%.1f", v.cvss))
-                        .font(.system(size: 10, weight: .heavy, design: .monospaced))
-                        .foregroundColor(v.sev.color)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Capsule().fill(v.sev.color.opacity(0.15)))
+                    Spacer()
+                    Circle().fill(v.sev.color).frame(width: 8, height: 8)
+                        .glow(v.sev.color, radius: 5)
                 }
                 Text(v.name).font(.system(size: 13, weight: .bold, design: .rounded))
                     .lineLimit(2).multilineTextAlignment(.leading)
                     .foregroundColor(.white)
                 Spacer(minLength: 0)
                 HStack(spacing: 6) {
-                    Circle().fill(v.sev.color).frame(width: 6, height: 6).glow(v.sev.color, radius: 4)
                     Text(v.ref).font(.system(size: 9, design: .monospaced)).foregroundColor(.dim).lineLimit(1)
-                    Spacer(minLength: 0)
+                    Spacer()
+                    Text(String(format: "%.1f", v.cvss)).font(.system(size: 10, weight: .heavy))
+                        .foregroundColor(v.sev.color)
                 }
             }
             .padding(12)
-            .frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(LinearGradient(colors: [Color.surfaceHi, Color.surface],
-                                         startPoint: .topLeading, endPoint: .bottomTrailing))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(LinearGradient(colors: [v.sev.color.opacity(0.38), protoColor(v.proto).opacity(0.12)],
-                                                 startPoint: .topLeading, endPoint: .bottomTrailing),
-                                  lineWidth: 1)
-            )
-            .overlay(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: 2).fill(v.sev.color)
-                    .frame(width: 24, height: 3).padding(.leading, 12).padding(.top, 7)
-            }
+            .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
+            .background(RoundedRectangle(cornerRadius: 16).fill(Color.surface))
+            .overlay(RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(v.sev.color.opacity(0.25), lineWidth: 1))
         }
         .buttonStyle(ScaleButton())
     }

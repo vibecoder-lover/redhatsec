@@ -47,17 +47,13 @@ struct CardBG: ViewModifier {
     func body(content: Content) -> some View {
         content
             .background(
-                RoundedRectangle(cornerRadius: RH.radius, style: .continuous)
-                    .fill(LinearGradient(colors: [Color.surfaceHi, Color.surface],
-                                         startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .shadow(color: .black.opacity(0.35), radius: 12, y: 8)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.surface)
+                    .shadow(color: .black.opacity(0.4), radius: 10, y: 6)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: RH.radius, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(colors: [Color.white.opacity(0.10), Color.white.opacity(0.03)],
-                                       startPoint: .top, endPoint: .bottom),
-                        lineWidth: 1)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.07), lineWidth: 1)
             )
     }
 }
@@ -149,18 +145,9 @@ enum RHAppearance {
 
 // MARK: - Shared components
 
-// sfondo comune: nero + due aloni radiali (rosso in alto, blu in basso)
+// sfondo comune: piatto, come prima (mantiene un unico punto da cambiare)
 struct RHBackground: View {
-    var body: some View {
-        ZStack {
-            Color.bg
-            RadialGradient(colors: [Color.redHat.opacity(0.14), .clear],
-                           center: .topLeading, startRadius: 8, endRadius: 430)
-            RadialGradient(colors: [Color.info.opacity(0.08), .clear],
-                           center: .bottomTrailing, startRadius: 8, endRadius: 380)
-        }
-        .ignoresSafeArea()
-    }
+    var body: some View { Color.bg.ignoresSafeArea() }
 }
 
 struct SectionHeader: View {
@@ -169,19 +156,10 @@ struct SectionHeader: View {
     var color: Color = .dim
     var trailing: String? = nil
     var body: some View {
-        HStack(spacing: 7) {
-            if let icon {
-                Image(systemName: icon).font(.system(size: 11, weight: .heavy)).foregroundColor(color)
-            }
-            Text(title.uppercased())
-                .font(.system(size: 11, weight: .heavy, design: .rounded))
-                .tracking(0.8)
-                .foregroundColor(color)
-            Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1)
-            if let trailing {
-                Text(trailing).font(.rhsMono(10)).foregroundColor(.dim)
-            }
-        }
+        Text(trailing.map { "\(title.uppercased()) — \($0)" } ?? title.uppercased())
+            .font(.system(size: 11, weight: .bold, design: .rounded))
+            .foregroundColor(color)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -193,30 +171,22 @@ struct EmptyState: View {
     var action: (() -> Void)? = nil
     var body: some View {
         VStack(spacing: 14) {
-            ZStack {
-                Circle().fill(Color.surfaceHi).frame(width: 84, height: 84)
-                Circle().strokeBorder(Color.white.opacity(0.06), lineWidth: 1).frame(width: 84, height: 84)
-                Image(systemName: icon).font(.system(size: 34, weight: .light)).foregroundColor(.dim)
-            }
-            Text(title).font(.system(size: 17, weight: .heavy, design: .rounded))
+            Image(systemName: icon)
+                .font(.system(size: 42, weight: .light)).foregroundColor(.dim)
+            Text(title).font(.headline)
             if let subtitle {
-                Text(subtitle).font(.rhsCaption(12)).foregroundColor(.dim)
-                    .multilineTextAlignment(.center).padding(.horizontal, 24)
+                Text(subtitle).font(.caption).foregroundColor(.dim)
+                    .multilineTextAlignment(.center)
             }
             if let actionTitle, let action {
-                Button {
-                    Haptics.tap(); action()
-                } label: {
+                Button(action: { Haptics.tap(); action() }) {
                     Text(actionTitle)
-                        .font(.system(size: 13, weight: .heavy, design: .rounded))
-                        .padding(.horizontal, 18).padding(.vertical, 10)
-                        .background(Capsule().fill(Color.redHat))
-                        .foregroundColor(.white)
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
                 }
-                .buttonStyle(ScaleButton())
+                .foregroundColor(.redHat)
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 36)
+        .padding(.vertical, 30)
     }
 }

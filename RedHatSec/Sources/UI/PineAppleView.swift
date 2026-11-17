@@ -29,12 +29,12 @@ struct PineAppleView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 statusRow
-                rogueSection.padding(14).card()
-                clientsSection.padding(14).card()
-                reconSection.padding(14).card()
-                trafficSection.padding(14).card()
-                exploitSection.padding(14).card()
-                logSection.padding(14).card()
+                rogueSection
+                clientsSection
+                reconSection
+                trafficSection
+                exploitSection
+                logSection
             }
             .padding(16)
         }
@@ -339,19 +339,13 @@ struct PineButton: View {
             Task { await action(); spin = false }
         } label: {
             Text(label)
-                .font(.system(size: 12, weight: .heavy, design: .rounded))
+                .font(.system(size: 12, weight: .bold))
                 .foregroundColor(.white.opacity(spin ? 0.4 : 0.95))
                 .padding(.vertical, 9)
                 .frame(maxWidth: .infinity)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(color.opacity(spin ? 0.10 : 0.18))
-                )
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(color.opacity(0.5), lineWidth: 1))
-                .shadow(color: enabled && !spin ? color.opacity(0.25) : .clear, radius: 6, y: 2)
+                .background(RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.18)))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(color.opacity(0.5), lineWidth: 1))
         }
-        .buttonStyle(ScaleButton())
         .disabled(spin || !enabled)
         .opacity(enabled ? 1 : 0.45)
     }

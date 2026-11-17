@@ -14,11 +14,8 @@ struct DashboardView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
-                    hero
                     statusRow
                     updaterRow
-                    SectionHeader(title: "Radar", icon: "dot.radiowaves.left.and.right",
-                                  color: .redHat, trailing: phaseLabel)
                     RadarView(targets: o.targets, scanning: o.phase == .scan || o.phase == .enumerate)
                         .frame(height: 300)
                         .overlay(radarButton)
@@ -31,8 +28,7 @@ struct DashboardView: View {
                 .animation(.easeInOut(duration: 0.25), value: o.phase)
             }
             .background(RHBackground())
-            .navigationTitle("")
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationTitle("RedHat Sec")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
@@ -70,52 +66,6 @@ struct DashboardView: View {
                 Text("Scrive veramente sui device (GATT write, comandi di rete). Solo su target autorizzati.")
             }
         }
-    }
-
-    // MARK: - Header
-
-    private var phaseLabel: String {
-        switch o.phase {
-        case .idle: return "idle"
-        case .scan: return "scanning"
-        case .enumerate: return "enumerating"
-        case .match: return "matching"
-        case .armed: return "armed"
-        case .execute: return "running"
-        case .report: return "report"
-        }
-    }
-
-    private var phaseBlurb: String {
-        switch o.phase {
-        case .idle: return "Pronto — avvia uno scan per popolare i target."
-        case .scan: return "Scansione radio in corso…"
-        case .enumerate: return "Enumerazione servizi e fingerprint."
-        case .match: return "Correlazione vettori e CVE note."
-        case .armed: return "Piano pronto — \(o.plan.count) step da eseguire."
-        case .execute: return "Esecuzione in corso — non chiudere l'app."
-        case .report: return "Report pronto — controlla la scheda Report."
-        }
-    }
-
-    private var hero: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(LinearGradient(colors: [.redHat, Color(hex: 0x7A0000)],
-                                         startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 48, height: 48)
-                Image(systemName: "shield.lefthalf.filled")
-                    .font(.system(size: 21, weight: .bold)).foregroundColor(.white)
-            }
-            .glow(.redHat, radius: 10, on: o.phase != .idle)
-            VStack(alignment: .leading, spacing: 3) {
-                Text("RedHat Sec").font(.system(size: 21, weight: .heavy, design: .rounded))
-                Text(phaseBlurb).font(.rhsCaption(11)).foregroundColor(.dim).lineLimit(2)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(14).card()
     }
 
     private var statusRow: some View {
@@ -245,16 +195,8 @@ struct DashboardView: View {
     @ViewBuilder
     private var actionArea: some View {
         if o.phase == .execute || o.phase == .scan || o.phase == .enumerate {
-            VStack(spacing: 10) {
-                HStack(spacing: 8) {
-                    Image(systemName: "gearshape.2.fill")
-                        .font(.system(size: 11, weight: .heavy)).foregroundColor(.warn)
-                    Text(o.currentStep.isEmpty ? "working…" : o.currentStep)
-                        .font(.rhsCaption(12)).lineLimit(1)
-                    Spacer()
-                    Text("\(Int(o.progress * 100))%")
-                        .font(.rhsMono(11)).foregroundColor(.warn)
-                }
+            VStack(spacing: 8) {
+                HStack { Text(o.currentStep.isEmpty ? "working…" : o.currentStep).font(.footnote) ; Spacer() }
                 GeometryReader { g in
                     ZStack(alignment: .leading) {
                         Capsule().fill(Color.surfaceHi)
@@ -270,24 +212,18 @@ struct DashboardView: View {
     }
 
     private var recentLogs: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 7) {
-                Image(systemName: "text.alignleft")
-                    .font(.system(size: 11, weight: .heavy)).foregroundColor(.dim)
-                Text("LIVE JOURNAL").font(.system(size: 11, weight: .heavy, design: .rounded)).tracking(0.8).foregroundColor(.dim)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("LIVE JOURNAL").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.dim)
                 Spacer()
-                Button("apri console") { showConsole = true }
-                    .font(.rhsCaption(11)).foregroundColor(.redHat)
+                Button("apri console") { showConsole = true }.font(.caption).foregroundColor(.redHat)
             }
             ForEach(o.logs.suffix(5)) { l in
                 LogLine(l: l)
             }
             if o.logs.isEmpty {
-                HStack(spacing: 8) {
-                    Image(systemName: "terminal").font(.system(size: 11)).foregroundColor(.dim)
-                    Text("journal vuoto — premi SCAN")
-                        .font(.rhsMono(11)).foregroundColor(.dim)
-                }
+                Text("journal vuoto — premi SCAN")
+                    .font(.system(size: 12, design: .monospaced)).foregroundColor(.dim)
             }
         }
         .padding(14).card()
@@ -301,18 +237,15 @@ struct RadarView: View {
     var body: some View {
         Group {
             if scanning {
-                TimelineView(.animation) { t in canvas(t.date) }
+                // sweep + blip pulsano solo durante lo scan: 60fps
+                TimelineView(.animation) { t in canvas(t.date, animated: true) }
             } else {
-                // idle: 1 redraw/1.5s invece di 60fps
-                TimelineView(.periodic(from: .now, by: 1.5)) { t in canvas(t.date) }
+                // idle: un solo render statico, zero timer → niente scatti
+                canvas(Date(), animated: false)
             }
         }
         .background(
-            ZStack {
-                RadialGradient(colors: [.surfaceHi, .bg], center: .center, startRadius: 10, endRadius: 170)
-                RadialGradient(colors: [Color.redHat.opacity(0.10), .clear],
-                               center: .center, startRadius: 20, endRadius: 220)
-            }
+            RadialGradient(colors: [.surfaceHi, .bg], center: .center, startRadius: 10, endRadius: 170)
         )
         .overlay(
             Circle().strokeBorder(Color.white.opacity(0.05), lineWidth: 1).padding(2)
@@ -321,12 +254,12 @@ struct RadarView: View {
         .card()
     }
 
-    private func canvas(_ date: Date) -> some View {
+    private func canvas(_ date: Date, animated: Bool) -> some View {
         Canvas { ctx, size in
             let now = date.timeIntervalSinceReferenceDate
             RadarDrawing.rings(ctx, size)
-            RadarDrawing.sweep(ctx, size, now)
-            RadarDrawing.blips(ctx, size, targets, now)
+            if animated { RadarDrawing.sweep(ctx, size, now) }
+            RadarDrawing.blips(ctx, size, targets, now, animated: animated)
         }
     }
 }
@@ -369,7 +302,8 @@ enum RadarDrawing {
         ctx.stroke(edge, with: .color(.redHat.opacity(0.9)), lineWidth: 2)
     }
 
-    static func blips(_ ctx: GraphicsContext, _ size: CGSize, _ targets: [TargetDevice], _ now: Double) {
+    static func blips(_ ctx: GraphicsContext, _ size: CGSize, _ targets: [TargetDevice],
+                      _ now: Double, animated: Bool) {
         let c = center(size)
         let r = min(size.width, size.height) / 2 - 6
         for (i, t) in targets.enumerated() {
@@ -378,7 +312,7 @@ enum RadarDrawing {
             let dist = CGFloat(min(90, max(30, -t.rssi))) / 90
             let rr = r * (0.25 + 0.65 * dist)
             let pos = CGPoint(x: c.x + rr * CGFloat(cos(aRad)), y: c.y + rr * CGFloat(sin(aRad)))
-            let pulse = 0.5 + 0.5 * sin(now * 3 + Double(i) * 1.3)
+            let pulse = animated ? 0.5 + 0.5 * sin(now * 3 + Double(i) * 1.3) : 0.5
             let ds = CGFloat(8 + pulse * 4)
             let dot = Path(ellipseIn: CGRect(x: pos.x - ds / 2, y: pos.y - ds / 2, width: ds, height: ds))
             ctx.fill(dot, with: .color(protoColor(t.proto).opacity(0.85)))
@@ -436,25 +370,13 @@ struct StatCard: View {
     let color: Color
     let icon: String
     var body: some View {
-        VStack(spacing: 5) {
-            HStack(spacing: 5) {
-                Image(systemName: icon).font(.system(size: 12, weight: .bold)).foregroundColor(color)
-                Text(value).font(.system(size: 24, weight: .heavy, design: .rounded))
-            }
+        VStack(spacing: 4) {
+            Image(systemName: icon).font(.system(size: 13, weight: .bold)).foregroundColor(color)
+            Text(value).font(.system(size: 24, weight: .heavy, design: .rounded))
             Text(label).font(.system(size: 10, weight: .semibold)).foregroundColor(.dim)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.surface)
-                .overlay(alignment: .top) {
-                    RoundedRectangle(cornerRadius: 2).fill(color.opacity(0.7))
-                        .frame(width: 24, height: 3).padding(.top, 7)
-                }
-        )
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .strokeBorder(color.opacity(0.18), lineWidth: 1))
+        .padding(.vertical, 12).card()
     }
 }
 
@@ -463,17 +385,13 @@ struct Pill: View {
     let color: Color
     var icon: String? = nil
     var body: some View {
-        HStack(spacing: 5) {
-            if let icon {
-                Image(systemName: icon).font(.system(size: 9, weight: .heavy))
-            }
-            Text(text).font(.system(size: 11, weight: .bold, design: .rounded))
-                .lineLimit(1).minimumScaleFactor(0.75)
-        }
-        .padding(.horizontal, 10).padding(.vertical, 5)
-        .background(Capsule().fill(color.opacity(0.14)))
-        .overlay(Capsule().strokeBorder(color.opacity(0.5), lineWidth: 1))
-        .foregroundColor(color)
+        Text(text)
+            .font(.system(size: 11, weight: .bold, design: .rounded))
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Capsule().fill(color.opacity(0.14)))
+            .overlay(Capsule().strokeBorder(color.opacity(0.5), lineWidth: 1))
+            .foregroundColor(color)
+            .lineLimit(1).minimumScaleFactor(0.75)
     }
 }
 
@@ -512,13 +430,7 @@ struct ConsoleView: View {
                             .onDisappear { atBottom = false }
                     }.padding(12)
                 }
-                .background(
-                    ZStack {
-                        Color(hex: 0x070709)
-                        RadialGradient(colors: [Color.redHat.opacity(0.06), .clear],
-                                       center: .top, startRadius: 10, endRadius: 360)
-                    }.ignoresSafeArea()
-                )
+                .background(Color(hex: 0x070709).ignoresSafeArea())
                 .onChange(of: o.logs.count) { _ in
                     // non strappare la vista a chi sta leggendo righe vecchie
                     guard atBottom else { return }
@@ -527,17 +439,6 @@ struct ConsoleView: View {
             }
             .navigationTitle("audit_journal")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        Haptics.tap()
-                        o.logs.removeAll()
-                    } label: {
-                        Image(systemName: "trash")
-                    }
-                    .disabled(o.logs.isEmpty)
-                }
-            }
         }
         .preferredColorScheme(.dark)
     }

@@ -41,33 +41,16 @@ struct ReportView: View {
     }
 
     private func content(_ rep: Report) -> some View {
-        var sevCount: [Sev: Int] = [:]
-        for f in rep.findings { sevCount[f.sev, default: 0] += 1 }
-        return ScrollView {
+        ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "doc.text.fill")
-                            .font(.system(size: 15, weight: .bold)).foregroundColor(.redHat)
-                        Text(rep.title).font(.system(size: 19, weight: .heavy, design: .rounded))
-                    }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(rep.title).font(.system(size: 19, weight: .heavy, design: .rounded))
                     Text("\(rep.targets.count) targets · \(rep.findings.count) findings · \(DateFormatter.localizedString(from: rep.date, dateStyle: .medium, timeStyle: .short))")
-                        .font(.rhsCaption(11)).foregroundColor(.dim)
-                    HStack(spacing: 6) {
-                        ForEach(Sev.allCases) { s in
-                            if let n = sevCount[s], n > 0 {
-                                Pill(text: "\(s.rawValue) \(n)", color: s.color)
-                            }
-                        }
-                        Spacer(minLength: 0)
-                    }
+                        .font(.caption).foregroundColor(.dim)
                 }
                 .padding(16).card()
 
                 severityBars(rep)
-
-                SectionHeader(title: "Findings", icon: "flag.2.crossed", color: .redHat,
-                              trailing: "\(rep.findings.count)")
 
                 ForEach(rep.findings.sorted { $0.sev < $1.sev }) { f in
                     FindingCard(f: f)

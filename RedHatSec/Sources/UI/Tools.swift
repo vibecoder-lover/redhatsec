@@ -108,44 +108,18 @@ struct ToolsTab: View {
     @EnvironmentObject private var o: Orchestrator
     @State private var mode = 0
 
-    private let modes: [(String, String)] = [
-        ("Terminal", "terminal.fill"),
-        ("Builder", "hammer.fill"),
-        ("Forge", "qrcode"),
-        ("NFC", "wave.3.right.circle.fill"),
-        ("PineApple", "wifi.router.fill"),
-    ]
-
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(Array(modes.enumerated()), id: \.offset) { i, m in
-                            Button {
-                                Haptics.tap()
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { mode = i }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: m.1).font(.system(size: 11, weight: .bold))
-                                    Text(m.0).font(.system(size: 12, weight: .bold, design: .rounded))
-                                }
-                                .padding(.horizontal, 13).padding(.vertical, 8)
-                                .background(Capsule().fill(mode == i
-                                    ? LinearGradient(colors: [.redHat, Color(hex: 0xB40000)],
-                                                     startPoint: .top, endPoint: .bottom)
-                                    : LinearGradient(colors: [Color.surfaceHi, Color.surface],
-                                                     startPoint: .top, endPoint: .bottom)))
-                                .overlay(Capsule().strokeBorder(mode == i ? Color.white.opacity(0.12) : Color.white.opacity(0.07), lineWidth: 1))
-                                .foregroundColor(mode == i ? .white : .dim)
-                                .shadow(color: mode == i ? Color.redHat.opacity(0.3) : .clear, radius: 6, y: 2)
-                            }
-                            .buttonStyle(ScaleButton())
-                        }
-                    }
-                    .padding(.horizontal, 12)
+                Picker("tool", selection: $mode) {
+                    Text("Terminal").tag(0)
+                    Text("Builder").tag(1)
+                    Text("Forge").tag(2)
+                    Text("NFC").tag(3)
+                    Text("PineApple").tag(4)
                 }
-                .padding(.vertical, 10)
+                .pickerStyle(.segmented)
+                .padding(10)
                 switch mode {
                 case 0: TerminalView().environmentObject(tm)
                 case 1: BuilderView().environmentObject(tm)
