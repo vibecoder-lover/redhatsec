@@ -765,10 +765,19 @@ final class TCPBridge: NSObject, ObservableObject {
     }
 
     func deauth(mac: String, ch: Int, count: Int = 10) async -> Bool {
+        // radio unica: il firmware rifiuta la deauth con rogue AP su.
+        if rogueOn {
+            _ = await rogueStop()
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+        }
         guard var m = mac.replacingOccurrences(of: ":", with: "").hexBytes, m.count == 6 else { return false }
         m.append(UInt8(clamping: ch))
         m.append(UInt8(clamping: count))
         let r = await sendAwait(0x04, payload: m)
+        if r?.0 == 3 {
+            log("deauth rifiutata: rogue AP ancora attivo — STOP rogue e riprova")
+            return false
+        }
         log(r?.0 == 0 ? "deauth \(mac) ✓" : "deauth fallita")
         return r?.0 == 0
     }

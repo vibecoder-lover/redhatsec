@@ -24,6 +24,9 @@ enum DeviceNet {
                                    "pdp_ip0", "pdp_ip1", "pdp_ip2"]
 
     private static func pick(_ map: [String: String]) -> String {
+        // Personal Hotspot iPhone: 172.20.10.0/28 — vince su tutto (è l'IP
+        // raggiungibile dagli altri device della rete condivisa).
+        for (_, ip) in map where ip.hasPrefix("172.20.10.") { return ip }
         for k in priority { if let ip = map[k], !ip.isEmpty { return ip } }
         for (k, ip) in map {
             if skipPrefixes.contains(where: { k.hasPrefix($0) }) { continue }
@@ -32,6 +35,8 @@ enum DeviceNet {
         }
         return ""
     }
+
+    private static var lastDump = ""
 
     // `ifconfig` dal root: interfacce reali, priorità Wi-Fi/hotspot/cellulare
     static func ifconfigIPv4() -> String {
@@ -54,6 +59,11 @@ enum DeviceNet {
                 let ip = String(parts[1])
                 if map[current] == nil && !ip.hasPrefix("127.") { map[current] = ip }
             }
+        }
+        let dump = map.map { "\($0)=\($1)" }.sorted().joined(separator: " ")
+        if dump != lastDump {
+            lastDump = dump
+            DebugLog.shared.add("[net] ifconfig: \(dump.isEmpty ? "(vuoto)" : dump)")
         }
         return pick(map)
     }

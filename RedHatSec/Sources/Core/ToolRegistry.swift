@@ -95,27 +95,20 @@ enum ToolRegistry {
         echo "nc shim: listen senza porta" >&2
         exit 1
       fi
-      # probe di sintassi su una porta libera: BSD/ncat vs GNU/busybox
-      probe_listen() {
-        "$REAL" "$@" >/dev/null 2>&1 &
-        tp=$!
-        sleep 0.4
-        if kill -0 "$tp" 2>/dev/null; then
-          kill "$tp" 2>/dev/null
-          wait "$tp" 2>/dev/null
-          return 0
-        fi
-        wait "$tp" 2>/dev/null
-        return 1
-      }
-      PP=55321
-      if probe_listen "$@" -p "$PP"; then
-        exec "$REAL" "$@" -p "$port"
+      # porta già occupata? evita "Couldn't setup listening socket (err=-3)"
+      if "$REAL" -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1; then
+        echo "nc shim: porta $port già in ascolto — pkill nc e riprova" >&2
+        exit 1
       fi
-      if probe_listen "$@" "$PP"; then
+      [ -n "$RHS_NC_DEBUG" ] && echo "nc shim: REAL=$REAL porta=$port args=$*" >&2
+      # prima la forma -p (GNU/busybox); se il binario la rifiuta → porta posizionale
+      "$REAL" "$@" -p "$port"
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        echo "nc shim: '-p' rifiutata (rc=$rc) — provo porta posizionale" >&2
         exec "$REAL" "$@" "$port"
       fi
-      exec "$REAL" "$@" "$port"
+      exit "$rc"
     fi
 
     if [ "$plist" = 1 ] && [ -n "$port" ]; then
@@ -278,6 +271,17 @@ enum ToolRegistry {
             done(false)
             return
         }
+        // pacchetti inesistenti nei repo iOS: niente apt/404 a vuoto
+        let notPackaged: [String: String] = [
+            "hcxtools": "hcxtools non è nei repo iOS — il PMKID/EAPOL lo cattura la radio ESP (vettore PMKID).",
+            "hcxdumptool": "hcxdumptool non è nei repo iOS — usa la cattura PMKID dell'ESP.",
+            "killerbee": "killerbee richiede un dongle Zigbee (non supportato su iPhone)."
+        ]
+        if let msg = notPackaged[s.pkg] {
+            line("[install] \(tool): \(msg)")
+            done(false)
+            return
+        }
         DispatchQueue.global(qos: .utility).async {
             // già installato: la detection app può fallire, quindi verifica dal root
             if rootHas(s.bins) {
@@ -355,14 +359,21 @@ enum ToolRegistry {
                 }
             }
 
-            // PATH 2 — userland: download + estrazione in appBinDir
+            // PATH 2 — apt fetch via ROOT (la sandbox app non può eseguire sh /var/jb)
             if apt != nil && dpkgDeb != nil {
-                line("[install] apt fetch \(s.pkg)…")
-                let fetch = sh.run("sh", args: ["-c",
-                    "cd \(workDir)/tmp && apt-get -o Dir::Cache::archives=\(workDir)/tmp -o Dir::State::lists=/var/jb/var/lib/apt/lists download \(s.pkg) 2>&1; echo \"fetch-exit=$?\""], timeout: 180)
-                line(fetch.stdout.isEmpty ? fetch.stderr : fetch.stdout)
-                let extract = sh.run("sh", args: ["-c",
-                    "cd \(workDir)/tmp && ls *.deb >/dev/null 2>&1 && for d in *.deb; do dpkg-deb -x \"\(workDir)/tmp/$d\" \(workDir)/extracted; done && cp \(workDir)/extracted/var/jb/usr/bin/* \(appBinDir)/ 2>/dev/null; cp \(workDir)/extracted/usr/bin/* \(appBinDir)/ 2>/dev/null; cp \(workDir)/extracted/usr/local/bin/* \(appBinDir)/ 2>/dev/null; chmod 755 \(appBinDir)/* 2>/dev/null; rm -f \(workDir)/tmp/*.deb; true"], timeout: 120)
+                line("[install] apt fetch \(s.pkg) (root)…")
+                let fetch = RootShell.shared.runSync(
+                    "cd \(workDir)/tmp && apt-get download \(s.pkg) 2>&1; echo fetch-exit=$?",
+                    timeout: 180)
+                line(String((fetch.stdout.isEmpty ? fetch.stderr : fetch.stdout).suffix(600)))
+                let extract = RootShell.shared.runSync(
+                    "cd \(workDir)/tmp && ls *.deb >/dev/null 2>&1 && for d in *.deb; do dpkg-deb -x \"\(workDir)/tmp/$d\" \(workDir)/extracted; done; "
+                    + "mkdir -p \(appBinDir); cp \(workDir)/extracted/var/jb/usr/bin/* \(appBinDir)/ 2>/dev/null; "
+                    + "cp \(workDir)/extracted/usr/bin/* \(appBinDir)/ 2>/dev/null; "
+                    + "cp \(workDir)/extracted/usr/local/bin/* \(appBinDir)/ 2>/dev/null; "
+                    + "chmod 755 \(appBinDir)/* 2>/dev/null; rm -f \(workDir)/tmp/*.deb; true",
+                    timeout: 180)
+                _ = extract
                 let found = s.bins.first { sh.resolve($0) != nil } != nil || rootHas(s.bins)
                 if found {
                     sh.rescanTools()
@@ -371,7 +382,7 @@ enum ToolRegistry {
                     done(true)
                     return
                 }
-                line("[install] apt path fallito (app=mobile, apt vuole root per lock/index) → Sileo")
+                line("[install] apt fetch: pacchetto non presente nei repo configurati")
             } else {
                 line("[install] apt/dpkg-deb non presenti → Sileo")
             }
