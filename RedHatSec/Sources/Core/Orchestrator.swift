@@ -187,6 +187,11 @@ final class Orchestrator: ObservableObject {
             DispatchQueue.global().asyncAfter(deadline: .now() + 7) { c.resume() }
         }
 
+        // LAN nativa: l'iPhone scansiona la propria /24 (nessun ESP richiesto)
+        if phase == .scan {
+            for t in await lanScan() { addTarget(t) }
+        }
+
         // NFC risultato
         if let nfc = nfcTask, let dump = await nfc.value {
             var t = TargetDevice(name: dump.title, proto: .nfc, rssi: 0, via: "NFC field")
@@ -257,6 +262,35 @@ final class Orchestrator: ObservableObject {
         let p = ports; let b = banners
         lock.unlock()
         return (p, b.joined(separator: " | "))
+    }
+
+    // LAN nativa: l'iPhone scansiona la propria /24 (TCP connect), senza ESP
+    private func lanScan() async -> [TargetDevice] {
+        let me = DeviceNet.localIPv4()
+        guard !me.isEmpty else {
+            log("LAN: nessun IP Wi-Fi (hotspot spento o permesso rete locale negato)", .warn)
+            return []
+        }
+        log("LAN nativo \(DeviceNet.localSubnetCIDR()) — TCP 80/443/22/62078…", .exec)
+        let found = await DeviceNet.lanSweep()
+        guard !found.isEmpty else {
+            log("LAN: nessun host con porte comuni (verifica permesso Rete locale)", .warn)
+            return []
+        }
+        var out: [TargetDevice] = []
+        for f in found {
+            var t = TargetDevice(name: f.ip, proto: .net, rssi: 0, via: "LAN iPhone")
+            t.extra["host"] = f.ip
+            t.extra["open"] = f.open.map(String.init).joined(separator: ",")
+            if f.ip == me {
+                t.name = "questo iPhone"
+            } else if f.open.contains(80), let title = await DeviceNet.httpTitle(f.ip) {
+                t.name = title
+            }
+            out.append(t)
+        }
+        log("LAN: \(out.count) host raggiungibili", .good)
+        return out
     }
 
     // MARK: - Matching

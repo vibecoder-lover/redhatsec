@@ -662,7 +662,7 @@ struct ForgeView: View {
     }
 
     @State private var kind: Kind = .revBash
-    @State private var host = ""
+    @State private var host = DeviceNet.localIPv4()
     @State private var port = "4444"
     @State private var path = "/login"
     @State private var qrVal = ""
@@ -852,7 +852,10 @@ struct ForgeView: View {
             .padding(16)
         }
         .background(RHBackground())
-        .onAppear { regenQR() }
+        .onAppear {
+            if host.isEmpty { host = DeviceNet.localIPv4() }
+            regenQR()
+        }
         .onChange(of: payload) { _ in regenQR() }
     }
 

