@@ -279,7 +279,7 @@ final class Orchestrator: ObservableObject {
             guard let l = line.firstIndex(of: "("), let r = line.firstIndex(of: ")"),
                   let at = line.range(of: " at ") else { continue }
             let ip = String(line[line.index(after: l)..<r])
-            let rest = line[at.upperBound...].split(separator: " ").first.map(String.init) ?? ""
+            let rest = line[at.upperBound...].split(separator: " ").first.map { String($0) } ?? ""
             if rest.count == 17, rest != "(incomplete)" { macByIP[ip] = rest.uppercased() }
         }
         let found = await DeviceNet.lanSweep()

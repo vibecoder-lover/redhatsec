@@ -103,8 +103,11 @@ extension DeviceNet {
         }
         return found
             .map { (ip: $0.key, open: $0.value.sorted()) }
-            .sorted { (Int($0.ip.split(separator: ".").last ?? "0") ?? 0) <
-                      (Int($1.ip.split(separator: ".").last ?? "0") ?? 0) }
+            .sorted { lastOctet($0.ip) < lastOctet($1.ip) }
+    }
+
+    private static func lastOctet(_ ip: String) -> Int {
+        Int(ip.components(separatedBy: ".").last ?? "0") ?? 0
     }
 
     // banner HTTP (Server header) + <title> per dare un nome leggibile ai target LAN
@@ -118,7 +121,7 @@ extension DeviceNet {
         var server = ""
         if let http = resp as? HTTPURLResponse,
            let s = http.value(forHTTPHeaderField: "Server") {
-            server = s.split(separator: " ").first.map(String.init) ?? s
+            server = s.split(separator: " ").first.map { String($0) } ?? s
             if server.count > 24 { server = String(server.prefix(24)) }
         }
 

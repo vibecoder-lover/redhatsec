@@ -1174,7 +1174,9 @@ final class NetScanner {
     }
 
     // risolve un endpoint Bonjour in IP:porta aprendo un TCP che chiudiamo subito
-    private func resolve(_ ep: NWEndpoint, completion: @escaping (String?) -> Void) {
+    // NB: NetworkExtension (importato più sotto per HotspotHelper) ha un suo
+    // NWEndpoint: serve il qualificatore esplicito del modulo Network.
+    private func resolve(_ ep: Network.NWEndpoint, completion: @escaping (String?) -> Void) {
         let lock = NSLock()
         var done = false
         func finish(_ v: String?) {
