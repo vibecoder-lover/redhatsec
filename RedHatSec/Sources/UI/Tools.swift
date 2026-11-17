@@ -151,6 +151,7 @@ struct TerminalView: View {
     @FocusState private var focused: Bool
     @State private var hist: [String] = []
     @State private var histIdx = -1
+    @State private var netIP = DeviceNet.cachedIPv4()
 
     private let quick: [(String, String)] = [
         ("whoami", "whoami"),
@@ -200,9 +201,9 @@ struct TerminalView: View {
         VStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    if !DeviceNet.localIPv4().isEmpty {
-                        Chip(text: "IP \(DeviceNet.localIPv4())", active: false) {
-                            input = DeviceNet.localIPv4()
+                    if !netIP.isEmpty {
+                        Chip(text: "IP \(netIP)", active: false) {
+                            input = netIP
                             focused = true
                         }
                     }
@@ -365,6 +366,10 @@ struct TerminalView: View {
             sr.rescanTools()
             ToolRegistry.ensureNetcatShimIfNeeded()
             if tm.lines.isEmpty { tm.append("rhs build \(ToolRegistry.buildTag)", .info) }
+            Task {
+                let ip = await DeviceNet.refresh()
+                if !ip.isEmpty { netIP = ip }
+            }
         }
     }
 }
@@ -859,7 +864,12 @@ struct ForgeView: View {
         }
         .background(RHBackground())
         .onAppear {
-            if host.isEmpty { host = DeviceNet.localIPv4() }
+            if host.isEmpty { host = DeviceNet.cachedIPv4() }
+            let initial = host
+            Task {
+                let ip = await DeviceNet.refresh()
+                if !ip.isEmpty && (host.isEmpty || host == initial) { host = ip }
+            }
             regenQR()
         }
         .onChange(of: payload) { _ in regenQR() }

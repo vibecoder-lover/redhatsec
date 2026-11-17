@@ -1,15 +1,69 @@
 import Foundation
 import Network
 
-// IP locale del device (iPhone): serve come default nei campi "attacker host"
-// e per costruire subnet/ping sweep senza dipendere dal bridge ESP.
+// IP del device (iPhone) usato per i default di rete. La verità viene da
+// `ifconfig` via root (come lo vedi in shell), con fallback getifaddrs.
+// Ordine: en0 (Wi-Fi), bridge0 (hotspot), pdp_ipN (cellulare) e mai utun/lo.
 enum DeviceNet {
-    static func localIPv4() -> String {
+    private static let lock = NSLock()
+    private static var cached = ""
+    private static let skipPrefixes = ["utun", "lo", "ipsec", "awdl", "llw",
+                                       "gif", "stf", "anpi"]
+
+    static func cachedIPv4() -> String {
+        lock.lock(); let v = cached; lock.unlock()
+        return v.isEmpty ? ifaddrsIPv4() : v
+    }
+
+    private static func store(_ ip: String) {
+        guard !ip.isEmpty else { return }
+        lock.lock(); cached = ip; lock.unlock()
+    }
+
+    private static let priority = ["en0", "en1", "bridge0", "pdp_ip0", "pdp_ip1", "pdp_ip2"]
+
+    private static func pick(_ map: [String: String]) -> String {
+        for k in priority { if let ip = map[k], !ip.isEmpty { return ip } }
+        for (k, ip) in map {
+            if skipPrefixes.contains(where: { k.hasPrefix($0) }) { continue }
+            if ip.hasPrefix("127.") || ip.hasPrefix("169.254.") { continue }
+            return ip
+        }
+        return ""
+    }
+
+    // `ifconfig` dal root: interfacce reali, priorità Wi-Fi/hotspot/cellulare
+    static func ifconfigIPv4() -> String {
+        let out = RootShell.shared.runSync("/sbin/ifconfig 2>/dev/null || ifconfig 2>/dev/null",
+                                           timeout: 12).stdout
+        guard !out.isEmpty else { return "" }
+        var map: [String: String] = [:]
+        var current = ""
+        for raw in out.split(separator: "\n") {
+            let line = String(raw)
+            if !line.hasPrefix(" ") && !line.hasPrefix("\t"),
+               let colon = line.firstIndex(of: ":") {
+                current = String(line[line.startIndex..<colon])
+                continue
+            }
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard t.hasPrefix("inet "), !current.isEmpty else { continue }
+            let parts = t.split(separator: " ")
+            if parts.count >= 2 {
+                let ip = String(parts[1])
+                if map[current] == nil && !ip.hasPrefix("127.") { map[current] = ip }
+            }
+        }
+        return pick(map)
+    }
+
+    // fallback in-process (nessun root): stessa priorità dell'ifconfig
+    static func ifaddrsIPv4() -> String {
         var addrs: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&addrs) == 0, let first = addrs else { return "" }
         defer { freeifaddrs(first) }
 
-        var fallback = ""
+        var map: [String: String] = [:]
         var cur: UnsafeMutablePointer<ifaddrs>? = first
         while let p = cur {
             defer { cur = p.pointee.ifa_next }
@@ -19,25 +73,41 @@ enum DeviceNet {
             let rc = getnameinfo(sa, socklen_t(sa.pointee.sa_len),
                                  &buf, socklen_t(buf.count), nil, 0, NI_NUMERICHOST)
             guard rc == 0 else { continue }
-            let ip = String(cString: buf)
             let name = String(cString: f.ifa_name)
-            if name == "en0" { return ip }
-            if ip.hasPrefix("169.254.") || ip.hasPrefix("127.") { continue }
-            if fallback.isEmpty { fallback = ip }
+            let ip = String(cString: buf)
+            if map[name] == nil && !ip.hasPrefix("127.") { map[name] = ip }
         }
-        return fallback
+        return pick(map)
+    }
+
+    static func localIPv4() -> String { cachedIPv4() }
+
+    // interroga il root e aggiorna la cache (authoritative, come ifconfig)
+    @discardableResult
+    static func refresh() async -> String {
+        let ip: String = await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .utility).async {
+                cont.resume(returning: ifconfigIPv4())
+            }
+        }
+        store(ip)
+        return ip.isEmpty ? cachedIPv4() : ip
+    }
+
+    static func refreshAsync() {
+        Task.detached(priority: .utility) { _ = await refresh() }
     }
 
     // "192.168.1.37" -> "192.168.1.0/24"
     static func localSubnetCIDR() -> String {
-        let ip = localIPv4()
+        let ip = cachedIPv4()
         let parts = ip.split(separator: ".")
         guard parts.count == 4 else { return "" }
         return "\(parts[0]).\(parts[1]).\(parts[2]).0/24"
     }
 
     static func localPrefix() -> String {
-        let ip = localIPv4()
+        let ip = cachedIPv4()
         let parts = ip.split(separator: ".")
         guard parts.count == 4 else { return "" }
         return "\(parts[0]).\(parts[1]).\(parts[2])."

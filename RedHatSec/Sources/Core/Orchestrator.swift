@@ -266,7 +266,7 @@ final class Orchestrator: ObservableObject {
 
     // LAN nativa: l'iPhone scansiona la propria /24 (TCP connect), senza ESP
     private func lanScan() async -> [TargetDevice] {
-        let me = DeviceNet.localIPv4()
+        let me = await DeviceNet.refresh()
         guard !me.isEmpty else {
             log("LAN: nessun IP Wi-Fi (hotspot spento o permesso rete locale negato)", .warn)
             return []

@@ -22,6 +22,7 @@ struct PineAppleView: View {
     @State private var dnsFwd = true   // default: internet reale + log (poison su richiesta)
     @State private var natOn = true
     @State private var traffic: [String] = []
+    @State private var netIP = DeviceNet.cachedIPv4()
 
     private let exploits = ExploitLibrary.all
 
@@ -42,6 +43,12 @@ struct PineAppleView: View {
         .background(RHBackground())
         .navigationTitle("PineApple")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            Task {
+                let ip = await DeviceNet.refresh()
+                if !ip.isEmpty { netIP = ip }
+            }
+        }
     }
 
     private var statusRow: some View {
@@ -58,7 +65,7 @@ struct PineAppleView: View {
 
     // Diagnostica rete: IP iPhone, tipo uplink, host del bridge
     private var netRow: some View {
-        let ip = DeviceNet.localIPv4()
+        let ip = netIP.isEmpty ? DeviceNet.cachedIPv4() : netIP
         let uplink = ip.isEmpty ? "no rete"
             : (ip.hasPrefix("172.20.10.") ? "hotspot iPhone"
                : (ip.hasPrefix("192.168.4.") ? "AP del bridge" : "Wi-Fi"))
