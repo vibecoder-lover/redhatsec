@@ -200,6 +200,12 @@ struct TerminalView: View {
         VStack(spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
+                    if !DeviceNet.localIPv4().isEmpty {
+                        Chip(text: "IP \(DeviceNet.localIPv4())", active: false) {
+                            input = DeviceNet.localIPv4()
+                            focused = true
+                        }
+                    }
                     ForEach(sr.availableTools.filter { t in
                         !ToolRegistry.specs.contains { $0.name == t || $0.bins.contains(t) }
                     }, id: \.self) { t in

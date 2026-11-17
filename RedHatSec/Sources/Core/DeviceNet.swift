@@ -107,21 +107,34 @@ extension DeviceNet {
                       (Int($1.ip.split(separator: ".").last ?? "0") ?? 0) }
     }
 
-    // titolo HTTP per dare un nome leggibile ai target LAN
+    // banner HTTP (Server header) + <title> per dare un nome leggibile ai target LAN
     static func httpTitle(_ host: String, port: UInt16 = 80) async -> String? {
         guard let url = URL(string: "http://\(host):\(port)/") else { return nil }
         var req = URLRequest(url: url)
         req.timeoutInterval = 2
         req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 16_1 like Mac OS X)", forHTTPHeaderField: "User-Agent")
-        guard let (data, _) = try? await URLSession.shared.data(for: req),
-              let body = String(data: data.prefix(8192), encoding: .utf8) else { return nil }
-        guard let open = body.range(of: "<title", options: .caseInsensitive),
-              let close = body.range(of: "</title>", options: .caseInsensitive),
-              let gt = body[open.upperBound...].firstIndex(of: ">"),
-              gt < close.lowerBound else { return nil }
-        let inner = body[body.index(after: gt)..<close.lowerBound]
-        let text = inner.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty || text.count > 48 ? nil : text
+        guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return nil }
+
+        var server = ""
+        if let http = resp as? HTTPURLResponse,
+           let s = http.value(forHTTPHeaderField: "Server") {
+            server = s.split(separator: " ").first.map(String.init) ?? s
+            if server.count > 24 { server = String(server.prefix(24)) }
+        }
+
+        var title = ""
+        if let body = String(data: data.prefix(8192), encoding: .utf8),
+           let open = body.range(of: "<title", options: .caseInsensitive),
+           let close = body.range(of: "</title>", options: .caseInsensitive),
+           let gt = body[open.upperBound...].firstIndex(of: ">"),
+           gt < close.lowerBound {
+            let inner = body[body.index(after: gt)..<close.lowerBound]
+            title = inner.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if title.count > 40 { title = String(title.prefix(40)) }
+        }
+
+        let parts = [server, title].filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }

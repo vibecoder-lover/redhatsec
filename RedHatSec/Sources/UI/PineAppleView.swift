@@ -58,11 +58,27 @@ struct PineAppleView: View {
     private var rogueSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             SectionHeader(title: "Rogue AP", icon: "wifi.router.fill", color: .redHat)
-            PineField("SSID evil-twin", $rogueSsid)
+            HStack(spacing: 8) {
+                PineField("SSID evil-twin", $rogueSsid)
+                Button {
+                    rogueSsid = Self.freshSSID()
+                    Haptics.tap()
+                } label: {
+                    Image(systemName: "dice")
+                        .font(.system(size: 14, weight: .bold))
+                        .padding(.horizontal, 12).padding(.vertical, 10)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.surfaceHi))
+                        .foregroundColor(.white)
+                }
+                .buttonStyle(.plain)
+            }
             PineField("password (vuota = open)", $roguePass)
+            if !roguePass.isEmpty && roguePass.count < 8 {
+                Text("WPA: 8-64 caratteri, oppure vuota per open").font(.system(size: 10)).foregroundColor(.bad)
+            }
             Toggle(isOn: $dnsFwd) {
-                Text(dnsFwd ? "DNS: portal captive + internet reale (log domini)"
-                            : "DNS: portal offline (tutto avvelenato)")
+                Text(dnsFwd ? "DNS: repeater trasparente — internet reale + log domini"
+                            : "DNS: poison — captive portal su ogni dominio")
                     .font(.system(size: 12)).foregroundColor(.white.opacity(0.85))
             }
             .tint(.redHat)
@@ -132,7 +148,7 @@ struct PineAppleView: View {
     private var trafficSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionHeader(title: "Traffic clienti", icon: "waveform.path.ecg", color: .warn)
-            Text("HTTPS cifrato (serve fake-CA sul client) — qui: domini via DNS, HTTP e form portal in chiaro. I captive-check vanno al portal, il resto naviga davvero.")
+            Text("HTTPS cifrato (serve fake-CA sul client) — qui: domini via DNS, HTTP e form del portal in chiaro. In FORWARD i client navigano davvero (NAPT), nessun popup captive; in POISON tutto finisce sul portal.")
                 .font(.system(size: 10)).foregroundColor(.dim)
             HStack(spacing: 10) {
                 PineButton(label: dnsFwd ? "DNS: FORWARD" : "DNS: POISON", color: .warn, enabled: !busy) { await toggleDns() }
@@ -196,10 +212,28 @@ struct PineAppleView: View {
 
     private func startRogue() async {
         guard tcp.connected else { push("[-] bridge offline"); return }
+        let ssid = rogueSsid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ssid.isEmpty else { push("[-] SSID vuoto"); return }
+        guard roguePass.isEmpty || (8...64).contains(roguePass.count) else {
+            push("[-] password: 8-64 caratteri o vuota per open"); return
+        }
         busy = true
-        let ok = await tcp.rogueStart(ssid: rogueSsid, pass: roguePass, dnsFwd: dnsFwd)
-        if ok { await tcp.rogueClientsRefresh() }
+        let ok = await tcp.rogueStart(ssid: ssid, pass: roguePass, dnsFwd: dnsFwd)
+        if ok {
+            natOn = true               // il firmware arma NAPT su softAP all'avvio
+            await tcp.rogueClientsRefresh()
+            push("[+] rogue UP '\(ssid)' — internet via hotspot, log in TRAFFIC")
+        } else {
+            push("[-] avvio rifiutato: verifica STA connessa (hotspot iPhone) e riprova")
+        }
         busy = false
+    }
+
+    static func freshSSID() -> String {
+        let adj = ["Casa", "Studio", "Caffè", "Hotel", "Ufficio", "Ospiti", "Free", "WiFi"]
+        let noun = ["Roma", "Milano", "Napoli", "Torino", "Bologna", "Verona", "Lounge", "Bar"]
+        let n = ["", "_5G", " 2", "-Guest", "-WiFi", "_Plus"][Int.random(in: 0..<6)]
+        return "\(adj.randomElement()!) \(noun.randomElement()!)\(n)"
     }
 
     private func stopRogue() async {

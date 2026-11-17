@@ -30,6 +30,8 @@ targets:
           - _http._tcp
           - _mqtt._tcp
           - _coap._tcp
+          - _raop._tcp
+          - _printer._tcp
           - _workstation._tcp
         UIBackgroundModes: [bluetooth-central]
         UIUserInterfaceStyle: Dark

@@ -272,6 +272,16 @@ final class Orchestrator: ObservableObject {
             return []
         }
         log("LAN nativo \(DeviceNet.localSubnetCIDR()) — TCP 80/443/22/62078…", .exec)
+        // MAC dai lease ARP del device (root): arricchisce i target trovati
+        var macByIP: [String: String] = [:]
+        let arp = RootShell.shared.runSync("/usr/sbin/arp -an 2>/dev/null || arp -an 2>/dev/null", timeout: 12).stdout
+        for line in arp.split(separator: "\n") {
+            guard let l = line.firstIndex(of: "("), let r = line.firstIndex(of: ")"),
+                  let at = line.range(of: " at ") else { continue }
+            let ip = String(line[line.index(after: l)..<r])
+            let rest = line[at.upperBound...].split(separator: " ").first.map(String.init) ?? ""
+            if rest.count == 17, rest != "(incomplete)" { macByIP[ip] = rest.uppercased() }
+        }
         let found = await DeviceNet.lanSweep()
         guard !found.isEmpty else {
             log("LAN: nessun host con porte comuni (verifica permesso Rete locale)", .warn)
@@ -282,6 +292,7 @@ final class Orchestrator: ObservableObject {
             var t = TargetDevice(name: f.ip, proto: .net, rssi: 0, via: "LAN iPhone")
             t.extra["host"] = f.ip
             t.extra["open"] = f.open.map(String.init).joined(separator: ",")
+            if let m = macByIP[f.ip] { t.mac = m }
             if f.ip == me {
                 t.name = "questo iPhone"
             } else if f.open.contains(80), let title = await DeviceNet.httpTitle(f.ip) {

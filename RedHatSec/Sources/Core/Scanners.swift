@@ -1143,22 +1143,68 @@ final class NetScanner {
     private let portTable: [UInt16] = [23, 80, 161, 502, 554, 1883, 5683, 8080, 9100]
 
     func bonjour(onResult: @escaping (TargetDevice) -> Void) {
-        for svc in ["_hap._tcp", "_googlecast._tcp", "_esphomelib._tcp", "_ipp._tcp", "_http._tcp"] {
+        let types = ["_hap._tcp", "_googlecast._tcp", "_esphomelib._tcp", "_ipp._tcp",
+                     "_http._tcp", "_airplay._tcp", "_mqtt._tcp", "_coap._tcp",
+                     "_raop._tcp", "_printer._tcp"]
+        for svc in types {
             let params = NWParameters()
             params.includePeerToPeer = true
             let b = NWBrowser(for: .bonjour(type: svc, domain: "local."), using: params)
-            b.browseResultsChangedHandler = { results, _ in
+            b.browseResultsChangedHandler = { [weak self] results, _ in
                 for r in results {
-                    guard case let .service(name, svcType, _, _) = r.endpoint else { continue }
-                    _ = svcType
+                    guard case let .service(name, _, _, _) = r.endpoint else { continue }
                     var t = TargetDevice(name: name, proto: .net, rssi: -50,
                                          mac: nil, vendor: nil, services: [svc], via: "mDNS")
                     t.extra["svc"] = svc
-                    onResult(t)
+                    // TXT record Bonjour: model/fn/ty ecc. identificano il device senza toccarlo
+                    if case let .bonjour(txt) = r.metadata {
+                        for k in ["model", "md", "fn", "ty", "am", "manufacturer", "product"] {
+                            if let v = txt[k], !v.isEmpty, v.count < 48 { t.extra[k] = v }
+                        }
+                    }
+                    self?.resolve(r.endpoint) { addr in
+                        if let addr { t.extra["resolved"] = addr }
+                        onResult(t)
+                    }
                 }
             }
             b.start(queue: .global())
             browsers.append(b)
+        }
+    }
+
+    // risolve un endpoint Bonjour in IP:porta aprendo un TCP che chiudiamo subito
+    private func resolve(_ ep: NWEndpoint, completion: @escaping (String?) -> Void) {
+        let lock = NSLock()
+        var done = false
+        func finish(_ v: String?) {
+            lock.lock()
+            if done { lock.unlock(); return }
+            done = true
+            lock.unlock()
+            completion(v)
+        }
+        let c = NWConnection(to: ep, using: .tcp)
+        c.stateUpdateHandler = { st in
+            switch st {
+            case .ready:
+                if let remote = c.currentPath?.remoteEndpoint,
+                   case let .hostPort(h, p) = remote {
+                    finish("\(h):\(p.rawValue)")
+                } else {
+                    finish(nil)
+                }
+                c.cancel()
+            case .failed, .cancelled:
+                finish(nil)
+            default:
+                break
+            }
+        }
+        c.start(queue: .global())
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+            c.cancel()
+            finish(nil)
         }
     }
 
