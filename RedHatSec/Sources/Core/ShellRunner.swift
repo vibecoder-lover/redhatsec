@@ -43,6 +43,7 @@ final class ShellRunner: ObservableObject {
     @Published private(set) var availableTools: [String] = []
     private var knownGood: Set<String> = []
     private var rootFound: Set<String> = []
+    private var rootPaths: [String: String] = [:]
     private let stateLock = NSLock()
     private var refreshingFromRoot = false
 
@@ -75,19 +76,27 @@ final class ShellRunner: ObservableObject {
         if refreshingFromRoot { return }
         refreshingFromRoot = true
         let names = Array(Set(Self.toolNames + ToolRegistry.specs.flatMap { $0.bins })).sorted()
-        let script = names.map { "command -v \($0) >/dev/null 2>&1 && echo \($0)" }
-            .joined(separator: "; ")
+        let script = names.map { n in
+            "p=$(command -v \(n) 2>/dev/null); [ -n \"$p\" ] && echo \"\(n)=$p\""
+        }.joined(separator: "; ")
         DispatchQueue.global(qos: .utility).async {
             let r = RootShell.shared.runSync(script, timeout: 25)
             var found: Set<String> = []
+            var paths: [String: String] = [:]
             for line in r.stdout.split(separator: "\n") {
                 let t = line.trimmingCharacters(in: .whitespaces)
-                if !t.isEmpty { found.insert(t) }
+                guard let eq = t.firstIndex(of: "="), eq > t.startIndex else { continue }
+                let name = String(t[t.startIndex..<eq])
+                let path = String(t[t.index(after: eq)...])
+                guard !path.isEmpty else { continue }
+                found.insert(name)
+                paths[name] = path
             }
             DispatchQueue.main.async {
                 self.stateLock.lock()
                 self.rootFound = found
                 self.knownGood.formUnion(found)
+                self.rootPaths = paths
                 self.stateLock.unlock()
                 self.availableTools = Self.toolNames.filter {
                     found.contains($0) || self.resolve($0) != nil
@@ -126,6 +135,13 @@ final class ShellRunner: ObservableObject {
                 if fm.isExecutableFile(atPath: full) { return full }
             }
         }
+        // sandbox cieca su /var/jb: usa il path reale trovato dalla sh root
+        stateLock.lock()
+        let rootPath = rootPaths[bin]
+        let known = rootFound.contains(bin) || knownGood.contains(bin)
+        stateLock.unlock()
+        if let rootPath { return rootPath }
+        if known { return "/var/jb/usr/bin/" + bin }
         return nil
     }
 
