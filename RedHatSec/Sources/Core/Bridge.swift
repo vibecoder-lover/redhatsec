@@ -57,6 +57,7 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
 
     func log(_ s: String) {
         let line = "[bridge] \(s)"
+        DebugLog.shared.add(line)
         if Thread.isMainThread {
             bridgeLog.append(line)
             if bridgeLog.count > 200 { bridgeLog.removeFirst(bridgeLog.count - 200) }
@@ -386,6 +387,7 @@ final class TCPBridge: NSObject, ObservableObject {
     private var scanGen = 0
 
     func log(_ s: String) {
+        DebugLog.shared.add("[tcp] \(s)")
         DispatchQueue.main.async {
             self.bridgeLog.append("[tcp] \(s)")
             if self.bridgeLog.count > 200 { self.bridgeLog.removeFirst(self.bridgeLog.count - 200) }

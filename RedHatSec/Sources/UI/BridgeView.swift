@@ -259,11 +259,14 @@ struct SettingsView: View {
     @EnvironmentObject var o: Orchestrator
     @Environment(\.dismiss) var dismiss
     @State private var trace: [String] = []
+    @ObservedObject private var dbg = DebugServer.shared
+    @State private var portText = ""
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    debugSection
                     BridgeView(ble: o.bridge, tcp: o.tcpBridge)
                     traceSection
                 }
@@ -277,9 +280,54 @@ struct SettingsView: View {
                     Button("chiudi") { dismiss() }
                 }
             }
-            .onAppear { trace = Self.readTrace() }
+            .onAppear {
+                trace = Self.readTrace()
+                portText = String(dbg.port)
+                dbg.startIfEnabled()
+            }
         }
         .preferredColorScheme(.dark)
+    }
+
+    // Debug server: log dell'app leggibili dal PC sulla stessa rete (niente screen)
+    private var debugSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "Debug server", icon: "antenna.radiowaves.left.and.right", color: .ok)
+            Toggle(isOn: Binding(get: { dbg.enabled }, set: { dbg.enabled = $0 })) {
+                Text("attivo — log via HTTP sulla rete locale")
+                    .font(.system(size: 12)).foregroundColor(.white.opacity(0.85))
+            }
+            .tint(.ok)
+            HStack(spacing: 8) {
+                Text("porta").font(.system(size: 11)).foregroundColor(.dim)
+                TextField("8787", text: $portText)
+                    .keyboardType(.numberPad)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13, design: .monospaced))
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(hex: 0x070709)))
+                Button("applica") {
+                    if let p = Int(portText), (1024...65535).contains(p) { dbg.port = p }
+                }
+                .font(.system(size: 11, weight: .bold)).foregroundColor(.ok)
+            }
+            Text(dbg.urlHint)
+                .font(.system(size: 12, design: .monospaced)).foregroundColor(.info)
+                .textSelection(.enabled)
+            HStack(spacing: 12) {
+                Button("copia URL") { UIPasteboard.general.string = dbg.urlHint }
+                Button("pulisci log") { DebugLog.shared.clear() }
+                Button("apri /status") {
+                    if let u = URL(string: dbg.urlHint + "status") { UIApplication.shared.open(u) }
+                }
+            }
+            .font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
+            Text(dbg.running ? "in ascolto su :\(dbg.port)" : (dbg.enabled ? "non attivo — \(dbg.lastError)" : "spento"))
+                .font(.system(size: 10)).foregroundColor(dbg.running ? .ok : .dim)
+            Text("Dal PC: curl \(dbg.urlHint)  ·  /all tutto  ·  /status JSON  ·  /clear svuota")
+                .font(.system(size: 10, design: .monospaced)).foregroundColor(.dim)
+        }
+        .padding(14).card()
     }
 
     private var traceSection: some View {

@@ -21,7 +21,10 @@ struct RedHatSecApp: App {
             .tint(.redHat)
             .preferredColorScheme(.dark)
             .environmentObject(o)
-            .onAppear { DeviceNet.refreshAsync() }
+            .onAppear {
+                DeviceNet.refreshAsync()
+                DebugServer.shared.startIfEnabled()
+            }
         }
     }
 }

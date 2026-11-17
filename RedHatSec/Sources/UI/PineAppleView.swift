@@ -23,6 +23,7 @@ struct PineAppleView: View {
     @State private var natOn = true
     @State private var traffic: [String] = []
     @State private var netIP = DeviceNet.cachedIPv4()
+    @State private var routerAccess = false
 
     private let exploits = ExploitLibrary.all
 
@@ -101,7 +102,7 @@ struct PineAppleView: View {
                 Text("WPA: 8-64 caratteri, oppure vuota per open").font(.system(size: 10)).foregroundColor(.bad)
             }
             Toggle(isOn: $dnsFwd) {
-                Text(dnsFwd ? "DNS: repeater trasparente — internet reale + log domini"
+                Text(dnsFwd ? "DNS: forward + portal captive (ibrido, internet reale)"
                             : "DNS: poison — captive portal su ogni dominio")
                     .font(.system(size: 12)).foregroundColor(.white.opacity(0.85))
             }
@@ -172,10 +173,10 @@ struct PineAppleView: View {
     private var trafficSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionHeader(title: "Traffic clienti", icon: "waveform.path.ecg", color: .warn)
-            Text("HTTPS cifrato (serve fake-CA sul client) — qui: domini via DNS, HTTP e form del portal in chiaro. In FORWARD i client navigano davvero (NAPT), nessun popup captive; in POISON tutto finisce sul portal.")
+            Text("FORWARD = ibrido: internet reale (NAPT) + portal sui captive-check, domini loggati. POISON = tutto sul portal. HTTPS resta cifrato (serve fake-CA).")
                 .font(.system(size: 10)).foregroundColor(.dim)
             HStack(spacing: 10) {
-                PineButton(label: dnsFwd ? "DNS: FORWARD" : "DNS: POISON", color: .warn, enabled: !busy) { await toggleDns() }
+                PineButton(label: dnsFwd ? "DNS: FORWARD+PORTAL" : "DNS: POISON", color: .warn, enabled: !busy) { await toggleDns() }
                 PineButton(label: "NAT \(natOn ? "OFF" : "ON")", color: .dim, enabled: !busy) { await toggleNat() }
             }
             PineButton(label: "AGGIORNA LOG", color: .redHat, enabled: !busy) { await refreshTraffic() }
@@ -213,7 +214,19 @@ struct PineAppleView: View {
                 Text("probe su \(e.proto.rawValue) :\(e.port) — nessun comando richiesto")
                     .font(.system(size: 11)).foregroundColor(.dim)
             }
-            PineButton(label: "ESEGUI", color: .redHat, enabled: !busy) { await fire() }
+            if e.isRouter {
+                Toggle(isOn: $routerAccess) {
+                    Text("accesso router ottenuto (admin/sessione)")
+                        .font(.system(size: 12)).foregroundColor(.white.opacity(0.85))
+                }
+                .tint(.redHat)
+                if !routerAccess {
+                    Text("CVE router: lancia solo dopo aver ottenuto accesso (credenziali admin o sessione valida, es. login catturato in TRAFFIC).")
+                        .font(.system(size: 10)).foregroundColor(.warn)
+                }
+            }
+            PineButton(label: "ESEGUI", color: .redHat,
+                       enabled: !busy && (!e.isRouter || routerAccess)) { await fire() }
         }
     }
 
@@ -344,6 +357,10 @@ struct PineAppleView: View {
     private func fire() async {
         guard !targetIP.isEmpty else { push("[-] IP target mancante"); return }
         let e = exploits[selExploit]
+        if e.isRouter && !routerAccess {
+            push("[-] \(e.id) è una CVE router: serve accesso (credenziali/sessione) — abilita il toggle dopo il login.")
+            return
+        }
         guard let req = ExploitLibrary.request(e, ip: targetIP, cmd: cmd) else {
             push("[-] \(e.id) senza payload one-payload")
             return

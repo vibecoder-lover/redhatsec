@@ -24,6 +24,7 @@ final class TerminalModel: ObservableObject {
     }
 
     func append(_ text: String, _ level: LogEntry.Level = .info) {
+        DebugLog.shared.add("[term] \(text)")
         lines.append(LogEntry(level: level, text: text))
         if lines.count > 1600 { lines.removeFirst(lines.count - 1200) }
     }
@@ -39,7 +40,7 @@ final class TerminalModel: ObservableObject {
             if i == n - 1 && !rest.hasSuffix("\n") {
                 partial = String(p)
             } else {
-                lines.append(LogEntry(level: .info, text: String(p)))
+                append(String(p))
             }
         }
         if lines.count > 1600 { lines.removeFirst(lines.count - 1200) }
