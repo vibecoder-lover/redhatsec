@@ -3,7 +3,7 @@ import UIKit
 import CryptoKit
 
 // auto-updater: release GitHub tag `tipa` (asset latest.json + RedHatSec-<tag>.tipa)
-// il confronto è buildTag compilato vs remoto; install via TrollStore (apple-magnifier://install?file=)
+// install: trollstorehelper via rootd (silenzioso); fallback apple-magnifier:// (pannello TrollStore)
 enum Updater {
     static let repo = "vibecoder-lover/redhatsec"
 
@@ -94,22 +94,59 @@ enum Updater {
             }
             try? fh.close()
         }
-        // VIA A (rootd): copia in /var/jb/tmp e magnifier url=file:// — TrollStore
-        // (TSInstallationController) NON valida lo scheme: NSURLSessionDownloadTask
-        // copia anche i file:// (TrollStore è root, legge /var/jb/tmp)
+        // VIA A (rootd): install silenzioso con trollstorehelper — nessuna share sheet,
+        // nessuna app che intercetta il .tipa (Lens e simili non vengono mai chiamate).
         let jbPath = "/var/jb/tmp/rhs.tipa"
-        let cpCmd = "rm -f \(shq(jbPath)); cp \(shq(dest)) \(shq(jbPath)) && chmod 644 \(shq(jbPath))"
+        let installScript = """
+        rm -f \(shq(jbPath))
+        cp \(shq(dest)) \(shq(jbPath)) || { echo CP_FAIL; exit 8; }
+        chmod 644 \(shq(jbPath))
+        H=""
+        for p in /var/jb/Applications/TrollStore.app/trollstorehelper /Applications/TrollStore.app/trollstorehelper; do
+          [ -x "$p" ] && H="$p" && break
+        done
+        if [ -z "$H" ]; then
+          H=$(ls -d /var/containers/Bundle/Application/*/TrollStore.app/trollstorehelper 2>/dev/null | head -1)
+        fi
+        echo "helper=${H:-none}"
+        [ -z "$H" ] && { echo NO_HELPER; exit 9; }
+        "$H" install custom \(shq(jbPath)) >/tmp/rhs_ts.log 2>&1
+        rc=$?
+        echo "install_rc=$rc"
+        if [ $rc -ne 0 ]; then
+          "$H" install force custom \(shq(jbPath)) >>/tmp/rhs_ts.log 2>&1
+          rc=$?
+          echo "install_force_rc=$rc"
+        fi
+        tail -c 240 /tmp/rhs_ts.log
+        exit $rc
+        """
         // rootd può bloccare fino a 30s: fuori dal main actor
-        let cp = await Task.detached(priority: .userInitiated) {
-            RootShell.shared.runSync(cpCmd, timeout: 30)
+        let res = await Task.detached(priority: .userInitiated) {
+            RootShell.shared.runSync(installScript, timeout: 120)
         }.value
-        if cp.exitCode == 0 {
+        let out = res.stdout + res.stderr
+        func helperRC(_ tag: String) -> Int32? {
+            guard let r = out.range(of: "\(tag)=") else { return nil }
+            return Int32(String(out[r.upperBound...].prefix(while: { $0.isNumber })))
+        }
+        // 0 = ok, 182 = installato (serve developer mode), 184 = installato con warning su binari cifrati
+        let okCodes: Set<Int32> = [0, 182, 184]
+        if let rc = helperRC("install_force_rc") ?? helperRC("install_rc"), okCodes.contains(rc) {
+            // la vecchia istanza tiene in memoria il vecchio binario: la chiudiamo noi
+            _ = await Task.detached {
+                RootShell.shared.runSync("(sleep 2; /usr/bin/killall RedHatSec) >/dev/null 2>&1 &", timeout: 6)
+            }.value
+            return "installato \(build) via TrollStore — riapri RedHatSec"
+        }
+        // VIA B (helper assente/errore): pannello TrollStore sul file già copiato
+        if !out.contains("CP_FAIL"), let rc = helperRC("install_force_rc") ?? helperRC("install_rc") {
             await MainActor.run {
                 if let u = URL(string: "apple-magnifier://install?url=file://\(jbPath)") {
                     UIApplication.shared.open(u)
                 }
             }
-            return "install via TrollStore avviata (\(build)) — conferma nell'alert"
+            return "install automatica fallita (rc \(rc)) — conferma nel pannello TrollStore"
         }
         // VIA B (rootd giù): share sheet DIC
         await MainActor.run {
