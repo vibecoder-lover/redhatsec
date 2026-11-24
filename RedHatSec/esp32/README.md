@@ -1,0 +1,49 @@
+# RedHatBridge32 — ESP32 come modulo Wi-Fi + Bluetooth dell'iPhone
+
+L'app parla solo **BLE** (GATT `FFE0`/`FFE1`). Il TCP dell'ESP8266 resta fallback.
+
+## Flash (obbligatorio: partizione + 115200)
+
+```
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app RedHatSec/esp32/RedHatBridge32
+arduino-cli upload  -p COM<N> --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,UploadSpeed=115200" RedHatSec/esp32/RedHatBridge32
+```
+
+- `PartitionScheme=huge_app`: il firmware occupa ~1.68 MB, lo schema default (1.31 MB) non basta.
+- `UploadSpeed=115200`: sulle board clone (MAC `00:00:00:00:00:00`, rev v0.0) lo stub si perde a 921600 → `Unable to verify flash chip connection`.
+- Flash diretto alternativo: `esptool write_flash 0x0 build/RedHatBridge32.ino.merged.bin`.
+- Driver USB: CH340 gia' in Windows (`oem80.inf`); CP2102 = Silicon Labs VCP (Preso da Windows Update, "Silicon Laboratories Inc. - Ports - 11.2.0.167").
+- Dopo il flash il banner atteso a 115200 e' `[RHS-ESP32 v1.0] BLE GATT FFE0/FFE1 pronto`.
+
+## Requisiti radio
+
+- Hotspot iPhone **2.4 GHz** ("Massima compatibilita'"): STA `Hexxeted` / `lwae9180` nell'ino.
+- BLE + BT Classic insieme (BTDM): inquiry/SDP occupano il controller, la BLE resta su ma con latenza.
+- Una sola radio Wi-Fi: deauth/PMKID/beacon sono rifiutati con rogue AP attivo (l'app lo spegne da sola).
+
+## Protocollo (identico all'ESP8266)
+
+```
+app -> esp: [0xA5][len u16 LE][seq][cmd][payload][crc8(1, 4+len)]
+esp -> app: [0x5A][len u16 LE][cmd][status][payload][crc8(1, 4+len)]
+```
+
+| cmd | funzione | payload |
+|-----|----------|---------|
+| 0x01 | ping | — |
+| 0x02 | wifi scan | `[sec]` → `[rssi][ch][bssid6][enc][len][ssid]...` |
+| 0x04 | deauth | `[mac6][ch][count]` |
+| 0x05 | beacon flood | `[count][len][ssid]...` |
+| 0x06 | pmkid | `[mac6][ch]` → EAPOL raw |
+| 0x07 | stop | — |
+| 0x08 | join rete | `[len][ssid][len][pass]` → IP |
+| 0x10 | port scan | `[ip4][count][port u16]...` → `[port u16][len][banner]...` |
+| 0x11/0x12 | TCP/UDP roundtrip | `[ip4][port u16][tcs][len u16][data]` |
+| 0x13/0x14/0x15 | rogue start/stop/client | `[ssidLen][ssid][passLen][pass][dnsFwd]` |
+| 0x16 | karma | `[on]` → CSV |
+| 0x17 | captive portal | `[len u16][html]` |
+| 0x18 | NAPT/DNS | `[on][dnsFwd]` |
+| 0x19 | traffic log | — → `voce|voce|...` |
+| 0x20 | BT Classic inquiry | `[sec]` → `[count][mac6][rssi][nameLen][name]...` |
+| 0x21 | SDP | `[mac6]` → `[count][uuidLen][uuid]...` |
+| 0x22 | BLE adv scan | `[sec]` → `[count][mac6][rssi][nameLen][name][advLen][adv]...` |
