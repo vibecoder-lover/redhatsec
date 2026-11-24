@@ -223,6 +223,12 @@ enum VectorDB {
           .plan, "2 radio + bridge cavo; seq: adv → conn param mirror"),
 
         // MARK: BT Classic
+        v("bt_sdp_enum", "BT Classic Discovery + SDP Enum", .classic, 2003, "Bluetooth SDP / BlueZ sdptool",
+          "T1018", 5.3, "CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N", .medium,
+          "device discoverable, modulo ESP32 in BLE",
+          "Inquiry BR/EDR + SDP browse eseguiti dalla radio ESP32: nome, BD_ADDR, servizi esposti (SPP, HFP, OBEX, HID) — l'iPhone da solo non ha BT Classic.",
+          "Non discoverable; rimuovere profili non usati; pairing obbligatorio.",
+          .plan, "ESP32 BLE: cmd 0x20 inquiry → 0x21 SDP con BD_ADDR"),
         v("bt_bluejacking", "Bluejacking (OBEX Push)", .classic, 2003, "bluejacking wave",
           "T1587", 2.6, "CVSS:3.1/AV:A/AC:H/PR:N/UI:R/S:U/C:N/I:L/A:N", .low,
           "target discoverable",

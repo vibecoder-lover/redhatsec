@@ -27,6 +27,57 @@ struct PineAppleView: View {
 
     private let exploits = ExploitLibrary.all
 
+    private var ble: BridgeManager { o.bridge }
+    private var online: Bool { ble.connected || tcp.connected }
+    private var rogueOn: Bool { ble.connected ? ble.rogueOn : tcp.rogueOn }
+    private var radioLabel: String { ble.connected ? "ESP32 BLE" : (tcp.connected ? "ESP8266 TCP" : "offline") }
+
+    private struct ClientRow: Identifiable {
+        var id: String { mac }
+        let mac: String
+        let ip: String
+    }
+    private var clients: [ClientRow] {
+        if ble.connected { return ble.rogueClients.map { ClientRow(mac: $0.mac, ip: $0.ip) } }
+        return tcp.rogueClients.map { ClientRow(mac: $0.mac, ip: $0.ip) }
+    }
+
+    private func radioRogueStart(_ ssid: String, _ pass: String, _ fwd: Bool) async -> Bool {
+        if ble.connected { return await ble.rogueStart(ssid: ssid, pass: pass, dnsFwd: fwd) }
+        return await tcp.rogueStart(ssid: ssid, pass: pass, dnsFwd: fwd)
+    }
+    private func radioRogueStop() async -> Bool {
+        if ble.connected { return await ble.rogueStop() }
+        return await tcp.rogueStop()
+    }
+    private func radioClientsRefresh() async {
+        if ble.connected { await ble.rogueClientsRefresh() } else { await tcp.rogueClientsRefresh() }
+    }
+    private func radioTraffic() async -> [String] {
+        if ble.connected { return await ble.trafficLog() }
+        return await tcp.trafficLog()
+    }
+    private func radioPortal(_ html: String) async -> Bool {
+        if ble.connected { return await ble.portalSet(html) }
+        return await tcp.portalSet(html)
+    }
+    private func radioKarma(_ on: Bool) async -> [String] {
+        if ble.connected { return await ble.karma(on) }
+        return await tcp.karma(on)
+    }
+    private func radioNat(_ on: Bool, _ fwd: Bool) async -> Bool {
+        if ble.connected { return await ble.nat(on, dnsFwd: fwd) }
+        return await tcp.nat(on, dnsFwd: fwd)
+    }
+    private func radioPortScan(_ host: String, _ ports: [UInt16]) async -> [(UInt16, String)] {
+        if ble.connected { return await ble.portScan(host: host, ports: ports) }
+        return await tcp.portScan(host: host, ports: ports)
+    }
+    private func radioRoundTrip(_ host: String, _ port: Int, _ payload: [UInt8], udp: Bool, _ timeout: TimeInterval) async -> Data? {
+        if ble.connected { return await ble.roundTrip(host: host, port: port, payload: payload, udp: udp, timeout: timeout) }
+        return await tcp.roundTrip(host: host, port: port, payload: payload, udp: udp, timeout: timeout)
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -51,9 +102,9 @@ struct PineAppleView: View {
             }
         }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
-            guard tcp.connected, tcp.rogueOn, !busy else { return }
+            guard online, rogueOn, !busy else { return }
             Task {
-                let l = await tcp.trafficLog()
+                let l = await radioTraffic()
                 if !l.isEmpty { traffic = l }
             }
         }
@@ -61,13 +112,13 @@ struct PineAppleView: View {
 
     private var statusRow: some View {
         HStack(spacing: 8) {
-            Pill(text: tcp.connected ? "BRIDGE ONLINE" : "BRIDGE OFFLINE",
-                 color: tcp.connected ? .ok : .bad,
-                 icon: tcp.connected ? "link" : "link.badge.plus")
+            Pill(text: online ? "\(radioLabel) ONLINE" : "BRIDGE OFFLINE",
+                 color: online ? .ok : .bad,
+                 icon: online ? "link" : "link.badge.plus")
             Spacer()
-            Pill(text: tcp.rogueOn ? "ROGUE ATTIVO" : "ROGUE OFF",
-                 color: tcp.rogueOn ? .warn : .dim,
-                 icon: tcp.rogueOn ? "wifi.router.fill" : "wifi.slash")
+            Pill(text: rogueOn ? "ROGUE ATTIVO" : "ROGUE OFF",
+                 color: rogueOn ? .warn : .dim,
+                 icon: rogueOn ? "wifi.router.fill" : "wifi.slash")
         }
     }
 
@@ -80,7 +131,9 @@ struct PineAppleView: View {
         return HStack(spacing: 6) {
             Pill(text: ip.isEmpty ? "NO IP" : ip, color: ip.isEmpty ? .bad : .ok)
             Pill(text: uplink, color: .dim)
-            if let h = tcp.foundHosts.first {
+            if ble.connected {
+                Pill(text: ble.deviceName ?? "ESP32", color: .info)
+            } else if let h = tcp.foundHosts.first {
                 Pill(text: "ESP \(h)", color: .info)
             }
             Spacer()
@@ -139,15 +192,15 @@ struct PineAppleView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 SectionHeader(title: "Client connessi", icon: "person.2.fill", color: .ok,
-                              trailing: "\(tcp.rogueClients.count)")
-                Button("aggiorna") { Task { await tcp.rogueClientsRefresh() } }
+                              trailing: "\(clients.count)")
+                Button("aggiorna") { Task { await radioClientsRefresh() } }
                     .font(.system(size: 11, weight: .bold)).foregroundColor(.redHat)
             }
-            if tcp.rogueClients.isEmpty {
+            if clients.isEmpty {
                 Text("nessun client — i dispositivi si agganciano al SSID evil-twin")
                     .font(.system(size: 11)).foregroundColor(.dim)
             }
-            ForEach(tcp.rogueClients) { c in
+            ForEach(clients) { c in
                 Button {
                     targetIP = c.ip
                     Haptics.tap()
@@ -255,18 +308,18 @@ struct PineAppleView: View {
     // MARK: actions
 
     private func startRogue() async {
-        guard tcp.connected else { push("[-] bridge offline"); return }
+        guard online else { push("[-] bridge offline"); return }
         let ssid = rogueSsid.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !ssid.isEmpty else { push("[-] SSID vuoto"); return }
         guard roguePass.isEmpty || (8...64).contains(roguePass.count) else {
             push("[-] password: 8-64 caratteri o vuota per open"); return
         }
         busy = true
-        let ok = await tcp.rogueStart(ssid: ssid, pass: roguePass, dnsFwd: dnsFwd)
+        let ok = await radioRogueStart(ssid, roguePass, dnsFwd)
         if ok {
             natOn = true               // il firmware arma NAPT su softAP all'avvio
-            await tcp.rogueClientsRefresh()
-            push("[+] rogue UP '\(ssid)' — internet via hotspot, log in TRAFFIC")
+            await radioClientsRefresh()
+            push("[+] rogue UP '\(ssid)' su \(radioLabel) — internet via hotspot, log in TRAFFIC")
         } else {
             push("[-] avvio rifiutato: verifica STA connessa (hotspot iPhone) e riprova")
         }
@@ -282,26 +335,26 @@ struct PineAppleView: View {
 
     private func stopRogue() async {
         busy = true
-        _ = await tcp.rogueStop()
+        _ = await radioRogueStop()
         probes = []
         karmaArmed = false
         busy = false
     }
 
     private func setPortal() async {
-        _ = await tcp.portalSet(portalHTML)
+        _ = await radioPortal(portalHTML)
     }
 
     private func karma() async {
         busy = true
         if !karmaArmed {
             // arm: il firmware non risponde con la lista finché non arrivano probe
-            _ = await tcp.karma(true)
+            _ = await radioKarma(true)
             karmaArmed = true
             probes = []
             push("[karma] armed — i probe dei client vengono raccolti")
         } else {
-            probes = await tcp.karma(false)
+            probes = await radioKarma(false)
             karmaArmed = false
             push("[karma] stop — \(probes.count) probe")
         }
@@ -310,13 +363,13 @@ struct PineAppleView: View {
 
     private func toggleDns() async {
         let want = !dnsFwd
-        let ok = await tcp.nat(natOn, dnsFwd: want)
+        let ok = await radioNat(natOn, want)
         if ok { dnsFwd = want } else { push("[-] cambio DNS rifiutato dal bridge") }
     }
 
     private func toggleNat() async {
         let want = !natOn
-        let ok = await tcp.nat(want, dnsFwd: dnsFwd)
+        let ok = await radioNat(want, dnsFwd)
         if ok { natOn = want } else { push("[-] cambio NAT rifiutato dal bridge") }
     }
 
@@ -327,13 +380,13 @@ struct PineAppleView: View {
 
     private func refreshTraffic() async {
         busy = true
-        traffic = await tcp.trafficLog()
+        traffic = await radioTraffic()
         busy = false
     }
 
     private func doPortScan() async {        guard !targetIP.isEmpty else { push("[-] IP target mancante"); return }
         busy = true
-        let open = await tcp.portScan(host: targetIP, ports: scanPorts)
+        let open = await radioPortScan(targetIP, scanPorts)
         if open.isEmpty {
             push("[recon] \(targetIP): nessuna porta aperta su \(scanPorts.count)")
         } else {
@@ -349,8 +402,7 @@ struct PineAppleView: View {
         busy = true
         for e in exploits where e.detector != nil {
             guard let req = ExploitLibrary.request(e, ip: targetIP, cmd: "") else { continue }
-            let r = await tcp.roundTrip(host: targetIP, port: e.port,
-                                        payload: Array(req), udp: e.proto == .udp, timeout: 5)
+            let r = await radioRoundTrip(targetIP, e.port, Array(req), udp: e.proto == .udp, 5)
             let hit = r.map { String(decoding: $0.prefix(400), as: UTF8.self) }
             if let hit, hit.contains(e.success) {
                 push("[!] \(e.id) SUPERFICIE VULNERABILE → \(hit.prefix(160))")
@@ -374,8 +426,7 @@ struct PineAppleView: View {
         }
         busy = true
         Haptics.tap()
-        let r = await tcp.roundTrip(host: targetIP, port: e.port,
-                                    payload: Array(req), udp: e.proto == .udp, timeout: 6)
+        let r = await radioRoundTrip(targetIP, e.port, Array(req), udp: e.proto == .udp, 6)
         if let r, !r.isEmpty {
             let s = String(decoding: r.prefix(800), as: UTF8.self)
             push("[\(e.id)] → \(s)")

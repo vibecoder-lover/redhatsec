@@ -3,13 +3,19 @@ import SwiftUI
 struct BridgeView: View {
     @ObservedObject var ble: BridgeManager
     @ObservedObject var tcp: TCPBridge
+    var onBT: ([BridgeManager.BTDevice]) -> Void = { _ in }
     @State private var spamText = "FreeWiFi,Hotel_Guest"
     @State private var scanning = false
     @State private var manualIP = ""
     @State private var rawHex = ""
+    @State private var btBusy = false
+    @State private var sdpBusyFor: String?
+    @State private var sdpMsg = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            bleSection
+            btSection
             tcpSection
             joinSection
             actionsSection
@@ -17,7 +23,7 @@ struct BridgeView: View {
             rawSection
             logSection
         }
-        .onAppear { tcp.startAutoConnect() }
+        .onAppear { ble.start() }
     }
 
     @State private var targetSSID = ""
@@ -42,7 +48,10 @@ struct BridgeView: View {
                 Haptics.heavy(); joining = true
                 Task {
                     // timeout 20s ma il re-entry resta bloccato finché il join reale non finisce
-                    let j = Task { await tcp.joinTarget(targetSSID, targetPass) }
+                    let j = Task {
+                        if ble.connected { return await ble.joinTarget(targetSSID, targetPass) }
+                        return await tcp.joinTarget(targetSSID, targetPass)
+                    }
                     let ok = await withTaskGroup(of: Bool.self) { group -> Bool in
                         group.addTask { await j.value }
                         group.addTask {
@@ -55,7 +64,10 @@ struct BridgeView: View {
                     }
                     let real = await j.value
                     joining = false
-                    if !(ok || real) { tcp.log("join \(targetSSID): timeout o negato") }
+                    if !(ok || real) {
+                        if ble.connected { ble.log("join \(targetSSID): timeout o negato") }
+                        else { tcp.log("join \(targetSSID): timeout o negato") }
+                    }
                 }
             } label: {
                 Label(joining ? "JOIN…" : "JOIN RETE TARGET", systemImage: "arrow.turn.right.down")
@@ -65,9 +77,142 @@ struct BridgeView: View {
             .background(RoundedRectangle(cornerRadius: 12).fill(Color.info.opacity(0.3)))
             .foregroundColor(.info)
             .buttonStyle(ScaleButton())
-            .disabled(joining || !tcp.connected || targetSSID.isEmpty)
+            .disabled(joining || !(ble.connected || tcp.connected) || targetSSID.isEmpty)
             Text("AP+STA: il bridge resta connesso all'app e la STA entra nella rete target — scan/port/MQTT/SNMP/telnet girano dalla radio dell'ESP.")
                 .font(.caption2).foregroundColor(.dim)
+        }
+        .padding(14).card()
+    }
+
+    // ESP32: modulo Wi-Fi + Bluetooth via BLE. È la radio primaria.
+    private var bleSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("ESP32 — MODULO BLE").font(.system(size: 16, weight: .heavy, design: .rounded)).foregroundColor(.white)
+                Spacer()
+                Pill(text: ble.connected ? "ONLINE" : (ble.state == "off" ? "OFF" : "RICERCA…"),
+                     color: ble.connected ? .ok : (ble.state == "off" ? .bad : .warn))
+            }
+            KV(k: "stato", val: ble.state)
+            KV(k: "device", val: ble.deviceName ?? "RedHatBridge32")
+            if ble.connected {
+                Text("Radio pronta: Wi-Fi scan, deauth/beacon/PMKID, rogue AP + NAPT, BT Classic inquiry/SDP, BLE sniffer.")
+                    .font(.caption2).foregroundColor(.dim)
+            } else {
+                Text("Alimenta l'ESP32 (firmware RedHatBridge32) e resta vicino: il telefono si aggancia da solo al GATT FFE0/FFE1.")
+                    .font(.caption2).foregroundColor(.dim)
+            }
+            HStack(spacing: 8) {
+                Button {
+                    Haptics.tap()
+                    ble.start()
+                } label: {
+                    Label("CERCA/RICONNETTI", systemImage: "antenna.radiowaves.left.and.right")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 10)
+                }
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.ok.opacity(0.2)))
+                .foregroundColor(.ok)
+                .buttonStyle(ScaleButton())
+            }
+        }
+        .padding(14).card()
+    }
+
+    // Bluetooth dell'ESP32: Classic (BR/EDR) non esiste sull'iPhone → lo fa la radio esterna.
+    private var btSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "Bluetooth ESP32", icon: "dot.radiowaves.left.and.right", color: .info)
+            HStack(spacing: 8) {
+                Button {
+                    guard !btBusy else { return }
+                    Haptics.heavy(); btBusy = true
+                    Task {
+                        let d = await ble.btInquiry(seconds: 10)
+                        onBT(d)
+                        btBusy = false
+                    }
+                } label: {
+                    Label(btBusy ? "INQUIRY…" : "BT CLASSIC SCAN", systemImage: "magnifyingglass")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 10)
+                }
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.info.opacity(0.2)))
+                .foregroundColor(.info)
+                .buttonStyle(ScaleButton())
+                .disabled(!ble.connected || btBusy)
+
+                Button {
+                    guard !btBusy else { return }
+                    Haptics.tap(); btBusy = true
+                    Task {
+                        _ = await ble.bleAdvScan(seconds: 6)
+                        btBusy = false
+                    }
+                } label: {
+                    Label("BLE SNIFF", systemImage: "waveform.badge.magnifyingglass")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 10)
+                }
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.warn.opacity(0.2)))
+                .foregroundColor(.warn)
+                .buttonStyle(ScaleButton())
+                .disabled(!ble.connected || btBusy)
+            }
+            if !ble.btDevices.isEmpty {
+                Text("BR/EDR \(ble.btDevices.count)").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
+                ForEach(ble.btDevices) { d in
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(d.name).font(.system(size: 12, weight: .semibold)).foregroundColor(.white)
+                            Text("\(d.mac) · \(d.rssi)dBm").font(.system(size: 9, design: .monospaced)).foregroundColor(.dim)
+                        }
+                        Spacer()
+                        Button {
+                            Haptics.tap()
+                            sdpBusyFor = d.mac
+                            sdpMsg = ""
+                            Task {
+                                let svcs = await ble.btSdp(mac: d.mac)
+                                sdpMsg = svcs.isEmpty ? "\(d.mac): nessun servizio (spento / out of range)" : ""
+                                sdpBusyFor = nil
+                            }
+                        } label: {
+                            Text(sdpBusyFor == d.mac ? "…" : "SDP")
+                                .font(.system(size: 10, weight: .bold))
+                                .padding(.horizontal, 10).padding(.vertical, 7)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.redHat.opacity(0.2)))
+                                .foregroundColor(.redHat)
+                        }
+                        .buttonStyle(ScaleButton())
+                        .disabled(sdpBusyFor != nil)
+                    }
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(hex: 0x070709)))
+                }
+            }
+            if !sdpMsg.isEmpty {
+                Text(sdpMsg).font(.system(size: 10, design: .monospaced)).foregroundColor(.warn)
+            }
+            if !ble.btServices.isEmpty {
+                ForEach(Array(ble.btServices.enumerated()), id: \.offset) { _, s in
+                    Text(s).font(.system(size: 10, design: .monospaced)).foregroundColor(.ok)
+                }
+            }
+            if !ble.bleAdvDevices.isEmpty {
+                Text("BLE ADV \(ble.bleAdvDevices.count)").font(.system(size: 10, weight: .bold)).foregroundColor(.dim)
+                ForEach(ble.bleAdvDevices.prefix(10)) { a in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(a.name) · \(a.mac) · \(a.rssi)dBm")
+                            .font(.system(size: 11, weight: .semibold)).foregroundColor(.white)
+                        Text(a.adv).font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(.dim).lineLimit(2)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(hex: 0x070709)))
+                }
+            }
         }
         .padding(14).card()
     }
@@ -75,13 +220,25 @@ struct BridgeView: View {
     private var tcpSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("ESP8266 BRIDGE").font(.system(size: 16, weight: .heavy, design: .rounded)).foregroundColor(.white)
+                Text("ESP8266 BRIDGE (fallback TCP)").font(.system(size: 16, weight: .heavy, design: .rounded)).foregroundColor(.white)
                 Spacer()
                 Pill(text: tcp.connected ? "ONLINE" : (tcp.state.hasPrefix("auto") ? "RICERCA…" : "OFFLINE"),
                      color: tcp.connected ? .ok : (tcp.state.hasPrefix("auto") ? .warn : .bad))
             }
             KV(k: "stato", val: tcp.state)
             KV(k: "rete", val: "STA: l'ESP entra nel tuo hotspot (Hexxeted) → sweep 172.20.10.2-14 o IP manuale")
+            Button {
+                Haptics.tap()
+                tcp.startAutoConnect()
+            } label: {
+                Label("CERCA ESP8266 (sweep TCP)", systemImage: "magnifyingglass")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(maxWidth: .infinity).padding(.vertical, 10)
+            }
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.surfaceHi))
+            .foregroundColor(.white)
+            .buttonStyle(ScaleButton())
+            .disabled(tcp.connected)
             if tcp.connected {
                 KV(k: "stato radio", val: "i vettori PLAN (deauth/PMKID/beacon) sono eseguibili")
             }
@@ -240,7 +397,7 @@ struct BridgeView: View {
     }
 
     private var logSection: some View {
-        let lines = tcp.bridgeLog
+        let lines = ble.connected ? ble.bridgeLog : tcp.bridgeLog
         return Group {
             if !lines.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
@@ -267,7 +424,7 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     debugSection
-                    BridgeView(ble: o.bridge, tcp: o.tcpBridge)
+                    BridgeView(ble: o.bridge, tcp: o.tcpBridge, onBT: { devs in o.ingestBridgeBT(devs) })
                     traceSection
                 }
                 .padding(16)

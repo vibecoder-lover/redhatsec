@@ -35,6 +35,47 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         case beaconSpam = 0x05
         case pmkid = 0x06
         case stop = 0x07
+        case joinTarget = 0x08
+        case portScan = 0x10
+        case tcpRT = 0x11
+        case udpRT = 0x12
+        case rogueStart = 0x13
+        case rogueStop = 0x14
+        case rogueClients = 0x15
+        case karma = 0x16
+        case portalSet = 0x17
+        case nat = 0x18
+        case sniffLog = 0x19
+        case btInquiry = 0x20
+        case btSdp = 0x21
+        case bleAdvScan = 0x22
+    }
+
+    struct BTDevice: Identifiable {
+        var id: String { mac }
+        let mac: String
+        let name: String
+        let rssi: Int
+    }
+
+    struct BLEAdv: Identifiable {
+        var id: String { mac }
+        let mac: String
+        let name: String
+        let rssi: Int
+        let adv: String
+    }
+
+    @Published var btDevices: [BTDevice] = []
+    @Published var bleAdvDevices: [BLEAdv] = []
+    @Published var btServices: [String] = []
+    @Published var rogueOn = false
+    @Published var rogueClients: [RogueClient] = []
+
+    struct RogueClient: Identifiable {
+        var id: String { mac }
+        let mac: String
+        let ip: String
     }
 
     private var central: CBCentralManager?
@@ -118,11 +159,19 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         connected = false
         chr = nil
         rxBuffer.removeAll()
-        state = "disconnesso"
+        state = "disconnesso — riaggancio BLE…"
         log("bridge disconnesso")
         // continuation appese: risolvile subito, non al timeout
         resumeResponse(nil)
         resumeScan([])
+        // l'ESP32 vive di BLE: ri-scansiona appena cade il link
+        guard self.peripheral?.identifier == peripheral.identifier else { return }
+        self.peripheral = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, let c = self.central, c.state == .poweredOn, !self.connected else { return }
+            c.scanForPeripherals(withServices: [Self.svcUUID], options: nil)
+            self.state = "ricerca ESP32…"
+        }
     }
 
     // MARK: Framing
@@ -312,6 +361,11 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
     }
 
     func deauth(mac: String, ch: Int, count: Int = 10) async -> Bool {
+        // radio unica: il firmware rifiuta la deauth con rogue AP su.
+        if rogueOn {
+            _ = await rogueStop()
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+        }
         guard connected, var m = mac.replacingOccurrences(of: ":", with: "").hexBytes, m.count == 6 else {
             log("deauth: mac invalido")
             return false
@@ -319,6 +373,10 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         m.append(UInt8(clamping: ch))
         m.append(UInt8(clamping: count))
         let r = await sendAwait(.deauth, payload: m)
+        if r?.0 == 3 {
+            log("deauth rifiutata: rogue AP ancora attivo — STOP rogue e riprova")
+            return false
+        }
         let ok = r?.0 == 0
         log(ok ? "deauth \(mac) inviata ✓" : "deauth fallita")
         return ok
@@ -344,8 +402,274 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         return r?.0 == 0
     }
 
+    // MARK: radio ESP32 — rete target, rogue AP, portal, log
+
+    func roundTrip(host: String, port: Int, payload: [UInt8], udp: Bool = false, timeout: TimeInterval = 4) async -> Data? {
+        guard connected else { return nil }
+        var ip = host.split(separator: ".").compactMap { UInt8($0) }
+        guard ip.count == 4 else { log("roundTrip: serve un IP, non \(host)"); return nil }
+        ip += [UInt8(port & 0xFF), UInt8((port >> 8) & 0xFF)]
+        ip.append(UInt8(min(250, max(10, Int(timeout * 10)))))
+        ip += [UInt8(payload.count & 0xFF), UInt8((payload.count >> 8) & 0xFF)]
+        ip += payload
+        let r = await sendAwait(udp ? .udpRT : .tcpRT, payload: ip, timeout: timeout + 16)
+        guard r?.0 == 0 else {
+            if let r { log("roundtrip \(host):\(port) err \(r.0)") }
+            return nil
+        }
+        return r?.1
+    }
+
+    func portScan(host: String, ports: [UInt16]) async -> [(UInt16, String)] {
+        guard connected else { return [] }
+        var ip = host.split(separator: ".").compactMap { UInt8($0) }
+        guard ip.count == 4 else { return [] }
+        let p = ports.prefix(12).map { [UInt8($0 & 0xFF), UInt8(($0 >> 8) & 0xFF)] }.flatMap { $0 }
+        ip.append(UInt8(ports.prefix(12).count))
+        ip += p
+        let r = await sendAwait(.portScan, payload: ip, timeout: 30)
+        guard let r, r.0 == 0 else { return [] }
+        var out: [(UInt16, String)] = []
+        let d = r.1
+        var i = 0
+        while i + 3 <= d.count {
+            let port = UInt16(d[i]) | (UInt16(d[i + 1]) << 8)
+            let bl = Int(d[i + 2])
+            i += 3
+            guard i + bl <= d.count else { break }
+            out.append((port, String(decoding: d[i..<(i + bl)], as: UTF8.self)))
+            i += bl
+        }
+        log("port scan \(host): \(out.count) porte aperte")
+        return out
+    }
+
+    func joinTarget(_ ssid: String, _ pass: String) async -> Bool {
+        guard connected else { return false }
+        var pl: [UInt8] = [UInt8(min(32, ssid.utf8.count))] + Array(ssid.utf8.prefix(32))
+        pl += [UInt8(min(64, pass.utf8.count))] + Array(pass.utf8.prefix(64))
+        let r = await sendAwait(.joinTarget, payload: pl, timeout: 24)
+        if let r, r.0 == 0 {
+            log("join rete target OK — IP ESP32: \(String(decoding: r.1, as: UTF8.self))")
+            return true
+        }
+        log("join rete target fallita")
+        return false
+    }
+
+    func rogueStart(ssid: String, pass: String, dnsFwd: Bool) async -> Bool {
+        guard connected else { return false }
+        var p: [UInt8] = [UInt8(min(32, ssid.utf8.count))] + Array(ssid.utf8.prefix(32))
+        let pw = Array(pass.utf8.prefix(64))
+        p += [UInt8(pw.count)] + pw
+        p.append(dnsFwd ? 1 : 0)
+        let ok = await sendAwait(.rogueStart, payload: p, timeout: 14)?.0 == 0
+        DispatchQueue.main.async { self.rogueOn = ok }
+        log(ok ? "rogue AP '\(ssid)' ON (dns=\(dnsFwd ? "ibrido/internet" : "poison"))" : "rogue AP start fallito")
+        return ok
+    }
+
+    func rogueStop() async -> Bool {
+        guard connected else { return false }
+        let ok = await sendAwait(.rogueStop, payload: [], timeout: 12)?.0 == 0
+        DispatchQueue.main.async {
+            self.rogueOn = !ok
+            if ok { self.rogueClients = [] }
+        }
+        log(ok ? "rogue AP OFF" : "rogue stop fallito")
+        return ok
+    }
+
+    func rogueClientsRefresh() async {
+        guard connected else { return }
+        guard let r = await sendAwait(.rogueClients, payload: [], timeout: 8), r.0 == 0,
+              r.1.count >= 1 else { return }
+        let cnt = Int(r.1[0])
+        var out: [RogueClient] = []
+        var o = 1
+        for _ in 0..<cnt where o + 10 <= r.1.count {
+            let mac = r.1[o..<(o + 6)].map { String(format: "%02X", $0) }.joined(separator: ":")
+            o += 6
+            let ip = "\(r.1[o]).\(r.1[o+1]).\(r.1[o+2]).\(r.1[o+3])"
+            o += 4
+            out.append(RogueClient(mac: mac, ip: ip))
+        }
+        DispatchQueue.main.async { self.rogueClients = out }
+        log("rogue clients: \(cnt)")
+    }
+
+    func karma(_ on: Bool) async -> [String] {
+        guard connected else { return [] }
+        guard let r = await sendAwait(.karma, payload: [on ? 1 : 0], timeout: on ? 8 : 12), r.0 == 0 else { return [] }
+        guard !on else { return [] }
+        let csv = String(decoding: r.1, as: UTF8.self)
+        let ssids = csv.isEmpty ? [] : csv.split(separator: ",").map(String.init)
+        log("karma probe trovati: \(ssids.count)")
+        return ssids
+    }
+
+    func portalSet(_ html: String) async -> Bool {
+        guard connected else { return false }
+        let b = Array(html.utf8.prefix(780))
+        var p: [UInt8] = [UInt8(b.count & 0xFF), UInt8((b.count >> 8) & 0xFF)]
+        p += b
+        let ok = await sendAwait(.portalSet, payload: p, timeout: 8)?.0 == 0
+        log(ok ? "portal impostato (\(b.count)B)" : "portal fallito")
+        return ok
+    }
+
+    func nat(_ on: Bool, dnsFwd: Bool) async -> Bool {
+        guard connected else { return false }
+        let ok = await sendAwait(.nat, payload: [on ? 1 : 0, dnsFwd ? 1 : 0], timeout: 8)?.0 == 0
+        log(ok ? "nat=\(on) dns=\(dnsFwd ? "forward" : "poison")" : "nat fallito")
+        return ok
+    }
+
+    func trafficLog() async -> [String] {
+        guard connected else { return [] }
+        guard let r = await sendAwait(.sniffLog, payload: [], timeout: 10), r.0 == 0 else { return [] }
+        let csv = String(decoding: r.1, as: UTF8.self)
+        let items = csv.isEmpty ? [] : csv.components(separatedBy: "|")
+        if !items.isEmpty { log("traffic log: \(items.count) voci") }
+        return items
+    }
+
+    // MARK: Bluetooth dell'ESP32 (BT Classic + BLE scan)
+
+    func btInquiry(seconds: Int = 10) async -> [BTDevice] {
+        guard connected else { return [] }
+        guard let r = await sendAwait(.btInquiry, payload: [UInt8(max(2, min(15, seconds)))],
+                                      timeout: TimeInterval(seconds) + 18), r.0 == 0 else {
+            log("BT inquiry: nessuna risposta")
+            return []
+        }
+        var out: [BTDevice] = []
+        let d = r.1
+        guard !d.isEmpty else { return [] }
+        let cnt = Int(d[0])
+        var o = 1
+        for _ in 0..<cnt where o + 8 <= d.count {
+            let mac = d[o..<(o + 6)].map { String(format: "%02X", $0) }.joined(separator: ":")
+            o += 6
+            let rssi = Int(Int8(bitPattern: d[o])); o += 1
+            let nl = Int(d[o]); o += 1
+            guard o + nl <= d.count else { break }
+            let name = String(decoding: d[o..<(o + nl)], as: UTF8.self)
+            o += nl
+            out.append(BTDevice(mac: mac, name: name.isEmpty ? "(senza nome)" : name, rssi: rssi))
+        }
+        DispatchQueue.main.async { self.btDevices = out }
+        log("BT Classic: \(out.count) dispositivo(i)")
+        return out
+    }
+
+    func btSdp(mac: String) async -> [String] {
+        guard connected, let m = mac.replacingOccurrences(of: ":", with: "").hexBytes, m.count == 6 else { return [] }
+        guard let r = await sendAwait(.btSdp, payload: m, timeout: 20), r.0 == 0 else {
+            log("SDP: nessun risultato")
+            return []
+        }
+        var out: [String] = []
+        let d = r.1
+        guard !d.isEmpty else { return [] }
+        let cnt = Int(d[0])
+        var o = 1
+        for _ in 0..<cnt where o < d.count {
+            let l = Int(d[o]); o += 1
+            guard l > 0, o + l <= d.count else { break }
+            let raw = Array(d[o..<(o + l)]); o += l
+            out.append(Self.uuidText(raw))
+        }
+        DispatchQueue.main.async { self.btServices = out }
+        log("SDP \(mac): \(out.count) servizi")
+        return out
+    }
+
+    static func uuidText(_ raw: [UInt8]) -> String {
+        switch raw.count {
+        case 2:
+            let v = UInt16(raw[0]) | (UInt16(raw[1]) << 8)
+            return String(format: "0x%04X %@", v, btName(v))
+        case 4:
+            let v = UInt32(raw[0]) | (UInt32(raw[1]) << 8) | (UInt32(raw[2]) << 16) | (UInt32(raw[3]) << 24)
+            return String(format: "0x%08X", v)
+        case 16:
+            let s = raw.reversed().map { String(format: "%02X", $0) }.joined()
+            return "\(s.prefix(8))-\(s.dropFirst(8).prefix(4))-\(s.dropFirst(12).prefix(4))-\(s.dropFirst(16).prefix(4))-\(s.dropFirst(20))"
+        default:
+            return raw.map { String(format: "%02X", $0) }.joined()
+        }
+    }
+
+    static func btName(_ v: UInt16) -> String {
+        switch v {
+        case 0x1101: return "SPP (serial)"
+        case 0x1105: return "OBEX Object Push"
+        case 0x1106: return "OBEX File Transfer"
+        case 0x1108: return "Headset"
+        case 0x110A: return "A2DP Source"
+        case 0x110B: return "A2DP Sink"
+        case 0x110C: return "AVRCP Target"
+        case 0x110E: return "AVRCP Controller"
+        case 0x1112: return "A2DP Audio Sink"
+        case 0x111E: return "Handsfree"
+        case 0x111F: return "Handsfree Audio Gateway"
+        case 0x1124: return "HID"
+        case 0x112D: return "SIM Access"
+        case 0x112F: return "Phonebook Access"
+        case 0x1132: return "Message Access"
+        case 0x1200: return "PnP Information"
+        case 0x1800: return "GAP"
+        case 0x1801: return "GATT"
+        case 0x180A: return "Device Information"
+        case 0x180D: return "Heart Rate"
+        case 0x180F: return "Battery"
+        case 0x1812: return "HID over GATT"
+        case 0x181A: return "Environmental Sensing"
+        case 0xFE9F: return "Google"
+        case 0xFEF5: return "Texas Instruments"
+        default: return ""
+        }
+    }
+
+    func bleAdvScan(seconds: Int = 6) async -> [BLEAdv] {
+        guard connected else { return [] }
+        guard let r = await sendAwait(.bleAdvScan, payload: [UInt8(max(2, min(15, seconds)))],
+                                      timeout: TimeInterval(seconds) + 16), r.0 == 0 else {
+            log("BLE adv scan: nessuna risposta")
+            return []
+        }
+        var out: [BLEAdv] = []
+        let d = r.1
+        guard !d.isEmpty else { return [] }
+        let cnt = Int(d[0])
+        var o = 1
+        for _ in 0..<cnt where o + 8 <= d.count {
+            let mac = d[o..<(o + 6)].map { String(format: "%02X", $0) }.joined(separator: ":")
+            o += 6
+            let rssi = Int(Int8(bitPattern: d[o])); o += 1
+            let nl = Int(d[o]); o += 1
+            guard o + nl <= d.count else { break }
+            let name = String(decoding: d[o..<(o + nl)], as: UTF8.self)
+            o += nl
+            guard o < d.count else { break }
+            let al = Int(d[o]); o += 1
+            guard o + al <= d.count else { break }
+            let adv = d[o..<(o + al)].map { String(format: "%02X", $0) }.joined(separator: " ")
+            o += al
+            out.append(BLEAdv(mac: mac, name: name.isEmpty ? "(anon)" : name, rssi: rssi, adv: adv))
+        }
+        DispatchQueue.main.async { self.bleAdvDevices = out }
+        log("BLE adv: \(out.count) pacchetto/i")
+        return out
+    }
+
     func stopAll() {
         send(.stop)
+        DispatchQueue.main.async {
+            self.rogueOn = false
+            self.rogueClients = []
+        }
     }
 }
 
