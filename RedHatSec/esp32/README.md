@@ -5,11 +5,12 @@ L'app parla solo **BLE** (GATT `FFE0`/`FFE1`). Il TCP dell'ESP8266 resta fallbac
 ## Flash (obbligatorio: partizione + 115200)
 
 ```
-arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app RedHatSec/esp32/RedHatBridge32
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app --build-property "compiler.c.elf.extra_flags=-Wl,--allow-multiple-definition" RedHatSec/esp32/RedHatBridge32
 arduino-cli upload  -p COM<N> --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,UploadSpeed=115200" RedHatSec/esp32/RedHatBridge32
 ```
 
 - `PartitionScheme=huge_app`: il firmware occupa ~1.68 MB, lo schema default (1.31 MB) non basta.
+- `-Wl,--allow-multiple-definition` è **obbligatorio**: sovrascriviamo `ieee80211_raw_frame_sanity_check` (forte in libnet80211) per sbloccare deauth/disassoc via `esp_wifi_80211_tx`, altrimenti torna `rc=258 ESP_ERR_INVALID_ARG`.
 - `UploadSpeed=115200`: sulle board clone (MAC `00:00:00:00:00:00`, rev v0.0) lo stub si perde a 921600 → `Unable to verify flash chip connection`.
 - Flash diretto alternativo: `esptool write_flash 0x0 build/RedHatBridge32.ino.merged.bin`.
 - Driver USB: CH340 gia' in Windows (`oem80.inf`); CP2102 = Silicon Labs VCP (Preso da Windows Update, "Silicon Laboratories Inc. - Ports - 11.2.0.167").
@@ -58,4 +59,5 @@ esp -> app: [0x5A][len u16 LE][cmd][status][payload][crc8(1, 4+len)]
 - Memorizza fino a 6 sessioni `(BSSID, STA)` × 4 frame (EAPOL M1–M4, WPS come `msg=0`), PMKID KDE da M1, SSID da beacon/probe.
 - Mutua esclusione: sniff rifiuta scan/pmkid/karma/beacon; deauth/beacon/pmkid/scan/join/rogue rifiutano con sniff attivo.
 - Dump via `0x32` per indice; l'app scrive `.pcap` (DLT 127, radiotap 8B) pronto per aircrack-ng.
-- Smoke test seriale su COM: `S` start hop, `R` start fisso, `Q` stop, `X` stats, `D` dump.
+- Smoke test seriale su COM: `S` start hop, `R` start fisso, `R<ch>` canale forzato (es. `R6`), `Q` stop, `X` stats (canale reale hw), `D` dump con key-info, `E` deauth broadcast dall'ultimo BSSID beacon, `L` scan sincrono, `I` stato STA, `J` join con log reason.
+- Verificato su hardware: deauth `rc=0`, 4-way completo M1–M4 con `ki` 0x008A/0x010A/0x13CA/0x030A.

