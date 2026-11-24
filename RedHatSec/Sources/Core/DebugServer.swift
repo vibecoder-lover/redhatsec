@@ -46,7 +46,11 @@ final class DebugLog {
 // GET /all     tutto il buffer
 // GET /status  JSON con build, IP, porta, uptime, righe
 // GET /clear   svuota il buffer
+// GET /cmd?q=X esegue un comando (harness smoke test: state, scan, sniff-*)
 // Si attiva/disattiva dalle Impostazioni dell'app; la scelta è persistita.
+extension Notification.Name {
+    static let rhsRemoteCmd = Notification.Name("rhs.remote.cmd")
+}
 final class DebugServer: ObservableObject {
     static let shared = DebugServer()
 
@@ -163,6 +167,13 @@ final class DebugServer: ObservableObject {
         } else if path.hasPrefix("/clear") {
             DebugLog.shared.clear()
             body = "cleared\n"
+        } else if path.hasPrefix("/cmd") {
+            let q = URLComponents(string: path)?.queryItems?.first(where: { $0.name == "q" })?.value ?? ""
+            DebugLog.shared.add("[debug] remote cmd: \(q)")
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .rhsRemoteCmd, object: nil, userInfo: ["q": q])
+            }
+            body = "queued: \(q)\n"
         } else if path.hasPrefix("/all") {
             body = DebugLog.shared.snapshot(tail: nil)
         } else {
