@@ -74,9 +74,9 @@ struct DashboardView: View {
                  color: ShellRunner.shared.isJailbroken ? .ok : .bad,
                  icon: ShellRunner.shared.isJailbroken ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
             Pill(text: "tools: \(sr.availableTools.count)", color: .info, icon: "hammer.fill")
-            Pill(text: o.tcpBridge.connected ? "BRIDGE ✓" : "BRIDGE ✗",
-                 color: o.tcpBridge.connected ? .ok : .bad,
-                 icon: o.tcpBridge.connected ? "dot.radiowaves.left.and.right" : "bolt.horizontal.circle")
+            Pill(text: o.radioOnline ? "BRIDGE ✓ \(o.radioName)" : "BRIDGE ✗",
+                 color: o.radioOnline ? .ok : .bad,
+                 icon: o.radioOnline ? "dot.radiowaves.left.and.right" : "bolt.horizontal.circle")
             Spacer(minLength: 0)
             if o.phase == .execute {
                 Pill(text: o.currentStep, color: .warn, icon: "gearshape.2.fill").shimmering()
