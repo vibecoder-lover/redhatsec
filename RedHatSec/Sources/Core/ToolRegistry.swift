@@ -122,8 +122,18 @@ enum ToolRegistry {
       if try_listen "$@" "$port"; then :; fi
       if try_listen "$@" -p "$port"; then :; fi
       if try_listen -l "$port"; then :; fi
+      # netcat che non sa ascoltare: fallback socat (presente nei deb reali)
+      SOCAT=""
+      for s in /var/jb/usr/bin/socat /usr/bin/socat /var/jb/usr/local/bin/socat /usr/local/bin/socat; do
+        if [ -x "$s" ]; then SOCAT="$s"; break; fi
+      done
+      if [ -n "$SOCAT" ]; then
+        echo "nc shim: $REAL non fa listen — fallback socat :$port" >&2
+        exec "$SOCAT" -d -d TCP-LISTEN:$port,reuseaddr -
+      fi
       echo "nc shim: nessuna forma di listen accettata da $REAL" >&2
-      "$REAL" -h 2>&1 | head -4 >&2
+      echo "nc shim: REAL=$REAL" >&2
+      "$REAL" -h 2>&1 | head -6 >&2
       exit 1
     fi
 

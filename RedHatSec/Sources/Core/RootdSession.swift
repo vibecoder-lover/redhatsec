@@ -93,9 +93,9 @@ final class RootdSession: ObservableObject {
             self.pump()
             let sig = hard ? "KILL" : "TERM"
             let script = "p=$(cat /tmp/rhs.curpid 2>/dev/null); if [ -n \"$p\" ]; then "
-                + "command -v pkill >/dev/null 2>&1 && pkill -\(sig) -P $p 2>/dev/null; "
+                + "for k in $(ps -A -o pid=,ppid= 2>/dev/null | awk -v P=\"$p\" '$2==P{print $1}'); do kill -\(sig) $k 2>/dev/null; done; "
                 + "kill -\(sig) $p 2>/dev/null; sleep 1; "
-                + "command -v pkill >/dev/null 2>&1 && pkill -KILL -P $p 2>/dev/null; "
+                + "for k in $(ps -A -o pid=,ppid= 2>/dev/null | awk -v P=\"$p\" '$2==P{print $1}'); do kill -KILL $k 2>/dev/null; done; "
                 + "kill -KILL $p 2>/dev/null; fi; rm -f /tmp/rhs.curpid; echo RHS-INT"
             DispatchQueue.global(qos: .userInitiated).async {
                 _ = RootdClient.exec(script, timeout: 8)
