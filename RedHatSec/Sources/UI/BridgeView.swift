@@ -11,11 +11,15 @@ struct BridgeView: View {
     @State private var btBusy = false
     @State private var sdpBusyFor: String?
     @State private var sdpMsg = ""
+    @State private var bleFloodOn = false
+    @State private var connMac = ""
+    @State private var faseBMsg = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             bleSection
             btSection
+            faseBSection
             tcpSection
             joinSection
             actionsSection
@@ -215,6 +219,80 @@ struct BridgeView: View {
             }
         }
         .padding(14).card()
+    }
+
+    // Fase B: offensive BLE host-level sull'ESP32 (adv flood, conn flood, ATT probe).
+    private var faseBSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "BLE offensive (Fase B)", icon: "bolt.horizontal.circle", color: .warn)
+            Text("adv flood raw con MAC random, conn flood GATTC, probe ATT su handle casuali. Radio unica: non usare insieme alla capture Wi-Fi.")
+                .font(.system(size: 10)).foregroundColor(.dim)
+            Button {
+                Task { await toggleFlood() }
+            } label: {
+                Text(bleFloodOn ? "STOP FLOOD" : "ADV FLOOD")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(maxWidth: .infinity).padding(.vertical, 10)
+            }
+            .background(RoundedRectangle(cornerRadius: 10).fill((bleFloodOn ? Color.bad : Color.warn).opacity(0.2)))
+            .foregroundColor(bleFloodOn ? .bad : .warn)
+            .buttonStyle(ScaleButton())
+            .disabled(!ble.connected)
+
+            HStack(spacing: 8) {
+                TextField("MAC target AA:BB:…", text: $connMac)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .font(.system(size: 12, design: .monospaced))
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(hex: 0x070709)))
+                Button("CONN") { Task { await connFlood() } }
+                    .font(.system(size: 11, weight: .bold)).foregroundColor(.warn)
+                Button("PROBE") { Task { await probeAtt() } }
+                    .font(.system(size: 11, weight: .bold)).foregroundColor(.info)
+            }
+            .disabled(!ble.connected)
+
+            if !faseBMsg.isEmpty {
+                Text(faseBMsg)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.8))
+            }
+            Button("STOP STORM") {
+                Task { _ = await ble.bleStormStop(); bleFloodOn = false; faseBMsg = "storm stop" }
+            }
+            .font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
+            .disabled(!ble.connected)
+        }
+        .padding(14).card()
+    }
+
+    private func toggleFlood() async {
+        let want = !bleFloodOn
+        if await ble.bleFlood(want) {
+            bleFloodOn = want
+            faseBMsg = want ? "flood ON — MAC random, 31B" : "flood OFF — adv FFE0 ripristinato"
+            Haptics.tap()
+        } else {
+            faseBMsg = "flood: comando rifiutato"
+        }
+    }
+
+    private func connFlood() async {
+        guard !connMac.isEmpty else { faseBMsg = "MAC mancante"; return }
+        if let r = await ble.bleConnFlood(mac: connMac, addrType: 1, count: 2) {
+            faseBMsg = "conn: accepted=\(r.accepted) attive=\(r.conns) rc=\(r.rc)"
+        } else {
+            faseBMsg = "conn: comando rifiutato"
+        }
+    }
+
+    private func probeAtt() async {
+        if let n = await ble.bleAttProbe(count: 8) {
+            faseBMsg = "probe: \(n) richieste inviate"
+        } else {
+            faseBMsg = "probe: nessun link GATTC"
+        }
     }
 
     private var tcpSection: some View {

