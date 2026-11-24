@@ -359,30 +359,7 @@ static void beaconLoop() {
 }
 
 // ============ WiFi scan ============
-static void startScan(int seconds) {
-  if (seconds < 3) seconds = 3;
-  if (seconds > 12) seconds = 12;
-  if (scanPending) return;
-  WiFi.scanDelete();
-  if (WiFi.scanNetworks(true, true) == WIFI_SCAN_RUNNING) {
-    scanPending = true;
-    scanStart = millis();
-    Serial.println("[scan] started async");
-  }
-}
-
-static void pollScan() {
-  if (!scanPending) return;
-  int n = WiFi.scanComplete();
-  if (n == WIFI_SCAN_RUNNING) {
-    if (millis() - scanStart > 15000) {
-      scanPending = false;
-      WiFi.scanDelete();
-      sendFrame(0x02, 0x02, (const uint8_t *)"scan timeout", 12);
-    }
-    return;
-  }
-  scanPending = false;
+static void finishScan(int n) {
   apCount = 0;
   if (n > 0) {
     for (int k = 0; k < n && apCount < 24; k++) {
@@ -415,6 +392,53 @@ static void pollScan() {
   }
   Serial.printf("[scan] %d AP\n", apCount);
   sendFrame(0x02, 0x00, payload, i);
+}
+
+static void startScan(int seconds) {
+  if (seconds < 3) seconds = 3;
+  if (seconds > 12) seconds = 12;
+  if (scanPending) return;
+  WiFi.scanDelete();
+  int rc = WiFi.scanNetworks(true, true);
+  Serial.printf("[scan] async rc=%d sta=%d ch=%d\n", rc, (int)WiFi.status(), (int)WiFi.channel());
+  if (rc == WIFI_SCAN_RUNNING) {
+    scanPending = true;
+    scanStart = millis();
+    return;
+  }
+  // radio occupata (reconnect STA in corso) o driver in errore: fallback sincrono
+  int n = WiFi.scanNetworks(false, true);
+  if (n <= 0) {
+    // connect in volo: annullala e riprova — il loop riaggancia l'AP dopo lo scan
+    WiFi.disconnect(false);
+    delay(150);
+    n = WiFi.scanNetworks(false, true);
+  }
+  Serial.printf("[scan] sync n=%d\n", n);
+  if (n < 0) n = 0;
+  finishScan(n);
+}
+
+static void pollScan() {
+  if (!scanPending) return;
+  int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) {
+    if (millis() - scanStart > 15000) {
+      scanPending = false;
+      WiFi.scanDelete();
+      sendFrame(0x02, 0x02, (const uint8_t *)"scan timeout", 12);
+    }
+    return;
+  }
+  scanPending = false;
+  Serial.printf("[scan] done n=%d in %lums\n", n, (unsigned long)(millis() - scanStart));
+  if (n == 0 && millis() - scanStart < 1200) {
+    // "0 istantaneo" = lo scan non è davvero partito: riprova sincrono
+    n = WiFi.scanNetworks(false, true);
+    Serial.printf("[scan] retry sync n=%d\n", n);
+  }
+  if (n < 0) n = 0;
+  finishScan(n);
 }
 
 // ============ client rogue AP + IP via ARP ============
@@ -1293,7 +1317,7 @@ void loop() {
   }
 
   static uint32_t lastReconnect = 0;
-  if (!joinPending && !pmkidArmed && !beaconActive && !rogue &&
+  if (!joinPending && !pmkidArmed && !beaconActive && !rogue && !scanPending &&
       WiFi.status() != WL_CONNECTED && millis() - lastReconnect > 10000) {
     lastReconnect = millis();
     WiFi.begin(STA_SSID, STA_PASS);

@@ -152,7 +152,13 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         connected = true
         state = "connesso (\(deviceName ?? "ESP32"))"
         log("bridge connesso ✓")
-        send(.ping)
+        Task {
+            // handshake: il firmware risponde col proprio banner su 0x01
+            if let r = await self.sendAwait(.ping, timeout: 5) {
+                let banner = String(decoding: r.1, as: UTF8.self)
+                self.log("radio: \(banner.isEmpty ? "pong" : banner)")
+            }
+        }
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
@@ -285,7 +291,7 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
                 // risposta asincrona di una richiesta vecchia: non risolvere quella nuova
                 if self.pendingCmd == frame.cmdEcho {
                     self.resumeResponse((0, Data(frame.payload)))
-                } else {
+                } else if frame.cmdEcho != 0x01 {
                     self.log("RX 0x\(String(format: "%02X", frame.cmdEcho)) inatteso — scartato")
                 }
             }
