@@ -47,3 +47,15 @@ esp -> app: [0x5A][len u16 LE][cmd][status][payload][crc8(1, 4+len)]
 | 0x20 | BT Classic inquiry | `[sec]` → `[count][mac6][rssi][nameLen][name]...` |
 | 0x21 | SDP | `[mac6]` → `[count][uuidLen][uuid]...` |
 | 0x22 | BLE adv scan | `[sec]` → `[count][mac6][rssi][nameLen][name][advLen][adv]...` |
+| 0x30 | sniff start | `[hop]` → "armed" |
+| 0x31 | sniff stop | → `[ses][frames u32][eapol u32][ch]` |
+| 0x32 | sniff dump idx | `[idx]` → `[bssid6][sta6][pmkid?+16][ssidLen][ssid][n][msg][len u16][frame]...` |
+| 0x33 | sniff stats | → `[ses][frames u32][eapol u32][ch]` |
+
+### Fase A — capture EAPOL/PMKID/WPS
+
+- `0x30` promiscuous + channel hop 1–13 (350 ms/canale); con rogue AP attivo resta sul canale dell'AP.
+- Memorizza fino a 6 sessioni `(BSSID, STA)` × 4 frame (EAPOL M1–M4, WPS come `msg=0`), PMKID KDE da M1, SSID da beacon/probe.
+- Mutua esclusione: sniff rifiuta scan/pmkid/karma/beacon; deauth/beacon/pmkid/scan/join/rogue rifiutano con sniff attivo.
+- Dump via `0x32` per indice; l'app scrive `.pcap` (DLT 127, radiotap 8B) pronto per aircrack-ng.
+- Smoke test seriale su COM: `S` start hop, `R` start fisso, `Q` stop, `X` stats, `D` dump.

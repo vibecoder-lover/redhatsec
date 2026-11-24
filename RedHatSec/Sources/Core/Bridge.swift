@@ -49,6 +49,10 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         case btInquiry = 0x20
         case btSdp = 0x21
         case bleAdvScan = 0x22
+        case sniffStart = 0x30
+        case sniffStop = 0x31
+        case sniffDump = 0x32
+        case sniffStats = 0x33
     }
 
     struct BTDevice: Identifiable {
@@ -77,6 +81,24 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         let mac: String
         let ip: String
     }
+
+    struct CapMsg: Identifiable {
+        var id: Int { msg }
+        let msg: Int
+        let frame: Data
+    }
+
+    struct Handshake: Identifiable {
+        var id: String { bssid + "|" + sta }
+        let bssid: String
+        let sta: String
+        let pmkid: String?
+        let ssid: String
+        var frames: [CapMsg]
+    }
+
+    @Published var captureStats: (frames: UInt32, eapol: UInt32, sessions: Int, ch: Int)? = nil
+    @Published var captures: [Handshake] = []
 
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
@@ -406,6 +428,92 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         m.append(UInt8(clamping: ch))
         let r = await sendAwait(.pmkid, payload: m, timeout: 20)
         return r?.0 == 0
+    }
+
+    // MARK: Fase A — capture EAPOL / PMKID / WPS
+
+    private static func u32(_ p: [UInt8], _ o: Int) -> UInt32 {
+        guard o + 4 <= p.count else { return 0 }
+        return UInt32(p[o]) | (UInt32(p[o+1]) << 8) | (UInt32(p[o+2]) << 16) | (UInt32(p[o+3]) << 24)
+    }
+
+    private static func mac(_ p: [UInt8], _ o: Int) -> String {
+        guard o + 6 <= p.count else { return "??:??:??:??:??:??" }
+        return p[o..<o+6].map { String(format: "%02X", $0) }.joined(separator: ":")
+    }
+
+    private static func hex(_ p: [UInt8], _ o: Int, _ n: Int) -> String {
+        guard o + n <= p.count else { return "" }
+        return p[o..<o+n].map { String(format: "%02x", $0) }.joined()
+    }
+
+    func sniffStart(hop: Bool = true) async -> Bool {
+        guard connected else { return false }
+        let h = hop && !rogueOn
+        let r = await sendAwait(.sniffStart, payload: [h ? 1 : 0], timeout: 6)
+        let ok = r?.0 == 0
+        log(ok ? "sniff EAPOL avviato (\(h ? "hop 1-13" : "canale fisso"))" : "sniff rifiutato (radio busy)")
+        return ok
+    }
+
+    func sniffStop() async -> (frames: UInt32, eapol: UInt32, sessions: Int, ch: Int)? {
+        guard connected, let r = await sendAwait(.sniffStop, timeout: 20), r.0 == 0 else { return nil }
+        let p = [UInt8](r.1)
+        guard p.count >= 10 else { return nil }
+        let st = (BridgeManager.u32(p, 1), BridgeManager.u32(p, 5), Int(p[0]), Int(p[9]))
+        DispatchQueue.main.async { self.captureStats = st }
+        log("sniff stop: \(st.0) frame, \(st.1) EAPOL, \(st.2) sessione(i)")
+        return st
+    }
+
+    func sniffStats() async -> (frames: UInt32, eapol: UInt32, sessions: Int, ch: Int)? {
+        guard connected, let r = await sendAwait(.sniffStats, timeout: 6), r.0 == 0 else { return nil }
+        let p = [UInt8](r.1)
+        guard p.count >= 10 else { return nil }
+        let st = (BridgeManager.u32(p, 1), BridgeManager.u32(p, 5), Int(p[0]), Int(p[9]))
+        DispatchQueue.main.async { self.captureStats = st }
+        return st
+    }
+
+    func sniffDump() async -> [Handshake] {
+        guard connected else { return [] }
+        var out: [Handshake] = []
+        for i in 0..<12 {
+            guard let r = await sendAwait(.sniffDump, payload: [UInt8(i)], timeout: 12) else { break }
+            if r.0 != 0 { break }
+            if let hs = parseHandshake([UInt8](r.1)) { out.append(hs) }
+        }
+        DispatchQueue.main.async { self.captures = out }
+        log("sniff dump: \(out.count) sessione(i) EAPOL")
+        return out
+    }
+
+    private func parseHandshake(_ p: [UInt8]) -> Handshake? {
+        var i = 0
+        func avail(_ n: Int) -> Bool { i + n <= p.count }
+        guard avail(29) else { return nil }
+        let bssid = BridgeManager.mac(p, 0)
+        let sta = BridgeManager.mac(p, 6)
+        let hasPmkid = p[12] != 0
+        let pmkid = hasPmkid ? BridgeManager.hex(p, 13, 16) : nil
+        i = 29
+        guard avail(1) else { return nil }
+        let sl = Int(p[i]); i += 1
+        guard avail(sl + 1) else { return nil }
+        let ssid = String(decoding: p[i..<i+sl], as: UTF8.self)
+        i += sl
+        let n = Int(p[i]); i += 1
+        var frames: [CapMsg] = []
+        for _ in 0..<n {
+            guard avail(3) else { break }
+            let msg = Int(p[i])
+            let len = Int(p[i+1]) | (Int(p[i+2]) << 8)
+            i += 3
+            guard avail(len) else { break }
+            frames.append(CapMsg(msg: msg, frame: Data(p[i..<i+len])))
+            i += len
+        }
+        return Handshake(bssid: bssid, sta: sta, pmkid: pmkid, ssid: ssid, frames: frames)
     }
 
     // MARK: radio ESP32 — rete target, rogue AP, portal, log

