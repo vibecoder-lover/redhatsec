@@ -36,19 +36,11 @@ final class Orchestrator: ObservableObject {
     private var scanTask: Task<Void, Never>?
     private var execTask: Task<Void, Never>?
     private var nfcTask: Task<NFCDump?, Never>?
-    private var remoteCmdObs: NSObjectProtocol?
 
     init() {
         loadDumps()
         // ESP32 = BLE (primario). L'ESP8266 TCP resta come fallback.
         bridge.start()
-        // harness remota: GET /cmd?q=… sul debug server
-        remoteCmdObs = NotificationCenter.default.addObserver(
-            forName: .rhsRemoteCmd, object: nil, queue: .main
-        ) { [weak self] n in
-            guard let self, let q = n.userInfo?["q"] as? String, !q.isEmpty else { return }
-            Task { await self.runRemote(q) }
-        }
         // forwarding: i bridge sono ObservableObject esterni — chi osserva Orchestrator
         // vede anche i loro cambi (statusRow, sheet Impostazioni, ecc.)
         bridgeObservers = [
@@ -61,39 +53,6 @@ final class Orchestrator: ObservableObject {
     var radioOnline: Bool { bridge.connected || tcpBridge.connected }
     var radioName: String { bridge.connected ? "ESP32 BLE" : (tcpBridge.connected ? "ESP8266 TCP" : "nessuna radio") }
     var radioRogueOn: Bool { bridge.connected ? bridge.rogueOn : tcpBridge.rogueOn }
-
-    // Smoke test remoto (GET /cmd?q=…): esegue l'azione e scrive l'esito nel
-    // DebugLog, così il PC legge tutto da http://<iphone>:8787/.
-    private func runRemote(_ q: String) async {
-        switch q {
-        case "state":
-            DebugLog.shared.add("[cmd] radio=\(radioName) online=\(radioOnline) targets=\(targets.count) plan=\(plan.count) caps=\(bridge.captures.count)")
-        case "scan":
-            let nets = await bridge.wifiScan(seconds: 6)
-            DebugLog.shared.add("[cmd] scan → \(nets.count) reti: \(nets.map { "\($0.ssid)@\($0.ch)" }.joined(separator: ", "))")
-        case "sniff-start":
-            let ok = await bridge.sniffStart(hop: true)
-            DebugLog.shared.add("[cmd] sniff-start → \(ok)")
-        case "sniff-stop":
-            if let st = await bridge.sniffStop() {
-                DebugLog.shared.add("[cmd] sniff-stop frames=\(st.frames) eapol=\(st.eapol) ses=\(st.sessions) ch=\(st.ch)")
-            } else { DebugLog.shared.add("[cmd] sniff-stop → fail") }
-        case "sniff-stats":
-            if let st = await bridge.sniffStats() {
-                DebugLog.shared.add("[cmd] sniff-stats frames=\(st.frames) eapol=\(st.eapol) ses=\(st.sessions) ch=\(st.ch)")
-            } else { DebugLog.shared.add("[cmd] sniff-stats → fail") }
-        case "sniff-dump":
-            let caps = await bridge.sniffDump()
-            for h in caps {
-                DebugLog.shared.add("[cmd] cap \(h.ssid.isEmpty ? "(no ssid)" : h.ssid) \(h.bssid) sta=\(h.sta) msg=\(h.frames.map { String($0.msg) }.joined(separator: ",")) pmkid=\(h.pmkid ?? "-")")
-            }
-            if !caps.isEmpty, let u = WifiCapture.write(caps) {
-                DebugLog.shared.add("[cmd] pcap \(u.lastPathComponent) frame=\(caps.reduce(0) { $0 + $1.frames.count })")
-            }
-        default:
-            DebugLog.shared.add("[cmd] unknown \(q)")
-        }
-    }
 
     private func radioDeauth(mac: String, ch: Int, count: Int) async -> Bool {
         if bridge.connected { return await bridge.deauth(mac: mac, ch: ch, count: count) }
