@@ -61,3 +61,18 @@ esp -> app: [0x5A][len u16 LE][cmd][status][payload][crc8(1, 4+len)]
 - Dump via `0x32` per indice; l'app scrive `.pcap` (DLT 127, radiotap 8B) pronto per aircrack-ng.
 - Smoke test seriale su COM: `S` start hop, `R` start fisso, `R<ch>` canale forzato (es. `R6`), `Q` stop, `X` stats (canale reale hw), `D` dump con key-info, `E` deauth broadcast dall'ultimo BSSID beacon, `L` scan sincrono, `I` stato STA, `J` join con log reason.
 - Verificato su hardware: deauth `rc=0`, 4-way completo M1–M4 con `ki` 0x008A/0x010A/0x13CA/0x030A.
+
+### Fase B — BLE host-level
+
+| Op | Comando | Payload / risposta |
+|---|---|---|
+| 0x40 | adv flood on/off | `[on][randAddr]` → "flood on/off" |
+| 0x41 | conn flood | `[mac6][addrType][count]` → `[accepted][conns][rc lo][rc hi]` |
+| 0x42 | ATT probe | `[count]` → `[sent][conns]` (0xff sent = nessuna connessione) |
+| 0x43 | storm stop | → "stopped" |
+
+- **Adv flood**: 31 byte raw random (manufacturer 0xFFFF) + rotazione indirizzo random static ogni 60 ms; al termine ripristina l'advertising FFE0 + nome.
+- **Conn flood**: `esp_ble_gattc_open` diretto fino a 8 link (radio unica: il link bridge resta, ma niente Wi-Fi capture contemporanea).
+- **ATT probe**: letture su handle casuali sulla connessione GATTC attiva; i risultati arrivano nel callback GATTC (`[ble] open/disc`).
+- Limite reale: il fuzz resta a livello host (ATT/GATT API). PDU LL, SMP raw e L2CAP non sono raggiungibili senza controller esterno.
+- Seriale: `F` toggle flood, `G` stato GATTC, `C` connect di prova a MAC fittizio, `T` probe, `H` stop.

