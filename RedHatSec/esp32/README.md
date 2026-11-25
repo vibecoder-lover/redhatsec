@@ -101,7 +101,7 @@ esp -> app: [0x5A][len u16 LE][cmd][status][payload][crc8(1, 4+len)]
 
 - Il controller gira in `CONFIG_BTDM_CTRL_HCI_MODE_VHCI=y`; `esp_vhci_host_send_packet` **esiste e funziona** (verificato: `available=1`, `raw send=1`).
 - I simboli non sono nel header Arduino: dichiarati `extern "C"` nello sketch.
-- Iniezione ACL raw **collide con lo stack Bluedroid**: su handle inesistente il controller risponde e l'host si resetta (`raw send=1` → riavvio). Usare solo con un link ACL vivo e consapevolmente.
+- Iniezione ACL raw **collide con lo stack Bluedroid**: la chiamata passa e il frame esce; con handle inesistente il controller lo scarta (`send=1`, nessun crash). Un frame con header ACL malformato (bug corretto) faceva invece riavviare l'host.
 - PSM parametrizzato: 0x0001 SDP, 0x0003 RFCOMM, 0x000F BNEP, 0x0004/0x0006 ATT — l'opcode 0x52 permette payload SDP attribute/BNEP craftati dall'app.
 - Limite fisico: PDU LL, KNOB/BIAS, SAE restano nel controller (non iniettabili); 5 GHz e 802.15.4 assenti.
-- Seriale: `A` probe VHCI, `!` invio ACL di prova (riavvia l'host: solo test).
+- Seriale: `A` probe VHCI, `!` invio ACL di prova su handle 0 (scartato dal controller, nessun riavvio).

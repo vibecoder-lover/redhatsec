@@ -1157,10 +1157,19 @@ static void bleGattcCb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_b
       Serial.printf("[ble] search cmpl status=%d count=%d\n",
                     param->search_cmpl.status, param->search_cmpl.searched_service_source);
       break;
-    case ESP_GATTC_DISCONNECT_EVT:
-      Serial.printf("[ble] disc conn_id=%d reason=0x%02X\n",
-                    param->disconnect.conn_id, param->disconnect.reason);
+    case ESP_GATTC_DISCONNECT_EVT: {
+      for (int i = 0; i < bleConnCount; i++) {
+        if (bleConnIds[i] == param->disconnect.conn_id) {
+          for (int k = i; k < bleConnCount - 1; k++) bleConnIds[k] = bleConnIds[k + 1];
+          bleConnCount--;
+          break;
+        }
+      }
+      if (bleConnCount == 0) bleFuzzStop();
+      Serial.printf("[ble] disc conn_id=%d reason=0x%02X n=%d\n",
+                    param->disconnect.conn_id, param->disconnect.reason, bleConnCount);
       break;
+    }
     default:
       break;
   }
@@ -1450,50 +1459,36 @@ static bool vhciSend(const uint8_t *p, uint16_t n) {
   return true;
 }
 
+// HCI ACL con payload L2CAP arbitrario (CID + dati): SDP/BNEP/ATT raw
+static bool vhciL2capRaw(uint16_t handle, uint16_t cid, const uint8_t *payload, uint16_t plen) {
+  if (plen > 200) return false;
+  uint8_t pkt[210];
+  uint16_t dlen = (uint16_t)(4 + plen);  // L2CAP len(2)+CID(2)+payload
+  pkt[0] = (uint8_t)(handle & 0xFF);
+  pkt[1] = (uint8_t)(((handle >> 8) & 0x0F) | 0x20);  // PB=first fragment
+  pkt[2] = (uint8_t)(dlen & 0xFF);
+  pkt[3] = (uint8_t)(dlen >> 8);
+  pkt[4] = (uint8_t)(plen & 0xFF);       // L2CAP length = info payload
+  pkt[5] = (uint8_t)(plen >> 8);
+  pkt[6] = (uint8_t)(cid & 0xFF);
+  pkt[7] = (uint8_t)(cid >> 8);
+  if (plen) memcpy(pkt + 8, payload, plen);
+  return vhciSend(pkt, (uint16_t)(8 + plen));
+}
+
 // HCI ACL con L2CAP Connect Request (CID 0x0001 → PSM)
 static bool vhciL2capConnect(uint16_t handle, uint16_t psm) {
-  uint8_t pkt[16];
-  int len = 12;
-  pkt[0] = 0x02;                 // HCI ACL
-  pkt[1] = (uint8_t)(handle & 0xFF);
-  pkt[2] = (uint8_t)((handle >> 8) & 0x0F);
-  pkt[3] = (uint8_t)(len & 0xFF);  // ACL data len
-  pkt[4] = (uint8_t)((len >> 8) & 0xFF);
-  pkt[5] = (uint8_t)(len & 0xFF);  // L2CAP len = 12
-  pkt[6] = 0x00;
-  pkt[7] = 0x01; pkt[8] = 0x00;   // CID 0x0001 (signaling)
-  pkt[9] = 0x02;                  // L2CAP_CONN_REQ
-  pkt[10] = 0x01;                 // identifier
-  pkt[11] = 0x04; pkt[12] = 0x00; // length
-  pkt[13] = (uint8_t)(psm & 0xFF);
-  pkt[14] = (uint8_t)((psm >> 8) & 0xFF);
-  pkt[15] = 0x00;                 // source CID
-  return vhciSend(pkt, 16);
+  static uint16_t scid = 0x0040;
+  uint8_t req[8] = {0x02, 0x01, 0x04, 0x00,
+                    (uint8_t)(psm & 0xFF), (uint8_t)(psm >> 8),
+                    (uint8_t)(scid & 0xFF), (uint8_t)(scid >> 8)};
+  scid += 2;
+  return vhciL2capRaw(handle, 0x0001, req, 8);
 }
 
 static void vhciProbe() {
   bool av = esp_vhci_host_check_send_available();
   Serial.printf("[vhci] available=%d\n", (int)av);
-}
-
-// HCI ACL con payload L2CAP arbitrario (CID + dati): SDP/BNEP/ATT raw
-static bool vhciL2capRaw(uint16_t handle, uint16_t cid, const uint8_t *payload, uint16_t plen) {
-  if (plen > 200) return false;
-  uint8_t pkt[220];
-  uint16_t l2len = (uint16_t)(4 + plen);
-  int o = 0;
-  pkt[o++] = 0x02;
-  pkt[o++] = (uint8_t)(handle & 0xFF);
-  pkt[o++] = (uint8_t)((handle >> 8) & 0x0F);
-  pkt[o++] = (uint8_t)((l2len + 4) & 0xFF);
-  pkt[o++] = (uint8_t)(((l2len + 4) >> 8) & 0xFF);
-  pkt[o++] = (uint8_t)(l2len & 0xFF);
-  pkt[o++] = (uint8_t)((l2len >> 8) & 0xFF);
-  pkt[o++] = (uint8_t)(cid & 0xFF);
-  pkt[o++] = (uint8_t)((cid >> 8) & 0xFF);
-  memcpy(pkt + o, payload, plen);
-  o += plen;
-  return vhciSend(pkt, (uint16_t)o);
 }
 
 static int bleMtuBurst(uint8_t count) {
