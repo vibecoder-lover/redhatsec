@@ -123,3 +123,18 @@ Serve un periferico BLE reale: l'app stessa lo fa.
 6. **VHCI** → `available=1` (con un ACL vivo: L2CAP connect flood su PSM 0x0001/0x0003/0x000F).
 
 Seriale equivalente: `W5` → `M0` → `P0` → `V8` → `U0`/`U5` → `Y`.
+
+### Fase D — hardware complementare (mapping, niente emulazione)
+
+L'ESP32 classico non copre questi vettori per limite fisico/ROM. Mappa esatta di cosa serve:
+
+| Vettore | Perché l'ESP32 non basta | Hardware richiesto |
+|---|---|---|
+| 802.15.4 / Zigbee / Thread | radio assente | ESP32-C6 (o -H2) sul bridge, stesso protocollo RHS |
+| PDU LL BLE (SweynTooth) | LL nel controller, host non inietta | nRF52 + sniffer/SoftDevice o radio custom (nRF52840 Dongle) |
+| BIAS / KNOB | negoziazione chiave + impersonation baseband | dongle BT Linux (CSR/BlueZ) + kernel patched |
+| BR/EDR reale (SDP/BNEP operativo) | controller BLE-only, niente ACL classici | dongle BT classico su Linux o telefono in BR/EDR |
+| 5 GHz Wi-Fi | radio 2.4 only | ESP32 non lo ha; serve radio 5 GHz (Atheros/MT7921) |
+| sub-GHz / NFC / RFID | assenti | Proxmark3 (RFID/NFC), CC1101 (sub-GHz) |
+
+Il builder SDP/BNEP/BlueBorne di Fase C resta valido: cambia solo il trasporto ACL (handle BR/EDR reale) quando c'è hardware classico.
