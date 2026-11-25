@@ -92,6 +92,7 @@ esp -> app: [0x5A][len u16 LE][cmd][status][payload][crc8(1, 4+len)]
 - **Scan**: GAP raw asincrono (non blocca il loop), attivo, dedup per BDA, nome da adv/scan-rsp.
 - Seriale: `W[secs]` scan async, `w` stop scan forzato, `.` stato (scan/adv/conn/gattc/flood), `M<n>` connect all'n-esimo hit, `K<12hex>[type]` connect a MAC, `P[mode]` SMP, `U[type]` fuzz, `V[count]` MTU burst, `Y` stats fuzz, `Z` fuzz off, `F/G/C/T/H` come sopra.
 - **Scan robusta**: se una scan resta appesa (evento di completamento mai arrivato) il watchdog la chiude dopo `secs+5s`; una nuova `W` durante una scan attiva risponde `busy` invece di essere ignorata, e dopo il timeout riparte. Evita il "resta in ricerca BLE".
+- **Advertising proprietario**: il firmware registra il proprio GAP callback, quindi la catena raw adv-data → scan-rsp → start è gestita a mano. Lo stato `adv` in `.` riflette l'esito reale di `ESP_GAP_BLE_ADV_START_COMPLETE` (`[ble] adv start status=0 running=1`), non un flag ottimistico. Verificato da seconda radio: FFE0 visibile, GATT connesso, FFE1 leggibile, advertising riavviato dopo disconnessione.
 
 ### Fase C — VHCI raw (HCI/L2CAP diretto)
 

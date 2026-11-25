@@ -131,6 +131,10 @@ static BLECharacteristic *pChr = nullptr;
 static volatile bool bleConnected = false;
 static volatile uint16_t bleConnId = 0;
 static volatile bool bleAdvRunning = false;
+static volatile uint8_t bleAdvPending = 0;
+static volatile bool bleAdvDataDone = false;
+static volatile bool bleAdvRspDone = false;
+static void bleAdvBridgeStart();
 
 // BT Classic
 struct BtDev { uint8_t bda[6]; int8_t rssi; char name[33]; };
@@ -245,8 +249,7 @@ class SrvCb : public BLEServerCallbacks {
   void onDisconnect(BLEServer *s) override {
     bleConnected = false;
     Serial.println("[ble] disconnesso — riavvio advertising");
-    s->startAdvertising();
-    bleAdvRunning = true;
+    bleAdvBridgeStart();
   }
 };
 
@@ -1201,17 +1204,34 @@ static bool bleFloodStart(bool randAddr) {
   return true;
 }
 
-// ripristina l'advertising del bridge (FFE0) dopo il flood
-static void bleAdvRestore() {
-  esp_ble_gap_stop_advertising();
-  static const uint8_t adv[] = {0x02, 0x01, 0x06, 0x03, 0x03, 0xE0, 0xFF};
-  static const uint8_t rsp[] = {0x0F, 0x09, 'R','e','d','H','a','t','B','r','i','d','g','e','3','2'};
-  esp_ble_gap_config_adv_data_raw((uint8_t *)adv, sizeof(adv));
-  esp_ble_gap_config_scan_rsp_data_raw((uint8_t *)rsp, sizeof(rsp));
+// ===== Advertising del bridge sotto il nostro controllo =====
+// Bluedroid (BLEAdvertising) e' disattivato: registriamo noi il GAP callback,
+// quindi gestiamo la catena adv-data -> scan-rsp -> start a mano. Il flag
+// bleAdvRunning riflette l'esito reale di ESP_GAP_BLE_ADV_START_COMPLETE.
+static const uint8_t kBridgeAdv[] = {0x02, 0x01, 0x06, 0x03, 0x03, 0xE0, 0xFF};
+static const uint8_t kBridgeRsp[] = {0x0F, 0x09, 'R','e','d','H','a','t','B','r','i','d','g','e','3','2'};
+
+static void bleAdvGoBridge() {
+  if (!bleAdvPending) return;
+  bleAdvPending = 0;
   esp_ble_adv_params_t p;
   bleAdvParamsFast(p, false);
-  esp_ble_gap_start_advertising(&p);
-  bleAdvRunning = true;
+  esp_err_t rc = esp_ble_gap_start_advertising(&p);
+  Serial.printf("[ble] adv go rc=%d\n", (int)rc);
+}
+
+static void bleAdvBridgeStart() {
+  bleAdvPending = 1;
+  bleAdvDataDone = false;
+  bleAdvRspDone = false;
+  esp_ble_gap_stop_advertising();
+  esp_ble_gap_config_adv_data_raw((uint8_t *)kBridgeAdv, sizeof(kBridgeAdv));
+  esp_ble_gap_config_scan_rsp_data_raw((uint8_t *)kBridgeRsp, sizeof(kBridgeRsp));
+}
+
+// ripristina l'advertising del bridge (FFE0) dopo il flood
+static void bleAdvRestore() {
+  bleAdvBridgeStart();
 }
 
 static void bleFloodStop() {
@@ -1232,6 +1252,24 @@ static void bleGapCb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param
                   (int)param->ble_security.auth_cmpl.auth_mode);
   } else if (event == ESP_GAP_BLE_KEY_EVT) {
     Serial.printf("[ble] key type=%d\n", (int)param->ble_security.ble_key.key_type);
+  } else if (event == ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT) {
+    if (bleAdvPending) {
+      bleAdvDataDone = (param->adv_data_raw_cmpl.status == ESP_BT_STATUS_SUCCESS);
+      if (!bleAdvDataDone) { bleAdvPending = 0; Serial.printf("[ble] adv data fail status=%d\n", (int)param->adv_data_raw_cmpl.status); }
+      else if (bleAdvRspDone) bleAdvGoBridge();
+    }
+  } else if (event == ESP_GAP_BLE_SCAN_RSP_DATA_RAW_SET_COMPLETE_EVT) {
+    if (bleAdvPending) {
+      bleAdvRspDone = (param->scan_rsp_data_raw_cmpl.status == ESP_BT_STATUS_SUCCESS);
+      if (!bleAdvRspDone) { bleAdvPending = 0; Serial.printf("[ble] adv rsp fail status=%d\n", (int)param->scan_rsp_data_raw_cmpl.status); }
+      else if (bleAdvDataDone) bleAdvGoBridge();
+    }
+  } else if (event == ESP_GAP_BLE_ADV_START_COMPLETE_EVT) {
+    bleAdvRunning = (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS);
+    Serial.printf("[ble] adv start status=%d running=%d\n",
+                  (int)param->adv_start_cmpl.status, (int)bleAdvRunning);
+  } else if (event == ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT) {
+    bleAdvRunning = false;
   } else if (event == ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT) {
     if (bleScanning) esp_ble_gap_start_scanning(bleScanSecsLeft);
   } else if (event == ESP_GAP_BLE_SCAN_RESULT_EVT) {
@@ -2281,13 +2319,9 @@ void setup() {
   pChr->addDescriptor(new BLE2902());
   svc->start();
 
-  BLEAdvertising *adv = BLEDevice::getAdvertising();
-  adv->addServiceUUID(SERVICE_UUID);
-  adv->setScanResponse(true);
-  adv->setMinPreferred(0x06);
-  adv->setMaxPreferred(0x12);
-  BLEDevice::startAdvertising();
-  bleAdvRunning = true;
+  // Advertising raw gestito da noi (vedi bleGapCb): la libreria BLEAdvertising
+  // non e' affidabile quando registriamo il nostro GAP handler.
+  bleAdvBridgeStart();
 
   // GATTC (Fase B): conn flood + ATT probe
   esp_ble_gattc_register_callback(bleGattcCb);
