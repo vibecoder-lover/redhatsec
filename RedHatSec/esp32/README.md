@@ -98,13 +98,18 @@ esp -> app: [0x5A][len u16 LE][cmd][status][payload][crc8(1, 4+len)]
 | 0x50 | L2CAP connect flood | `[h lo][h hi][psm lo][psm hi][count]` → `[sent][h lo][h hi]` |
 | 0x51 | VHCI probe | → `[sendAvailable]` |
 | 0x52 | L2CAP raw | `[h lo][h hi][cid lo][cid hi][payload…]` → `[sent][available]` |
+| 0x53 | SDP attribute fuzz | `[h lo][h hi][cid lo][cid hi]` → `[ok][len lo][len hi]` (PDU 0x06, attr range 0x0000–0xFFFF) |
+| 0x54 | BNEP frame craft | `[h lo][h hi][cid lo][cid hi]` → `[ok][len lo][len hi]` (SETUP_CONN + UUID128 random) |
+| 0x55 | BlueBorne-class probe | `[h lo][h hi]` → `[ok][ident]` (L2CAP_INFO_REQ Extended Features su CID 0x0001) |
+| 0x56 | ultimo pacchetto | → hex del payload craftato |
 
 - Il controller gira in `CONFIG_BTDM_CTRL_HCI_MODE_VHCI=y`; `esp_vhci_host_send_packet` **esiste e funziona** (verificato: `available=1`, `raw send=1`).
 - I simboli non sono nel header Arduino: dichiarati `extern "C"` nello sketch.
 - Iniezione ACL raw **collide con lo stack Bluedroid**: la chiamata passa e il frame esce; con handle inesistente il controller lo scarta (`send=1`, nessun crash). Un frame con header ACL malformato (bug corretto) faceva invece riavviare l'host.
 - PSM parametrizzato: 0x0001 SDP, 0x0003 RFCOMM, 0x000F BNEP, 0x0004/0x0006 ATT — l'opcode 0x52 permette payload SDP attribute/BNEP craftati dall'app.
 - Limite fisico: PDU LL, KNOB/BIAS, SAE restano nel controller (non iniettabili); 5 GHz e 802.15.4 assenti.
-- Seriale: `A` probe VHCI, `!` invio ACL di prova su handle 0 (scartato dal controller, nessun riavvio).
+- Seriale: `A` probe VHCI, `!` invio ACL di prova su handle 0 (scartato dal controller, nessun riavvio), `$` ultimo pacchetto hex, `%` BlueBorne-class probe, `&` BNEP craft, `@` SDP attribute fuzz.
+- **Nota BR/EDR**: questi builder sono per L2CAP/SDP/BNEP su link BR/EDR. Il controller in BLE-only non ha AVL/ACL classici: il frame parte (`send=1`) ma il controller lo scarta se l'handle non esiste. Per l'esercizio reale serve un link BR/EDR (Fase D o dongle).
 
 #### Test end-to-end B/C (app ↔ ESP32)
 

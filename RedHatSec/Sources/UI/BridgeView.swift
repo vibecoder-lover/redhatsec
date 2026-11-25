@@ -318,6 +318,18 @@ struct BridgeView: View {
             }
             .disabled(!ble.connected)
 
+            HStack(spacing: 8) {
+                Button("SDP") { Task { await vhciSdp() } }
+                    .font(.system(size: 11, weight: .bold)).foregroundColor(.warn)
+                Button("BNEP") { Task { await vhciBnep() } }
+                    .font(.system(size: 11, weight: .bold)).foregroundColor(.warn)
+                Button("BLUEBORNE") { Task { await vhciBlueBorne() } }
+                    .font(.system(size: 11, weight: .bold)).foregroundColor(.bad)
+                Button("HEX") { Task { await vhciHex() } }
+                    .font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
+            }
+            .disabled(!ble.connected)
+
             if !faseBMsg.isEmpty {
                 Text(faseBMsg)
                     .font(.system(size: 10, design: .monospaced))
@@ -416,6 +428,39 @@ struct BridgeView: View {
             faseBMsg = "VHCI send \(av ? "disponibile" : "busy") · HCI/L2CAP raw pronto"
         } else {
             faseBMsg = "VHCI: comando rifiutato"
+        }
+    }
+
+    private func vhciSdp() async {
+        if let n = await ble.vhciSdp(handle: 0, cid: 0x0040) {
+            faseBMsg = "SDP attribute fuzz: \(n)B (PDU 0x06, attr 0x0000-0xFFFF)"
+        } else {
+            faseBMsg = "SDP: nessun ACL BR/EDR (serve link classico)"
+        }
+    }
+
+    private func vhciBnep() async {
+        if let n = await ble.vhciBnep(handle: 0, cid: 0x0040) {
+            faseBMsg = "BNEP craft: \(n)B (SETUP_CONN, UUID128 random)"
+        } else {
+            faseBMsg = "BNEP: nessun ACL BR/EDR (serve link classico)"
+        }
+    }
+
+    private func vhciBlueBorne() async {
+        if await ble.vhciBlueBorne(handle: 0) {
+            faseBMsg = "BlueBorne-class: L2CAP info req Extended Features inviata"
+        } else {
+            faseBMsg = "BlueBorne: invio rifiutato (serve ACL BR/EDR)"
+        }
+    }
+
+    private func vhciHex() async {
+        let p = await ble.vhciLastPacket()
+        if p.isEmpty {
+            faseBMsg = "ultimo pacchetto: vuoto"
+        } else {
+            faseBMsg = "last \(p.count)B · " + p.map { String(format: "%02X", $0) }.joined()
         }
     }
 

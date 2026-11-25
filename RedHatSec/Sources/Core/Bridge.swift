@@ -66,6 +66,10 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         case vhciL2cap = 0x50
         case vhciProbe = 0x51
         case vhciRaw = 0x52
+        case vhciSdp = 0x53
+        case vhciBnep = 0x54
+        case vhciBlueBorne = 0x55
+        case vhciLast = 0x56
     }
 
     struct BTDevice: Identifiable {
@@ -640,6 +644,49 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         log("VHCI raw: \(r.0 == 0 ? "inviato" : "rifiutato") (\(payload.count)B, cid 0x\(String(cid, radix: 16)))")
         return r.0 == 0
     }
+
+    func vhciSdp(handle: UInt16, cid: UInt16) async -> Int? {
+        guard connected else { return nil }
+        let p: [UInt8] = [UInt8(handle & 0xFF), UInt8(handle >> 8), UInt8(cid & 0xFF), UInt8(cid >> 8)]
+        guard let r = await sendAwait(.vhciSdp, payload: p, timeout: 6) else { return nil }
+        let d = [UInt8](r.1)
+        guard r.0 == 0, d.count >= 3, d[0] != 0 else {
+            log("VHCI SDP: invio rifiutato")
+            return nil
+        }
+        let n = Int(d[1]) | Int(d[2]) << 8
+        log("VHCI SDP attr fuzz: \(n)B inviati (handle 0x\(String(handle, radix: 16)))")
+        return n
+    }
+
+    func vhciBnep(handle: UInt16, cid: UInt16) async -> Int? {
+        guard connected else { return nil }
+        let p: [UInt8] = [UInt8(handle & 0xFF), UInt8(handle >> 8), UInt8(cid & 0xFF), UInt8(cid >> 8)]
+        guard let r = await sendAwait(.vhciBnep, payload: p, timeout: 6) else { return nil }
+        let d = [UInt8](r.1)
+        guard r.0 == 0, d.count >= 3, d[0] != 0 else {
+            log("VHCI BNEP: invio rifiutato")
+            return nil
+        }
+        let n = Int(d[1]) | Int(d[2]) << 8
+        log("VHCI BNEP craft: \(n)B inviati (UUID128 random)")
+        return n
+    }
+
+    func vhciBlueBorne(handle: UInt16) async -> Bool {
+        guard connected else { return false }
+        let p: [UInt8] = [UInt8(handle & 0xFF), UInt8(handle >> 8)]
+        guard let r = await sendAwait(.vhciBlueBorne, payload: p, timeout: 6) else { return false }
+        let ok = r.0 == 0
+        log("VHCI BlueBorne-class: L2CAP info req \(ok ? "inviata" : "rifiutata")")
+        return ok
+    }
+
+    func vhciLastPacket() async -> [UInt8] {
+        guard connected, let r = await sendAwait(.vhciLast, timeout: 6) else { return [] }
+        return [UInt8](r.1)
+    }
+
 
     private func parseHandshake(_ p: [UInt8]) -> Handshake? {
         var i = 0
