@@ -116,11 +116,13 @@ esp -> app: [0x5A][len u16 LE][cmd][status][payload][crc8(1, 4+len)]
 Serve un periferico BLE reale: l'app stessa lo fa.
 
 1. Bridge → BLE offensive → **iOS PERIPHERAL**: pubblica servizio `FFF0` + caratteristica `FFF1` come "RHS-Test".
-2. **SCAN BLE** (5 s) → nella lista compare `RHS-Test`; tap per impostarlo come target (MAC + type).
-3. **CONN** → `[ble] open status=0 conn_id=… n=1`; **PROBE** → richieste ATT su handle casuali.
-4. **SMP** → `[ble] auth cmpl ok=1 key_present=1` (Just Works legacy, mode 0).
+2. **SCAN BLE** (5 s) → nella lista compare `RHS-Test`; l'app lo auto-seleziona (o tap per sceglierlo). Non selezionare device senza nome: gli advertiser random non connettibili danno `open status=133`.
+3. **CONN** → `[ble] open status=0 conn_id=… n=1`; **PROBE** → `probe sent=N` (richieste ATT reali, `rxErr` conta le read fallite).
+4. **SMP** → `smp rc=0` poi `auth cmpl ok=0 fail=0x55` e `disc reason=0x13`: un `CBPeripheralManager` nudo **rifiuta** il pairing legacy Just Works e iOS chiude il link. È il comportamento atteso; per un pairing completo serve una periferica con callback di sicurezza (o bond reale).
 5. **MTU** → `[ble] mtu=…`; **FUZZ** → **STATS** mostra `ticks/ok/fail/rx/rxErr`.
 6. **VHCI** → `available=1` (con un ACL vivo: L2CAP connect flood su PSM 0x0001/0x0003/0x000F).
+
+Verificato end-to-end su hardware: `open status=0 conns=1`, `probe sent=4`, `rxErr=4`, `disc reason=0x13` dopo SMP.
 
 Seriale equivalente: `W5` → `M0` → `P0` → `V8` → `U0`/`U5` → `Y`.
 

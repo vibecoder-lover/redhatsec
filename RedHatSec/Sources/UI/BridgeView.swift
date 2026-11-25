@@ -362,8 +362,14 @@ struct BridgeView: View {
 
     private func connFlood() async {
         guard !connMac.isEmpty else { faseBMsg = "MAC mancante"; return }
-        if let r = await ble.bleConnFlood(mac: connMac, addrType: connType, count: 2) {
-            faseBMsg = "conn: accepted=\(r.accepted) attive=\(r.conns) rc=\(r.rc)"
+        let label = faseBHits.first(where: { $0.mac.caseInsensitiveCompare(connMac) == .orderedSame })?.name ?? ""
+        if let r = await ble.bleConnFlood(mac: connMac, addrType: connType, count: 1) {
+            let who = label.isEmpty ? connMac : "\(label) \(connMac)"
+            if r.conns > 0 || r.accepted > 0 {
+                faseBMsg = "conn \(who): accepted=\(r.accepted) attive=\(r.conns) rc=\(r.rc)"
+            } else {
+                faseBMsg = "conn \(who): rifiutata rc=\(r.rc) — target non connettibile o RHS-Test non selezionato"
+            }
         } else {
             faseBMsg = "conn: comando rifiutato"
         }
@@ -382,7 +388,17 @@ struct BridgeView: View {
         if await ble.bleScan(secs: 5) {
             try? await Task.sleep(nanoseconds: 6_000_000_000)
             faseBHits = await ble.bleScanList()
-            faseBMsg = "scan: \(faseBHits.count) device"
+            if let t = faseBHits.first(where: { $0.name.uppercased().contains("RHS") }) {
+                connMac = t.mac
+                connType = t.type
+                faseBMsg = "scan: \(faseBHits.count) device · target \(t.name) \(t.mac)"
+            } else if let t = faseBHits.first(where: { !$0.name.isEmpty }) {
+                connMac = t.mac
+                connType = t.type
+                faseBMsg = "scan: \(faseBHits.count) device · target \(t.name) (nessun RHS-Test)"
+            } else {
+                faseBMsg = "scan: \(faseBHits.count) device · nessun nome (attiva iOS PERIPHERAL)"
+            }
         } else {
             faseBMsg = "scan: comando rifiutato"
         }
@@ -391,7 +407,7 @@ struct BridgeView: View {
 
     private func smpProbe() async {
         if let r = await ble.bleSmpProbe(mode: 0) {
-            faseBMsg = r.rc == 0 ? "SMP Just Works avviato (mode 0)" : "SMP rc=\(r.rc) (link assente)"
+            faseBMsg = r.rc == 0 ? "SMP avviato: iOS nudo rifiuta il pairing legacy e chiude (reason 0x13)" : "SMP rc=\(r.rc) (link assente)"
         } else {
             faseBMsg = "SMP: comando rifiutato"
         }
