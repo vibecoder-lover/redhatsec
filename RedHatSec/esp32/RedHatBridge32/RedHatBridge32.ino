@@ -1265,9 +1265,14 @@ static void bleGapCb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param
       else if (bleAdvDataDone) bleAdvGoBridge();
     }
   } else if (event == ESP_GAP_BLE_ADV_START_COMPLETE_EVT) {
-    bleAdvRunning = (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS);
-    Serial.printf("[ble] adv start status=%d running=%d\n",
-                  (int)param->adv_start_cmpl.status, (int)bleAdvRunning);
+    bool ok = (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS);
+    if (!bleFloodOn) {
+      bleAdvRunning = ok;
+      Serial.printf("[ble] adv start status=%d running=%d\n",
+                    (int)param->adv_start_cmpl.status, (int)bleAdvRunning);
+    } else if (!ok) {
+      Serial.printf("[ble] flood adv start fail status=%d\n", (int)param->adv_start_cmpl.status);
+    }
   } else if (event == ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT) {
     bleAdvRunning = false;
   } else if (event == ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT) {
