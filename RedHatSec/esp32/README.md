@@ -19,6 +19,7 @@ arduino-cli upload  -p COM<N> --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app
 ## Requisiti radio
 
 - Hotspot iPhone **2.4 GHz** ("Massima compatibilita'"): STA `Hexxeted` / `lwae9180` nell'ino.
+- **STA solo su richiesta** (`staWanted=false`): l'ESP32 non fa join all'avvio. Con zero client iOS spegne da solo il Personal Hotspot dopo ~90s: è il telefono, non il firmware. Per tenerlo su bisogna restare connessi (`J`/0x08) o avere un secondo client. Non fare storm BLE e STA Wi-Fi insieme (una sola radio 2.4 GHz).
 - BLE + BT Classic insieme (BTDM): inquiry/SDP occupano il controller, la BLE resta su ma con latenza.
 - Una sola radio Wi-Fi: deauth/PMKID/beacon sono rifiutati con rogue AP attivo (l'app lo spegne da sola).
 
@@ -89,7 +90,8 @@ esp -> app: [0x5A][len u16 LE][cmd][status][payload][crc8(1, 4+len)]
 - **SMP downgrade**: mode 0 = Just Works legacy (`ESP_LE_AUTH_BOND`, IO cap none, key size 7–16), 1 = SC only, 2 = SC MITM, 3 = legacy MITM; esito reale in `[ble] auth cmpl ok=… fail=…`.
 - **Fuzz tipi**: 0 read handle casuale, 1 write 20/64B random, 2 MTU req, 3 service search, 4 long write 23–512B, 5 payload table malformata (Write Request 0x12, Write Cmd 0x52, Prepare 0x16, MTU 0, Read Blob 0x08, Read By Group Type 0x10).
 - **Scan**: GAP raw asincrono (non blocca il loop), attivo, dedup per BDA, nome da adv/scan-rsp.
-- Seriale: `W[secs]` scan async, `M<n>` connect all'n-esimo hit, `K<12hex>[type]` connect a MAC, `P[mode]` SMP, `U[type]` fuzz, `V[count]` MTU burst, `Y` stats fuzz, `Z` fuzz off, `F/G/C/T/H` come sopra.
+- Seriale: `W[secs]` scan async, `w` stop scan forzato, `.` stato (scan/adv/conn/gattc/flood), `M<n>` connect all'n-esimo hit, `K<12hex>[type]` connect a MAC, `P[mode]` SMP, `U[type]` fuzz, `V[count]` MTU burst, `Y` stats fuzz, `Z` fuzz off, `F/G/C/T/H` come sopra.
+- **Scan robusta**: se una scan resta appesa (evento di completamento mai arrivato) il watchdog la chiude dopo `secs+5s`; una nuova `W` durante una scan attiva risponde `busy` invece di essere ignorata, e dopo il timeout riparte. Evita il "resta in ricerca BLE".
 
 ### Fase C — VHCI raw (HCI/L2CAP diretto)
 

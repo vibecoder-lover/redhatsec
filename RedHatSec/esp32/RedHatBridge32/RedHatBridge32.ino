@@ -130,6 +130,7 @@ static BLEServer *pServer = nullptr;
 static BLECharacteristic *pChr = nullptr;
 static volatile bool bleConnected = false;
 static volatile uint16_t bleConnId = 0;
+static volatile bool bleAdvRunning = false;
 
 // BT Classic
 struct BtDev { uint8_t bda[6]; int8_t rssi; char name[33]; };
@@ -237,6 +238,7 @@ static int ringPop(uint8_t *out, int max) {
 class SrvCb : public BLEServerCallbacks {
   void onConnect(BLEServer *s, esp_ble_gatts_cb_param_t *param) override {
     bleConnected = true;
+    bleAdvRunning = false;
     bleConnId = param->connect.conn_id;
     Serial.println("[ble] iPhone connesso");
   }
@@ -244,6 +246,7 @@ class SrvCb : public BLEServerCallbacks {
     bleConnected = false;
     Serial.println("[ble] disconnesso — riavvio advertising");
     s->startAdvertising();
+    bleAdvRunning = true;
   }
 };
 
@@ -1122,6 +1125,7 @@ static BleScanHit bleHits[BLE_SCAN_MAX];
 static uint8_t bleHitN = 0;
 static bool bleScanning = false;
 static uint16_t bleScanSecsLeft = 0;
+static uint32_t bleScanStartMs = 0;
 
 static int bleHitFind(const uint8_t *bda) {
   for (int i = 0; i < bleHitN; i++) if (memcmp(bleHits[i].bda, bda, 6) == 0) return i;
@@ -1190,6 +1194,7 @@ static bool bleFloodStart(bool randAddr) {
   if (bleFloodOn) return true;
   bleFloodRandAddr = randAddr;
   bleFloodOn = true;
+  bleAdvRunning = false;
   bleFloodTicks = 0;
   bleFloodLast = 0;
   Serial.printf("[ble] adv flood on rand=%d\n", (int)randAddr);
@@ -1206,6 +1211,7 @@ static void bleAdvRestore() {
   esp_ble_adv_params_t p;
   bleAdvParamsFast(p, false);
   esp_ble_gap_start_advertising(&p);
+  bleAdvRunning = true;
 }
 
 static void bleFloodStop() {
@@ -1426,10 +1432,21 @@ static void bleFuzzTick() {
   bleFuzzTicks++;
 }
 
-static void bleScanAsyncStart(uint16_t secs) {
-  if (bleScanning) return;
+static bool bleScanAsyncStart(uint16_t secs) {
+  uint32_t now = millis();
+  if (bleScanning) {
+    uint32_t budget = (uint32_t)bleScanSecsLeft * 1000 + 2500;
+    if (now - bleScanStartMs < budget) {
+      Serial.printf("[blescan] busy %us\n", bleScanSecsLeft);
+      return false;
+    }
+    Serial.println("[blescan] stale, restart");
+    esp_ble_gap_stop_scanning();
+    bleScanning = false;
+  }
   bleHitN = 0;
   bleScanSecsLeft = secs ? secs : 4;
+  bleScanStartMs = now;
   esp_ble_scan_params_t sp;
   memset(&sp, 0, sizeof(sp));
   sp.scan_type = BLE_SCAN_TYPE_ACTIVE;
@@ -1440,7 +1457,26 @@ static void bleScanAsyncStart(uint16_t secs) {
   sp.scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE;
   bleScanning = true;
   esp_err_t rc = esp_ble_gap_set_scan_params(&sp);
+  if (rc != ESP_OK) bleScanning = false;
   Serial.printf("[blescan] start %us rc=%d\n", bleScanSecsLeft, (int)rc);
+  return rc == ESP_OK;
+}
+
+static void bleScanAsyncStop() {
+  if (!bleScanning) return;
+  esp_ble_gap_stop_scanning();
+  bleScanning = false;
+  Serial.println("[blescan] forced stop");
+}
+
+static void bleScanWatchdog() {
+  if (!bleScanning) return;
+  uint32_t budget = (uint32_t)bleScanSecsLeft * 1000 + 5000;
+  if (millis() - bleScanStartMs > budget) {
+    esp_ble_gap_stop_scanning();
+    bleScanning = false;
+    Serial.printf("[blescan] watchdog stop n=%u\n", bleHitN);
+  }
 }
 
 // --- Fase C: VHCI raw (bypass Bluedroid → controller) ---
@@ -2110,8 +2146,8 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
     }
 
     case 0x48: {  // ble scan start [secs]
-      bleScanAsyncStart(plen > 0 ? pl[0] : 5);
-      sendFrame(0x48, 0x00, (const uint8_t *)"scan start", 10);
+      bool ok = bleScanAsyncStart(plen > 0 ? pl[0] : 5);
+      sendFrame(0x48, ok ? 0x00 : 0x02, (const uint8_t *)(ok ? "scan start" : "scan busy"), ok ? 10 : 9);
       break;
     }
 
@@ -2251,6 +2287,7 @@ void setup() {
   adv->setMinPreferred(0x06);
   adv->setMaxPreferred(0x12);
   BLEDevice::startAdvertising();
+  bleAdvRunning = true;
 
   // GATTC (Fase B): conn flood + ATT probe
   esp_ble_gattc_register_callback(bleGattcCb);
@@ -2308,6 +2345,7 @@ void loop() {
   capTick();
   bleFloodTick();
   bleFuzzTick();
+  bleScanWatchdog();
 
   // smoke test seriale: S=start hop, R=start fisso, Q=stop, X=stats, D=dump sessioni
   static String serCmd;
@@ -2351,6 +2389,15 @@ void loop() {
       else if (serCmd == "T") {
         int s = bleAttProbe(4);
         Serial.printf("[ble] probe sent=%d conns=%d\n", s, bleConnCount);
+      }
+      else if (serCmd == ".") {
+        Serial.printf("[state] scan=%d adv=%d conn=%d gattc=%d flood=%d\n",
+                      (int)bleScanning, (int)bleAdvRunning, (int)bleConnected,
+                      (int)bleGattcReady, (int)bleFloodOn);
+      }
+      else if (serCmd == "w") {
+        bleScanAsyncStop();
+        Serial.printf("[blescan] scan=%d\n", (int)bleScanning);
       }
       else if (serCmd.startsWith("W")) {
         uint16_t secs = serCmd.length() > 1 ? (uint16_t)serCmd.substring(1).toInt() : 5;
