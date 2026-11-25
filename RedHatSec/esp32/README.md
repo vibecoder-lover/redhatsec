@@ -105,3 +105,16 @@ esp -> app: [0x5A][len u16 LE][cmd][status][payload][crc8(1, 4+len)]
 - PSM parametrizzato: 0x0001 SDP, 0x0003 RFCOMM, 0x000F BNEP, 0x0004/0x0006 ATT — l'opcode 0x52 permette payload SDP attribute/BNEP craftati dall'app.
 - Limite fisico: PDU LL, KNOB/BIAS, SAE restano nel controller (non iniettabili); 5 GHz e 802.15.4 assenti.
 - Seriale: `A` probe VHCI, `!` invio ACL di prova su handle 0 (scartato dal controller, nessun riavvio).
+
+#### Test end-to-end B/C (app ↔ ESP32)
+
+Serve un periferico BLE reale: l'app stessa lo fa.
+
+1. Bridge → BLE offensive → **iOS PERIPHERAL**: pubblica servizio `FFF0` + caratteristica `FFF1` come "RHS-Test".
+2. **SCAN BLE** (5 s) → nella lista compare `RHS-Test`; tap per impostarlo come target (MAC + type).
+3. **CONN** → `[ble] open status=0 conn_id=… n=1`; **PROBE** → richieste ATT su handle casuali.
+4. **SMP** → `[ble] auth cmpl ok=1 key_present=1` (Just Works legacy, mode 0).
+5. **MTU** → `[ble] mtu=…`; **FUZZ** → **STATS** mostra `ticks/ok/fail/rx/rxErr`.
+6. **VHCI** → `available=1` (con un ACL vivo: L2CAP connect flood su PSM 0x0001/0x0003/0x000F).
+
+Seriale equivalente: `W5` → `M0` → `P0` → `V8` → `U0`/`U5` → `Y`.

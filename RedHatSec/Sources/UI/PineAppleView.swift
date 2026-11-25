@@ -27,6 +27,7 @@ struct PineAppleView: View {
     @State private var sniffing = false
     @State private var capBusy = false
     @State private var capPcapURL: URL?
+    @State private var capCh = 0
 
     private let exploits = ExploitLibrary.all
 
@@ -261,6 +262,13 @@ struct PineAppleView: View {
             SectionHeader(title: "Capture Wi-Fi (Fase A)", icon: "dot.radiowaves.left.and.right", color: .ok)
             Text("promiscuous + channel hop: EAPOL M1–M4, PMKID (KDE) e frame WPS/PMKID passivi. Con rogue AP attivo resta sul canale dell'AP. Export .pcap apribile con aircrack-ng.")
                 .font(.system(size: 10)).foregroundColor(.dim)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    capChip("HOP", 0)
+                    ForEach(1...13, id: \.self) { n in capChip("\(n)", n) }
+                }
+            }
+            .disabled(sniffing || capBusy)
             HStack(spacing: 10) {
                 PineButton(label: sniffing ? "STOP + DUMP" : "AVVIA SNIFF",
                            color: sniffing ? .warn : .redHat,
@@ -300,6 +308,20 @@ struct PineAppleView: View {
         }
     }
 
+    private func capChip(_ label: String, _ ch: Int) -> some View {
+        Button {
+            capCh = ch
+            Haptics.tap()
+        } label: {
+            Text(label)
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 8).fill(capCh == ch ? Color.ok.opacity(0.25) : Color(hex: 0x070709)))
+                .foregroundColor(capCh == ch ? .ok : .dim)
+        }
+        .buttonStyle(ScaleButton())
+    }
+
     private func toggleSniff() async {
         guard ble.connected else { push("capture: serve ESP32 in BLE"); return }
         capBusy = true
@@ -308,7 +330,10 @@ struct PineAppleView: View {
             sniffing = false
             _ = await ble.sniffDump()
         } else {
-            if await ble.sniffStart(hop: true) { sniffing = true }
+            if await ble.sniffStart(hop: capCh == 0, channel: capCh) {
+                sniffing = true
+                push(capCh == 0 ? "sniff su hop 1-13" : "sniff pinnato su canale \(capCh)")
+            }
         }
         capBusy = false
     }
