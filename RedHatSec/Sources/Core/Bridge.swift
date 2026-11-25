@@ -57,6 +57,15 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         case bleConnFlood = 0x41
         case bleAttProbe = 0x42
         case bleStormStop = 0x43
+        case bleSmpProbe = 0x44
+        case bleFuzz = 0x45
+        case bleMtuBurst = 0x46
+        case bleFuzzStats = 0x47
+        case bleScan = 0x48
+        case bleScanList = 0x49
+        case vhciL2cap = 0x50
+        case vhciProbe = 0x51
+        case vhciRaw = 0x52
     }
 
     struct BTDevice: Identifiable {
@@ -451,12 +460,15 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
         return p[o..<o+n].map { String(format: "%02x", $0) }.joined()
     }
 
-    func sniffStart(hop: Bool = true) async -> Bool {
+    func sniffStart(hop: Bool = true, channel: Int = 0) async -> Bool {
         guard connected else { return false }
-        let h = hop && !rogueOn
-        let r = await sendAwait(.sniffStart, payload: [h ? 1 : 0], timeout: 6)
+        let ch = (channel >= 1 && channel <= 14) ? UInt8(channel) : 0
+        let h = hop && ch == 0 && !rogueOn
+        var payload: [UInt8] = [h ? 1 : 0]
+        if ch != 0 { payload.append(ch) }
+        let r = await sendAwait(.sniffStart, payload: payload, timeout: 6)
         let ok = r?.0 == 0
-        log(ok ? "sniff EAPOL avviato (\(h ? "hop 1-13" : "canale fisso"))" : "sniff rifiutato (radio busy)")
+        log(ok ? "sniff EAPOL avviato (\(h ? "hop 1-13" : "canale \(ch == 0 ? "fisso" : String(ch))"))" : "sniff rifiutato (radio busy)")
         return ok
     }
 
@@ -528,6 +540,104 @@ final class BridgeManager: NSObject, ObservableObject, CBCentralManagerDelegate,
     func bleStormStop() async -> Bool {
         guard connected, let r = await sendAwait(.bleStormStop, timeout: 6) else { return false }
         log("BLE storm stop \(r.0 == 0 ? "ok" : "fail")")
+        return r.0 == 0
+    }
+
+    // MARK: Fase B.2/B.3 — SMP probe, ATT fuzz, scan
+
+    func bleSmpProbe(mode: Int = 0) async -> (mode: Int, rc: Int)? {
+        guard connected, let r = await sendAwait(.bleSmpProbe, payload: [UInt8(clamping: mode)], timeout: 6) else { return nil }
+        let p = [UInt8](r.1)
+        guard p.count >= 2 else { return nil }
+        let rc = p[1] == 0xFF ? -1 : Int(p[1])
+        log("SMP probe mode=\(p[0]) rc=\(rc)")
+        return (Int(p[0]), rc)
+    }
+
+    func bleFuzz(type: Int, on: Bool) async -> Bool {
+        guard connected, let r = await sendAwait(.bleFuzz, payload: [UInt8(clamping: type), on ? 1 : 0], timeout: 6) else { return false }
+        log("BLE fuzz type=\(type) \(on ? (r.0 == 0 ? "ON" : "rifiutato: no link") : "OFF")")
+        return r.0 == 0
+    }
+
+    func bleMtuBurst(count: Int = 8) async -> (ok: Int, conns: Int)? {
+        guard connected, let r = await sendAwait(.bleMtuBurst, payload: [UInt8(clamping: count)], timeout: 8) else { return nil }
+        let p = [UInt8](r.1)
+        guard p.count >= 2 else { return nil }
+        log("MTU burst ok=\(p[0]) link=\(p[1])")
+        return (Int(p[0]), Int(p[1]))
+    }
+
+    func bleFuzzStats() async -> (ticks: Int, ok: Int, fail: Int, rx: Int, rxErr: Int)? {
+        guard connected, let r = await sendAwait(.bleFuzzStats, timeout: 6) else { return nil }
+        let p = [UInt8](r.1)
+        guard p.count >= 10 else { return nil }
+        let v = (Int(p[0]) | Int(p[1]) << 8, Int(p[2]) | Int(p[3]) << 8,
+                 Int(p[4]) | Int(p[5]) << 8, Int(p[6]) | Int(p[7]) << 8,
+                 Int(p[8]) | Int(p[9]) << 8)
+        log("BLE fuzz stats ticks=\(v.0) ok=\(v.1) fail=\(v.2) rx=\(v.3) rxErr=\(v.4)")
+        return v
+    }
+
+    func bleScan(secs: Int = 5) async -> Bool {
+        guard connected, let r = await sendAwait(.bleScan, payload: [UInt8(clamping: secs)], timeout: 6) else { return false }
+        log("BLE scan avviato (\(secs)s)")
+        return r.0 == 0
+    }
+
+    func bleScanList() async -> [BleScanHit] {
+        guard connected, let r = await sendAwait(.bleScanList, timeout: 8) else { return [] }
+        let p = [UInt8](r.1)
+        guard let n = p.first else { return [] }
+        var out: [BleScanHit] = []
+        var i = 1
+        for _ in 0..<Int(n) {
+            guard i + 9 <= p.count else { break }
+            let mac = String(format: "%02X:%02X:%02X:%02X:%02X:%02X",
+                             p[i], p[i + 1], p[i + 2], p[i + 3], p[i + 4], p[i + 5])
+            let type = p[i + 6]
+            let rssi = Int(Int8(bitPattern: p[i + 7]))
+            let nl = Int(p[i + 8])
+            i += 9
+            guard i + nl <= p.count else { break }
+            let name = String(bytes: p[i..<i + nl], encoding: .utf8) ?? ""
+            i += nl
+            out.append(BleScanHit(mac: mac, type: type, rssi: rssi, name: name))
+        }
+        log("BLE scan list: \(out.count) device (scan \(r.0 == 1 ? "in corso" : "completato"))")
+        return out
+    }
+
+    // MARK: Fase C — VHCI raw (HCI/L2CAP diretto al controller)
+
+    func vhciProbe() async -> Bool? {
+        guard connected, let r = await sendAwait(.vhciProbe, timeout: 5) else { return nil }
+        let p = [UInt8](r.1)
+        let av = p.first.map { $0 != 0 } ?? false
+        log("VHCI send available=\(av ? 1 : 0)")
+        return av
+    }
+
+    func vhciL2capConnect(handle: UInt16, psm: UInt16, count: Int = 1) async -> Int? {
+        guard connected else { return nil }
+        let payload: [UInt8] = [UInt8(handle & 0xFF), UInt8(handle >> 8),
+                                UInt8(psm & 0xFF), UInt8(psm >> 8), UInt8(clamping: count)]
+        guard let r = await sendAwait(.vhciL2cap, payload: payload, timeout: 8) else { return nil }
+        let p = [UInt8](r.1)
+        guard r.0 == 0, let first = p.first else {
+            log("VHCI L2CAP: controller busy")
+            return nil
+        }
+        log("VHCI L2CAP connect: \(first)/\(count) su handle 0x\(String(handle, radix: 16)) psm 0x\(String(psm, radix: 16))")
+        return Int(first)
+    }
+
+    func vhciRaw(handle: UInt16, cid: UInt16, payload: [UInt8]) async -> Bool {
+        guard connected, payload.count <= 200 else { return false }
+        var p: [UInt8] = [UInt8(handle & 0xFF), UInt8(handle >> 8), UInt8(cid & 0xFF), UInt8(cid >> 8)]
+        p.append(contentsOf: payload)
+        guard let r = await sendAwait(.vhciRaw, payload: p, timeout: 6) else { return false }
+        log("VHCI raw: \(r.0 == 0 ? "inviato" : "rifiutato") (\(payload.count)B, cid 0x\(String(cid, radix: 16)))")
         return r.0 == 0
     }
 
@@ -841,6 +951,15 @@ extension String {
         }
         return out.count == count / 2 ? out : nil
     }
+}
+
+// Device visti dalla scan BLE dell'ESP32 (Fase B).
+struct BleScanHit: Identifiable, Equatable {
+    let id = UUID()
+    let mac: String
+    let type: UInt8
+    let rssi: Int
+    let name: String
 }
 
 // ===== Bridge TCP (ESP8266 transparent TCP<->UART) =====

